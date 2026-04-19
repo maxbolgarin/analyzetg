@@ -1,0 +1,652 @@
+"""Async SQLite repository.
+
+Thin wrapper around aiosqlite with typed methods per spec §4. Migrations are
+applied on connect; a service table `_migrations` tracks applied names.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator, Iterable, Sequence
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+
+from analyzetg.models import Message, Subscription, SyncState
+
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+
+
+def _utcnow() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _from_ts(val: Any) -> datetime | None:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    return datetime.fromisoformat(val)
+
+
+class Repo:
+    """Async repository. Construct with `await Repo.open(path)`."""
+
+    def __init__(self, conn: aiosqlite.Connection, path: Path) -> None:
+        self._conn = conn
+        self._path = path
+
+    @classmethod
+    async def open(cls, path: Path | str) -> Repo:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        conn = await aiosqlite.connect(p)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA synchronous=NORMAL")
+        repo = cls(conn, p)
+        await repo._apply_migrations()
+        return repo
+
+    async def close(self) -> None:
+        await self._conn.close()
+
+    async def _apply_migrations(self) -> None:
+        await self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMP)"
+        )
+        await self._conn.commit()
+        cur = await self._conn.execute("SELECT name FROM _migrations")
+        applied = {row["name"] async for row in cur}
+        await cur.close()
+        for script in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            if script.name in applied:
+                continue
+            sql = script.read_text(encoding="utf-8")
+            await self._conn.executescript(sql)
+            await self._conn.execute(
+                "INSERT INTO _migrations(name, applied_at) VALUES (?, ?)",
+                (script.name, _utcnow()),
+            )
+            await self._conn.commit()
+
+    # ------------------------------------------------------------------ chats
+
+    async def upsert_chat(
+        self,
+        chat_id: int,
+        kind: str,
+        title: str | None = None,
+        username: str | None = None,
+        linked_chat_id: int | None = None,
+    ) -> None:
+        now = _utcnow()
+        await self._conn.execute(
+            """
+            INSERT INTO chats(id, kind, title, username, linked_chat_id, first_seen_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                kind=excluded.kind,
+                title=COALESCE(excluded.title, chats.title),
+                username=COALESCE(excluded.username, chats.username),
+                linked_chat_id=COALESCE(excluded.linked_chat_id, chats.linked_chat_id),
+                updated_at=excluded.updated_at
+            """,
+            (chat_id, kind, title, username, linked_chat_id, now, now),
+        )
+        await self._conn.commit()
+
+    async def get_chat(self, chat_id: int) -> dict[str, Any] | None:
+        cur = await self._conn.execute("SELECT * FROM chats WHERE id=?", (chat_id,))
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def find_chat_by_username(self, username: str) -> dict[str, Any] | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM chats WHERE username = ? COLLATE NOCASE", (username,)
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def search_chats_by_title(self, fragment: str, limit: int = 50) -> list[dict[str, Any]]:
+        cur = await self._conn.execute(
+            "SELECT * FROM chats WHERE title LIKE ? COLLATE NOCASE LIMIT ?",
+            (f"%{fragment}%", limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    # ---------------------------------------------------------- subscriptions
+
+    async def upsert_subscription(self, sub: Subscription) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO subscriptions(chat_id, thread_id, title, source_kind, enabled,
+                start_from_msg_id, start_from_date, transcribe_voice, transcribe_videonote,
+                transcribe_video, added_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                title=excluded.title,
+                source_kind=excluded.source_kind,
+                enabled=excluded.enabled,
+                start_from_msg_id=COALESCE(excluded.start_from_msg_id, subscriptions.start_from_msg_id),
+                start_from_date=COALESCE(excluded.start_from_date, subscriptions.start_from_date),
+                transcribe_voice=excluded.transcribe_voice,
+                transcribe_videonote=excluded.transcribe_videonote,
+                transcribe_video=excluded.transcribe_video
+            """,
+            (
+                sub.chat_id,
+                sub.thread_id,
+                sub.title,
+                sub.source_kind,
+                int(sub.enabled),
+                sub.start_from_msg_id,
+                sub.start_from_date.isoformat() if sub.start_from_date else None,
+                int(sub.transcribe_voice),
+                int(sub.transcribe_videonote),
+                int(sub.transcribe_video),
+                (sub.added_at or datetime.now(UTC)).isoformat(),
+            ),
+        )
+        await self._conn.commit()
+
+    async def list_subscriptions(self, enabled_only: bool = False) -> list[Subscription]:
+        sql = "SELECT * FROM subscriptions"
+        if enabled_only:
+            sql += " WHERE enabled=1"
+        sql += " ORDER BY chat_id, thread_id"
+        cur = await self._conn.execute(sql)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [self._row_to_sub(r) for r in rows]
+
+    async def get_subscription(self, chat_id: int, thread_id: int = 0) -> Subscription | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM subscriptions WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return self._row_to_sub(row) if row else None
+
+    async def set_subscription_enabled(self, chat_id: int, thread_id: int, enabled: bool) -> None:
+        await self._conn.execute(
+            "UPDATE subscriptions SET enabled=? WHERE chat_id=? AND thread_id=?",
+            (int(enabled), chat_id, thread_id),
+        )
+        await self._conn.commit()
+
+    async def remove_subscription(
+        self, chat_id: int, thread_id: int, purge_messages: bool = False
+    ) -> None:
+        await self._conn.execute(
+            "DELETE FROM subscriptions WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id),
+        )
+        await self._conn.execute(
+            "DELETE FROM sync_state WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id),
+        )
+        if purge_messages:
+            if thread_id == 0:
+                await self._conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+            else:
+                await self._conn.execute(
+                    "DELETE FROM messages WHERE chat_id=? AND thread_id=?",
+                    (chat_id, thread_id),
+                )
+        await self._conn.commit()
+
+    @staticmethod
+    def _row_to_sub(row: aiosqlite.Row) -> Subscription:
+        return Subscription(
+            chat_id=row["chat_id"],
+            thread_id=row["thread_id"],
+            title=row["title"],
+            source_kind=row["source_kind"],
+            enabled=bool(row["enabled"]),
+            start_from_msg_id=row["start_from_msg_id"],
+            start_from_date=_from_ts(row["start_from_date"]),
+            transcribe_voice=bool(row["transcribe_voice"]),
+            transcribe_videonote=bool(row["transcribe_videonote"]),
+            transcribe_video=bool(row["transcribe_video"]),
+            added_at=_from_ts(row["added_at"]),
+        )
+
+    # --------------------------------------------------------------- messages
+
+    async def upsert_messages(self, msgs: Iterable[Message]) -> int:
+        rows = [self._msg_to_row(m) for m in msgs]
+        if not rows:
+            return 0
+        await self._conn.executemany(
+            """
+            INSERT INTO messages(chat_id, msg_id, thread_id, date, sender_id, sender_name,
+                text, reply_to, forward_from, media_type, media_doc_id, media_duration)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, msg_id) DO UPDATE SET
+                thread_id=excluded.thread_id,
+                date=excluded.date,
+                sender_id=excluded.sender_id,
+                sender_name=excluded.sender_name,
+                text=excluded.text,
+                reply_to=excluded.reply_to,
+                forward_from=excluded.forward_from,
+                media_type=COALESCE(excluded.media_type, messages.media_type),
+                media_doc_id=COALESCE(excluded.media_doc_id, messages.media_doc_id),
+                media_duration=COALESCE(excluded.media_duration, messages.media_duration)
+            """,
+            rows,
+        )
+        await self._conn.commit()
+        return len(rows)
+
+    @staticmethod
+    def _msg_to_row(m: Message) -> tuple:
+        return (
+            m.chat_id,
+            m.msg_id,
+            m.thread_id,
+            m.date.isoformat(),
+            m.sender_id,
+            m.sender_name,
+            m.text,
+            m.reply_to,
+            m.forward_from,
+            m.media_type,
+            m.media_doc_id,
+            m.media_duration,
+        )
+
+    async def iter_messages(
+        self,
+        chat_id: int,
+        thread_id: int | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[Message]:
+        sql = "SELECT * FROM messages WHERE chat_id=?"
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        if since:
+            sql += " AND date >= ?"
+            args.append(since.isoformat())
+        if until:
+            sql += " AND date <= ?"
+            args.append(until.isoformat())
+        sql += " ORDER BY date ASC, msg_id ASC"
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [self._row_to_msg(r) for r in rows]
+
+    @staticmethod
+    def _row_to_msg(row: aiosqlite.Row) -> Message:
+        date = _from_ts(row["date"])
+        assert date is not None
+        return Message(
+            chat_id=row["chat_id"],
+            msg_id=row["msg_id"],
+            date=date,
+            thread_id=row["thread_id"],
+            sender_id=row["sender_id"],
+            sender_name=row["sender_name"],
+            text=row["text"],
+            reply_to=row["reply_to"],
+            forward_from=row["forward_from"],
+            media_type=row["media_type"],
+            media_doc_id=row["media_doc_id"],
+            media_duration=row["media_duration"],
+            transcript=row["transcript"],
+            transcript_model=row["transcript_model"],
+        )
+
+    async def count_messages(
+        self, chat_id: int, thread_id: int | None = None
+    ) -> int:
+        sql = "SELECT COUNT(*) AS c FROM messages WHERE chat_id=?"
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row["c"]) if row else 0
+
+    async def set_message_transcript(
+        self, chat_id: int, msg_id: int, transcript: str, model: str
+    ) -> None:
+        await self._conn.execute(
+            "UPDATE messages SET transcript=?, transcript_model=? WHERE chat_id=? AND msg_id=?",
+            (transcript, model, chat_id, msg_id),
+        )
+        await self._conn.commit()
+
+    async def untranscribed_media(
+        self,
+        chat_id: int | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Message]:
+        sql = (
+            "SELECT * FROM messages WHERE media_doc_id IS NOT NULL AND transcript IS NULL"
+            " AND media_type IS NOT NULL"
+        )
+        args: list[Any] = []
+        if chat_id is not None:
+            sql += " AND chat_id=?"
+            args.append(chat_id)
+        if since:
+            sql += " AND date >= ?"
+            args.append(since.isoformat())
+        if until:
+            sql += " AND date <= ?"
+            args.append(until.isoformat())
+        sql += " ORDER BY date ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [self._row_to_msg(r) for r in rows]
+
+    async def redact_old_messages(
+        self,
+        retention_days: int,
+        chat_id: int | None = None,
+        keep_transcripts: bool = True,
+    ) -> int:
+        if retention_days <= 0:
+            return 0
+        sql = "UPDATE messages SET text=NULL"
+        if not keep_transcripts:
+            sql += ", transcript=NULL"
+        # datetime() parses both our stored ISO-T strings and SQLite's space-separated
+        # output, so we can compare them directly.
+        sql += " WHERE datetime(date) < datetime('now', ?)"
+        args: list[Any] = [f"-{retention_days} days"]
+        if chat_id is not None:
+            sql += " AND chat_id=?"
+            args.append(chat_id)
+        cur = await self._conn.execute(sql, args)
+        await self._conn.commit()
+        return cur.rowcount or 0
+
+    # ------------------------------------------------------------ sync_state
+
+    async def get_sync_state(self, chat_id: int, thread_id: int = 0) -> SyncState | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM sync_state WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return None
+        return SyncState(
+            chat_id=row["chat_id"],
+            thread_id=row["thread_id"],
+            last_msg_id=row["last_msg_id"],
+            last_synced_at=_from_ts(row["last_synced_at"]),
+        )
+
+    async def update_sync_state(
+        self, chat_id: int, thread_id: int, last_msg_id: int
+    ) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO sync_state(chat_id, thread_id, last_msg_id, last_synced_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                last_msg_id=MAX(sync_state.last_msg_id, excluded.last_msg_id),
+                last_synced_at=excluded.last_synced_at
+            """,
+            (chat_id, thread_id, last_msg_id, _utcnow()),
+        )
+        await self._conn.commit()
+
+    # ---------------------------------------------------------- transcripts
+
+    async def get_media_transcript(self, doc_id: int) -> dict[str, Any] | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM media_transcripts WHERE doc_id=?", (doc_id,)
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def put_media_transcript(
+        self,
+        doc_id: int,
+        transcript: str,
+        model: str,
+        duration_sec: int | None,
+        language: str | None,
+        cost_usd: float | None,
+        file_sha1: str | None = None,
+    ) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO media_transcripts(doc_id, file_sha1, duration_sec, transcript,
+                model, language, cost_usd, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                transcript=excluded.transcript,
+                model=excluded.model,
+                file_sha1=COALESCE(excluded.file_sha1, media_transcripts.file_sha1)
+            """,
+            (
+                doc_id,
+                file_sha1,
+                duration_sec,
+                transcript,
+                model,
+                language,
+                cost_usd,
+                _utcnow(),
+            ),
+        )
+        await self._conn.commit()
+
+    # ------------------------------------------------------------- analysis
+
+    async def cache_get(self, batch_hash: str) -> dict[str, Any] | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM analysis_cache WHERE batch_hash=?", (batch_hash,)
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def cache_put(
+        self,
+        batch_hash: str,
+        preset: str,
+        model: str,
+        prompt_version: str,
+        result: str,
+        prompt_tokens: int | None,
+        cached_tokens: int | None,
+        completion_tokens: int | None,
+        cost_usd: float | None,
+    ) -> None:
+        await self._conn.execute(
+            """
+            INSERT OR REPLACE INTO analysis_cache(batch_hash, preset, model, prompt_version,
+                result, prompt_tokens, cached_tokens, completion_tokens, cost_usd, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                batch_hash,
+                preset,
+                model,
+                prompt_version,
+                result,
+                prompt_tokens,
+                cached_tokens,
+                completion_tokens,
+                cost_usd,
+                _utcnow(),
+            ),
+        )
+        await self._conn.commit()
+
+    async def cache_purge(
+        self,
+        older_than_days: int | None = None,
+        preset: str | None = None,
+        model: str | None = None,
+    ) -> int:
+        sql = "DELETE FROM analysis_cache WHERE 1=1"
+        args: list[Any] = []
+        if older_than_days:
+            sql += " AND datetime(created_at) < datetime('now', ?)"
+            args.append(f"-{older_than_days} days")
+        if preset:
+            sql += " AND preset=?"
+            args.append(preset)
+        if model:
+            sql += " AND model=?"
+            args.append(model)
+        cur = await self._conn.execute(sql, args)
+        await self._conn.commit()
+        return cur.rowcount or 0
+
+    async def record_run(
+        self,
+        chat_id: int,
+        thread_id: int,
+        preset: str,
+        from_date: datetime | None,
+        to_date: datetime | None,
+        msg_count: int,
+        chunk_count: int,
+        batch_hashes: Sequence[str],
+        final_result: str,
+        total_cost_usd: float,
+    ) -> int:
+        cur = await self._conn.execute(
+            """
+            INSERT INTO analysis_runs(chat_id, thread_id, preset, from_date, to_date,
+                msg_count, chunk_count, batch_hashes, final_result, total_cost_usd, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                thread_id,
+                preset,
+                from_date.isoformat() if from_date else None,
+                to_date.isoformat() if to_date else None,
+                msg_count,
+                chunk_count,
+                json.dumps(list(batch_hashes)),
+                final_result,
+                total_cost_usd,
+                _utcnow(),
+            ),
+        )
+        await self._conn.commit()
+        return cur.lastrowid or 0
+
+    # ----------------------------------------------------------------- usage
+
+    async def log_usage(
+        self,
+        kind: str,
+        model: str,
+        prompt_tokens: int | None = None,
+        cached_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        audio_seconds: int | None = None,
+        cost_usd: float | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO usage_log(kind, model, prompt_tokens, cached_tokens, completion_tokens,
+                audio_seconds, cost_usd, context, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                kind,
+                model,
+                prompt_tokens,
+                cached_tokens,
+                completion_tokens,
+                audio_seconds,
+                cost_usd,
+                json.dumps(context) if context else None,
+                _utcnow(),
+            ),
+        )
+        await self._conn.commit()
+
+    async def stats_by(
+        self,
+        group_by: str = "preset",
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregate usage_log rows. `group_by`: chat, preset, model, day, kind."""
+        group_cols = {
+            "preset": "json_extract(context, '$.preset')",
+            "chat": "json_extract(context, '$.chat_id')",
+            "model": "model",
+            "day": "date(created_at)",
+            "kind": "kind",
+        }
+        col = group_cols.get(group_by, "model")
+        sql = f"""
+            SELECT {col} AS bucket,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(audio_seconds), 0) AS audio_seconds,
+                   COALESCE(SUM(cost_usd), 0) AS cost_usd
+            FROM usage_log
+            WHERE 1=1
+        """
+        args: list[Any] = []
+        if since:
+            sql += " AND created_at >= ?"
+            args.append(since.isoformat())
+        sql += " GROUP BY bucket ORDER BY cost_usd DESC"
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def cache_hit_rate(self, since: datetime | None = None) -> float:
+        sql = "SELECT SUM(cached_tokens) AS c, SUM(prompt_tokens) AS p FROM usage_log WHERE kind='chat'"
+        args: list[Any] = []
+        if since:
+            sql += " AND created_at >= ?"
+            args.append(since.isoformat())
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row or not row["p"]:
+            return 0.0
+        return float(row["c"] or 0) / float(row["p"])
+
+
+@asynccontextmanager
+async def open_repo(path: Path | str) -> AsyncIterator[Repo]:
+    repo = await Repo.open(path)
+    try:
+        yield repo
+    finally:
+        await repo.close()
