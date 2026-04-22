@@ -11,12 +11,17 @@ from analyzetg.analyzer.formatter import format_messages
 from analyzetg.models import Message
 
 
-def export_md(msgs: list[Message], *, title: str | None, output: Path) -> None:
+def render_md(msgs: list[Message], *, title: str | None) -> str:
+    """Build the markdown string without writing anything."""
     period: tuple[datetime | None, datetime | None] = (
         msgs[0].date if msgs else None,
         msgs[-1].date if msgs else None,
     )
-    rendered = format_messages(msgs, period=period, title=title)
+    return format_messages(msgs, period=period, title=title)
+
+
+def export_md(msgs: list[Message], *, title: str | None, output: Path) -> None:
+    rendered = render_md(msgs, title=title)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")
 

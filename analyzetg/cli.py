@@ -268,6 +268,17 @@ def analyze(
     model: str | None = typer.Option(None, "--model"),
     filter_model: str | None = typer.Option(None, "--filter-model"),
     output: Path | None = typer.Option(None, "--output", "-o"),
+    console_out: bool = typer.Option(
+        False,
+        "--console",
+        "-c",
+        help="Render the result in the terminal (pretty-printed markdown) instead of saving a file.",
+    ),
+    mark_read: bool = typer.Option(
+        False,
+        "--mark-read",
+        help="After analysis, advance Telegram's read marker to cover every processed message.",
+    ),
     no_cache: bool = typer.Option(False, "--no-cache"),
     include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
     min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
@@ -289,6 +300,8 @@ def analyze(
             model=model,
             filter_model=filter_model,
             output=output,
+            console_out=console_out,
+            mark_read=mark_read,
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -413,6 +426,17 @@ def dump(
         "--include-transcripts/--text-only",
         help="Include transcripts in the output (default on).",
     ),
+    console_out: bool = typer.Option(
+        False,
+        "--console",
+        "-c",
+        help="Print the dump to the terminal (pretty markdown) instead of saving a file.",
+    ),
+    mark_read: bool = typer.Option(
+        False,
+        "--mark-read",
+        help="After dumping, advance Telegram's read marker to cover every processed message.",
+    ),
 ) -> None:
     """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
@@ -436,6 +460,8 @@ def dump(
             join=join,
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
+            console_out=console_out,
+            mark_read=mark_read,
         )
     )
 

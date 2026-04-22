@@ -225,4 +225,7 @@ storage/media/*
 # Local plans / scratch
 /plans/
 /tmp/
- 
+
+# Analyze/dump reports — local output, don't commit.
+reports/*
+!reports/.gitkeep

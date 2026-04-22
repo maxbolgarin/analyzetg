@@ -19,7 +19,12 @@ from analyzetg.analyzer.pipeline import AnalysisOptions, AnalysisResult, run_ana
 from analyzetg.config import get_settings
 from analyzetg.db.repo import Repo, open_repo
 from analyzetg.tg.client import tg_client
-from analyzetg.tg.dialogs import UnreadDialog, get_unread_state, list_unread_dialogs
+from analyzetg.tg.dialogs import (
+    UnreadDialog,
+    get_unread_state,
+    list_unread_dialogs,
+    mark_as_read,
+)
 from analyzetg.tg.resolver import resolve
 from analyzetg.tg.sync import backfill
 from analyzetg.util.logging import get_logger
@@ -58,9 +63,11 @@ async def cmd_analyze(
     model: str | None,
     filter_model: str | None,
     output: Path | None,
-    no_cache: bool,
-    include_transcripts: bool,
-    min_msg_chars: int | None,
+    console_out: bool = False,
+    mark_read: bool = False,
+    no_cache: bool = False,
+    include_transcripts: bool = True,
+    min_msg_chars: int | None = None,
 ) -> None:
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
@@ -76,6 +83,8 @@ async def cmd_analyze(
                 model=model,
                 filter_model=filter_model,
                 output=output,
+                console_out=console_out,
+                mark_read=mark_read,
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
@@ -139,7 +148,14 @@ async def cmd_analyze(
         )
         result = await run_analysis(repo=repo, chat_id=chat_id, thread_id=thread_id, title=title, opts=opts)
 
-    _print_and_write(result, output=output)
+        if mark_read and result.msg_count > 0:
+            latest = await repo.get_max_msg_id(chat_id, thread_id or None)
+            if latest:
+                ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id or None)
+                if ok:
+                    console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+
+    _print_and_write(result, output=output, title=title, console_out=console_out)
 
 
 async def _determine_start(
@@ -199,9 +215,7 @@ async def _pull_history(
         local_max = await repo.get_max_msg_id(chat_id, thread_param, min_msg_id=floor)
         effective = max(floor, local_max or 0)
         if local_max and local_max > floor:
-            console.print(
-                f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]"
-            )
+            console.print(f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]")
         await backfill(
             client,
             repo,
@@ -230,6 +244,8 @@ async def _run_no_ref(
     model: str | None,
     filter_model: str | None,
     output: Path | None,
+    console_out: bool,
+    mark_read: bool,
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
@@ -248,7 +264,15 @@ async def _run_no_ref(
         console.print("[dim]Aborted.[/]")
         return
 
-    out_dir = _resolve_output_dir(output, len(unread))
+    if console_out:
+        out_dir = None
+    else:
+        out_dir = _resolve_output_dir(output, len(unread))
+        if out_dir is None:
+            # Default — save every chat's report, don't spam the terminal.
+            out_dir = Path("reports")
+            out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     for u in unread:
         console.print(f"\n[bold cyan]>>[/] {u.title or u.chat_id} ({u.unread_count} unread)")
         try:
@@ -272,8 +296,16 @@ async def _run_no_ref(
                 min_msg_id=u.read_inbox_max_id,
             )
             result = await run_analysis(repo=repo, chat_id=u.chat_id, thread_id=0, title=u.title, opts=opts)
-            per_file = out_dir / f"{u.chat_id}-{_slugify(u.title or 'chat')}.md" if out_dir else None
-            _print_and_write(result, output=per_file)
+            per_file = (
+                out_dir / f"{_slugify(u.title or str(u.chat_id))}-{preset}-{stamp}.md" if out_dir else None
+            )
+            _print_and_write(result, output=per_file, title=u.title, console_out=console_out)
+            if mark_read and result.msg_count > 0:
+                latest = await repo.get_max_msg_id(u.chat_id)
+                if latest:
+                    ok = await mark_as_read(client, u.chat_id, latest)
+                    if ok:
+                        console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
         except Exception as e:
             log.error("analyze.no_ref.chat_error", chat_id=u.chat_id, err=str(e)[:200])
             console.print(f"[red]Failed:[/] {e}")
@@ -318,18 +350,43 @@ def _slugify(text: str) -> str:
     return slug[:40] or "chat"
 
 
-def _print_and_write(result: AnalysisResult, *, output: Path | None) -> None:
+def _print_and_write(
+    result: AnalysisResult,
+    *,
+    output: Path | None,
+    title: str | None,
+    console_out: bool = False,
+) -> None:
     console.print(
         f"[bold cyan]Run[/] preset={result.preset} msgs={result.msg_count} "
         f"chunks={result.chunk_count} cache_hits={result.cache_hits}/"
         f"{result.cache_hits + result.cache_misses} cost=${result.total_cost_usd:.4f}"
     )
-    if output:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(result.final_result, encoding="utf-8")
-        console.print(f"[green]Written:[/] {output}")
-    else:
-        console.print(result.final_result)
+    if console_out:
+        from rich.markdown import Markdown
+        from rich.rule import Rule
+
+        console.print(Rule(title or "result", style="cyan"))
+        console.print(Markdown(result.final_result))
+        console.print(Rule(style="cyan"))
+        # If user *also* passed -o, save the file alongside the console output.
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(result.final_result, encoding="utf-8")
+            console.print(f"[green]Also saved:[/] {output}")
+        return
+
+    if output is None:
+        output = _default_output_path(title, result.preset)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(result.final_result, encoding="utf-8")
+    console.print(f"[green]Written:[/] {output}")
+
+
+def _default_output_path(title: str | None, preset: str) -> Path:
+    slug = _slugify(title or "chat")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    return Path("reports") / f"{slug}-{preset}-{stamp}.md"
 
 
 def _compute_window(
