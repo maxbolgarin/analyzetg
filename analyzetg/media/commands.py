@@ -47,9 +47,7 @@ async def cmd_transcribe(
     min_dur = settings.media.min_media_duration_sec
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        pending = await repo.untranscribed_media(
-            chat_id=chat, since=since_dt, until=until_dt, limit=limit
-        )
+        pending = await repo.untranscribed_media(chat_id=chat, since=since_dt, until=until_dt, limit=limit)
 
         def eligible(m) -> bool:
             if m.media_type == "voice" and not settings.media.transcribe_voice:
@@ -59,8 +57,7 @@ async def cmd_transcribe(
             if m.media_type == "video" and not settings.media.transcribe_video:
                 return False
             return not (
-                m.media_duration is not None
-                and (m.media_duration > max_dur or m.media_duration < min_dur)
+                m.media_duration is not None and (m.media_duration > max_dur or m.media_duration < min_dur)
             )
 
         eligible_msgs = [m for m in pending if eligible(m)]
@@ -89,12 +86,17 @@ async def cmd_transcribe(
                 async with sem:
                     try:
                         await transcribe_message(
-                            client=client, repo=repo, msg=m, model=model,
+                            client=client,
+                            repo=repo,
+                            msg=m,
+                            model=model,
                         )
                     except Exception as e:
                         log.error(
                             "transcribe.error",
-                            chat_id=m.chat_id, msg_id=m.msg_id, err=str(e)[:200],
+                            chat_id=m.chat_id,
+                            msg_id=m.msg_id,
+                            err=str(e)[:200],
                         )
                     done += 1
                     progress.update(task, advance=1)

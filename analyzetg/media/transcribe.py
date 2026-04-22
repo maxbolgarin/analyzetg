@@ -64,9 +64,7 @@ async def transcribe_message(
     # Dedup by document_id across chats
     cached = await repo.get_media_transcript(msg.media_doc_id)
     if cached:
-        await repo.set_message_transcript(
-            msg.chat_id, msg.msg_id, cached["transcript"], cached["model"]
-        )
+        await repo.set_message_transcript(msg.chat_id, msg.msg_id, cached["transcript"], cached["model"])
         return cached["transcript"]
 
     used_model = model or settings.openai.audio_model_default

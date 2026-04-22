@@ -52,7 +52,10 @@ def test_all_messages_are_kept() -> None:
     d = datetime(2026, 4, 1, 12, 0)
     msgs = [_msg(i, f"msg {i} " * 5, d + timedelta(seconds=i)) for i in range(50)]
     chunks = build_chunks(
-        msgs, model="gpt-4o", system_prompt="sys", user_overhead="ovh",
+        msgs,
+        model="gpt-4o",
+        system_prompt="sys",
+        user_overhead="ovh",
         output_budget=1000,
     )
     seen = {m.msg_id for c in chunks for m in c.messages}

@@ -60,9 +60,7 @@ async def resolve(
             title=entity_title(me),
             username=entity_username(me),
         )
-        return ResolvedRef(
-            chat_id=eid, kind="user", title=entity_title(me), username=entity_username(me)
-        )
+        return ResolvedRef(chat_id=eid, kind="user", title=entity_title(me), username=entity_username(me))
 
     # Direct numeric id
     if parsed.kind == "numeric_id" and parsed.chat_id is not None:
@@ -86,9 +84,7 @@ async def resolve(
         if chat is None:
             # ChatInvite (not-yet-joined) — can only join, can't read
             if not join:
-                raise RuntimeError(
-                    "Invite link requires joining the chat. Re-run with --join."
-                )
+                raise RuntimeError("Invite link requires joining the chat. Re-run with --join.")
             result = await client(ImportChatInviteRequest(parsed.invite_hash))
             chat = result.chats[0] if getattr(result, "chats", None) else None
             if chat is None:
@@ -134,9 +130,7 @@ async def resolve(
     )
 
 
-async def _record_and_return(
-    repo: Repo, entity: Any, parsed: ParsedLink
-) -> ResolvedRef:
+async def _record_and_return(repo: Repo, entity: Any, parsed: ParsedLink) -> ResolvedRef:
     eid = entity_id(entity)
     kind = _chat_kind(entity)
     title = entity_title(entity)
@@ -215,13 +209,14 @@ async def _fuzzy_resolve(
 
 def _candidate_to_ref(c: FuzzyCandidate) -> ResolvedRef:
     return ResolvedRef(
-        chat_id=c.chat_id, kind=c.kind, title=c.title, username=c.username  # type: ignore[arg-type]
+        chat_id=c.chat_id,
+        kind=c.kind,
+        title=c.title,
+        username=c.username,  # type: ignore[arg-type]
     )
 
 
-def rank_candidates(
-    query: str, items: list[tuple[int, str, str | None, str]]
-) -> list[FuzzyCandidate]:
+def rank_candidates(query: str, items: list[tuple[int, str, str | None, str]]) -> list[FuzzyCandidate]:
     """Pure-Python ranker used by tests.
 
     items: list of (chat_id, title, username, kind).
@@ -233,11 +228,11 @@ def rank_candidates(
         )
         for chat_id, title, username, kind in items
     }
-    results = process.extract(
-        query, choices, scorer=fuzz.WRatio, limit=len(choices) or 1
-    )
+    results = process.extract(query, choices, scorer=fuzz.WRatio, limit=len(choices) or 1)
     out: list[FuzzyCandidate] = []
     for _matched_str, score, key in results:
         chat_id, title, username, kind = key
-        out.append(FuzzyCandidate(chat_id=chat_id, title=title, username=username, kind=kind, score=int(score)))
+        out.append(
+            FuzzyCandidate(chat_id=chat_id, title=title, username=username, kind=kind, score=int(score))
+        )
     return out

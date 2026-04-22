@@ -31,16 +31,12 @@ def chat_cost(
     # Prompt total = (new) input + cached input. OpenAI reports p as total prompt incl cached.
     fresh = max(p - c, 0)
     return round(
-        (fresh / 1_000_000) * row.input
-        + (c / 1_000_000) * row.cached_input
-        + (o / 1_000_000) * row.output,
+        (fresh / 1_000_000) * row.input + (c / 1_000_000) * row.cached_input + (o / 1_000_000) * row.output,
         6,
     )
 
 
-def audio_cost(
-    model: str, seconds: int | None, *, settings: Settings | None = None
-) -> float | None:
+def audio_cost(model: str, seconds: int | None, *, settings: Settings | None = None) -> float | None:
     s = settings or get_settings()
     per_min = s.pricing.audio.get(model)
     if per_min is None:

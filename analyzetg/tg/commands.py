@@ -59,11 +59,12 @@ async def cmd_init() -> None:
             )
         else:
             console.print(
-                f"No .env file at [cyan]{env_path}[/]. "
-                "Copy .env.example to .env and fill in the values."
+                f"No .env file at [cyan]{env_path}[/]. Copy .env.example to .env and fill in the values."
             )
         # Also show what we actually see in env for debugging
-        seen = {k: bool(os.environ.get(k)) for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "OPENAI_API_KEY")}
+        seen = {
+            k: bool(os.environ.get(k)) for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "OPENAI_API_KEY")
+        }
         console.print(f"[dim]env seen: {seen}[/]")
         raise typer.Exit(1)
 
@@ -296,9 +297,7 @@ async def cmd_chats_add(
         # Note --last: we apply it by pulling last N messages immediately at next sync;
         # we record start_from_msg_id = (top_msg_id - last) after the first sync pass.
         if last is not None:
-            console.print(
-                f"[dim]--last {last} will take effect on next sync (start from newest-N).[/]"
-            )
+            console.print(f"[dim]--last {last} will take effect on next sync (start from newest-N).[/]")
             _hint_last_sync(subs_to_add, last)
 
 
@@ -339,11 +338,13 @@ async def cmd_chats_list(enabled_only: bool) -> None:
             t.add_column(col)
         for s in subs:
             transcribe = ",".join(
-                k for k, v in [
+                k
+                for k, v in [
                     ("voice", s.transcribe_voice),
                     ("vnote", s.transcribe_videonote),
                     ("video", s.transcribe_video),
-                ] if v
+                ]
+                if v
             )
             start = ""
             if s.start_from_msg_id is not None:

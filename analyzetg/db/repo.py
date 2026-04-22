@@ -107,9 +107,7 @@ class Repo:
         return dict(row) if row else None
 
     async def find_chat_by_username(self, username: str) -> dict[str, Any] | None:
-        cur = await self._conn.execute(
-            "SELECT * FROM chats WHERE username = ? COLLATE NOCASE", (username,)
-        )
+        cur = await self._conn.execute("SELECT * FROM chats WHERE username = ? COLLATE NOCASE", (username,))
         row = await cur.fetchone()
         await cur.close()
         return dict(row) if row else None
@@ -184,9 +182,7 @@ class Repo:
         )
         await self._conn.commit()
 
-    async def remove_subscription(
-        self, chat_id: int, thread_id: int, purge_messages: bool = False
-    ) -> None:
+    async def remove_subscription(self, chat_id: int, thread_id: int, purge_messages: bool = False) -> None:
         await self._conn.execute(
             "DELETE FROM subscriptions WHERE chat_id=? AND thread_id=?",
             (chat_id, thread_id),
@@ -272,6 +268,7 @@ class Repo:
         thread_id: int | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        min_msg_id: int | None = None,
     ) -> list[Message]:
         sql = "SELECT * FROM messages WHERE chat_id=?"
         args: list[Any] = [chat_id]
@@ -284,6 +281,9 @@ class Repo:
         if until:
             sql += " AND date <= ?"
             args.append(until.isoformat())
+        if min_msg_id is not None:
+            sql += " AND msg_id > ?"
+            args.append(min_msg_id)
         sql += " ORDER BY date ASC, msg_id ASC"
         cur = await self._conn.execute(sql, args)
         rows = await cur.fetchall()
@@ -311,9 +311,33 @@ class Repo:
             transcript_model=row["transcript_model"],
         )
 
-    async def count_messages(
-        self, chat_id: int, thread_id: int | None = None
-    ) -> int:
+    async def get_max_msg_id(
+        self,
+        chat_id: int,
+        thread_id: int | None = None,
+        min_msg_id: int | None = None,
+    ) -> int | None:
+        """Highest msg_id we already have for this chat/thread above `min_msg_id`.
+
+        Used by analyze/dump to skip refetching messages already in the DB.
+        Returns None if no rows match.
+        """
+        sql = "SELECT MAX(msg_id) AS m FROM messages WHERE chat_id=?"
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        if min_msg_id is not None:
+            sql += " AND msg_id > ?"
+            args.append(min_msg_id)
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row or row["m"] is None:
+            return None
+        return int(row["m"])
+
+    async def count_messages(self, chat_id: int, thread_id: int | None = None) -> int:
         sql = "SELECT COUNT(*) AS c FROM messages WHERE chat_id=?"
         args: list[Any] = [chat_id]
         if thread_id is not None:
@@ -324,9 +348,7 @@ class Repo:
         await cur.close()
         return int(row["c"]) if row else 0
 
-    async def set_message_transcript(
-        self, chat_id: int, msg_id: int, transcript: str, model: str
-    ) -> None:
+    async def set_message_transcript(self, chat_id: int, msg_id: int, transcript: str, model: str) -> None:
         await self._conn.execute(
             "UPDATE messages SET transcript=?, transcript_model=? WHERE chat_id=? AND msg_id=?",
             (transcript, model, chat_id, msg_id),
@@ -403,9 +425,7 @@ class Repo:
             last_synced_at=_from_ts(row["last_synced_at"]),
         )
 
-    async def update_sync_state(
-        self, chat_id: int, thread_id: int, last_msg_id: int
-    ) -> None:
+    async def update_sync_state(self, chat_id: int, thread_id: int, last_msg_id: int) -> None:
         await self._conn.execute(
             """
             INSERT INTO sync_state(chat_id, thread_id, last_msg_id, last_synced_at)
@@ -421,9 +441,7 @@ class Repo:
     # ---------------------------------------------------------- transcripts
 
     async def get_media_transcript(self, doc_id: int) -> dict[str, Any] | None:
-        cur = await self._conn.execute(
-            "SELECT * FROM media_transcripts WHERE doc_id=?", (doc_id,)
-        )
+        cur = await self._conn.execute("SELECT * FROM media_transcripts WHERE doc_id=?", (doc_id,))
         row = await cur.fetchone()
         await cur.close()
         return dict(row) if row else None
@@ -464,9 +482,7 @@ class Repo:
     # ------------------------------------------------------------- analysis
 
     async def cache_get(self, batch_hash: str) -> dict[str, Any] | None:
-        cur = await self._conn.execute(
-            "SELECT * FROM analysis_cache WHERE batch_hash=?", (batch_hash,)
-        )
+        cur = await self._conn.execute("SELECT * FROM analysis_cache WHERE batch_hash=?", (batch_hash,))
         row = await cur.fetchone()
         await cur.close()
         return dict(row) if row else None

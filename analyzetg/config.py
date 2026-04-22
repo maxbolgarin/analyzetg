@@ -115,7 +115,7 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
-            line = line[len("export "):].lstrip()
+            line = line[len("export ") :].lstrip()
         if "=" not in line:
             continue
         key, _, value = line.partition("=")
@@ -148,9 +148,7 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
         try:
             raw["telegram"]["api_id"] = int(api_id)
         except ValueError as e:
-            raise ValueError(
-                f"TELEGRAM_API_ID must be an integer, got: {api_id!r}"
-            ) from e
+            raise ValueError(f"TELEGRAM_API_ID must be an integer, got: {api_id!r}") from e
     if api_hash := os.environ.get("TELEGRAM_API_HASH"):
         raw["telegram"]["api_hash"] = api_hash
 

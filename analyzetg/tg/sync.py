@@ -202,18 +202,14 @@ async def sync_subscription(
             if len(batch) >= batch_size:
                 if not dry_run:
                     await repo.upsert_messages(batch)
-                    await repo.update_sync_state(
-                        sub.chat_id, sub.thread_id, max(m.msg_id for m in batch)
-                    )
+                    await repo.update_sync_state(sub.chat_id, sub.thread_id, max(m.msg_id for m in batch))
                 count += len(batch)
                 batch.clear()
                 await asyncio.sleep(0.1)
         if batch:
             if not dry_run:
                 await repo.upsert_messages(batch)
-                await repo.update_sync_state(
-                    sub.chat_id, sub.thread_id, max(m.msg_id for m in batch)
-                )
+                await repo.update_sync_state(sub.chat_id, sub.thread_id, max(m.msg_id for m in batch))
             count += len(batch)
             batch.clear()
         return count
@@ -238,26 +234,44 @@ async def backfill(
     repo: Repo,
     *,
     chat_id: int,
-    from_msg_id: int,
+    from_msg_id: int | None = None,
+    since_date: datetime | None = None,
+    thread_id: int | None = None,
     direction: str = "back",
 ) -> int:
-    """One-shot history backfill starting from a specific message.
+    """One-shot history pull, no subscription row required, no sync_state writes.
 
-    direction=back → older messages (reverse=False, offset_id=from_msg_id).
-    direction=forward → newer messages (reverse=True, min_id=from_msg_id-1).
+    Provide exactly one of `from_msg_id` or `since_date`. When neither is
+    given, pulls the full history (Telethon's default). Forward direction
+    (`direction="forward"`) walks newer-first from the anchor; back walks
+    older-first.
     """
     # Ensure we have a base subscription to attribute messages to.
-    sub = await repo.get_subscription(chat_id, 0)
+    sub = await repo.get_subscription(chat_id, thread_id or 0)
     if sub is None:
-        sub = Subscription(chat_id=chat_id, thread_id=0, title=None, source_kind="chat")
+        sub = Subscription(
+            chat_id=chat_id,
+            thread_id=thread_id or 0,
+            title=None,
+            source_kind="topic" if thread_id else "chat",
+        )
 
     iter_kwargs: dict[str, Any] = {"entity": chat_id}
-    if direction == "forward":
+    if thread_id:
+        iter_kwargs["reply_to"] = thread_id
+    if from_msg_id is not None:
+        if direction == "forward":
+            iter_kwargs["reverse"] = True
+            iter_kwargs["min_id"] = max(from_msg_id - 1, 0)
+        else:
+            iter_kwargs["reverse"] = False
+            iter_kwargs["offset_id"] = from_msg_id
+    elif since_date is not None:
+        # Walk forward from a date so the iterator terminates at "now".
         iter_kwargs["reverse"] = True
-        iter_kwargs["min_id"] = max(from_msg_id - 1, 0)
-    else:
-        iter_kwargs["reverse"] = False
-        iter_kwargs["offset_id"] = from_msg_id
+        iter_kwargs["offset_date"] = since_date
+    elif direction == "forward":
+        iter_kwargs["reverse"] = True
 
     settings = get_settings()
     limiter = RateLimiter(settings.telegram.max_msgs_per_minute)

@@ -11,17 +11,11 @@ _USERNAME_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{3,31})$")
 _NUMERIC_RE = re.compile(r"^-?\d+$")
 
 # https://t.me/c/<internal_id>/<msg> OR /<internal_id>/<thread>/<msg>
-_PRIVATE_POST_RE = re.compile(
-    r"^(?:https?://)?t\.me/c/(\d+)(?:/(\d+))?(?:/(\d+))?/?$"
-)
+_PRIVATE_POST_RE = re.compile(r"^(?:https?://)?t\.me/c/(\d+)(?:/(\d+))?(?:/(\d+))?/?$")
 # https://t.me/<username>/<msg>  OR /<username>/<thread>/<msg>  OR /<username>
-_PUBLIC_POST_RE = re.compile(
-    r"^(?:https?://)?t\.me/([A-Za-z][A-Za-z0-9_]{3,31})(?:/(\d+))?(?:/(\d+))?/?$"
-)
+_PUBLIC_POST_RE = re.compile(r"^(?:https?://)?t\.me/([A-Za-z][A-Za-z0-9_]{3,31})(?:/(\d+))?(?:/(\d+))?/?$")
 # invite: https://t.me/+hash OR https://t.me/joinchat/hash
-_INVITE_RE = re.compile(
-    r"^(?:https?://)?t\.me/(?:\+|joinchat/)([A-Za-z0-9_-]+)/?$"
-)
+_INVITE_RE = re.compile(r"^(?:https?://)?t\.me/(?:\+|joinchat/)([A-Za-z0-9_-]+)/?$")
 # tg://resolve?domain=x&post=y
 _TG_PROTOCOL_RE = re.compile(r"^tg://(?P<action>\w+)\?(?P<qs>.+)$")
 
@@ -99,9 +93,7 @@ def parse(ref: str) -> ParsedLink:
                     msg_id=msg,
                     raw=raw,
                 )
-            return ParsedLink(
-                kind="username", username=username, msg_id=thread_or_msg, raw=raw
-            )
+            return ParsedLink(kind="username", username=username, msg_id=thread_or_msg, raw=raw)
 
     # URL that doesn't match t.me — let it fall to fuzzy
     if urlparse(s).scheme:

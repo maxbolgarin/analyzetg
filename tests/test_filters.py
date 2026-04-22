@@ -8,8 +8,9 @@ from analyzetg.analyzer.filters import FilterOpts, dedupe, filter_messages
 from analyzetg.models import Message
 
 
-def _m(msg_id: int, text: str | None = None, transcript: str | None = None,
-       media: str | None = None) -> Message:
+def _m(
+    msg_id: int, text: str | None = None, transcript: str | None = None, media: str | None = None
+) -> Message:
     return Message(
         chat_id=1,
         msg_id=msg_id,

@@ -49,6 +49,7 @@ class AnalysisOptions:
     min_msg_chars: int | None = None
     since: datetime | None = None
     until: datetime | None = None
+    min_msg_id: int | None = None
     dedupe_forwards: bool | None = None
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
@@ -101,7 +102,11 @@ async def _call_cached(
             return hit["result"], 0.0, True
     messages = build_messages(system, static_ctx, dynamic)
     res = await chat_complete(
-        oai, repo=repo, model=model, messages=messages, max_tokens=max_tokens,
+        oai,
+        repo=repo,
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
         context={**run_context, "batch_hash": bhash},
     )
     if use_cache:
@@ -131,14 +136,16 @@ async def run_analysis(
     preset = _load_preset(opts)
 
     final_model = opts.model_override or preset.final_model or settings.openai.chat_model_default
-    filter_model = (
-        opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
-    )
+    filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
 
     # --- Load + filter + dedupe
     thread_param = thread_id if thread_id is not None else 0
     msgs = await repo.iter_messages(
-        chat_id, thread_id=thread_param, since=opts.since, until=opts.until
+        chat_id,
+        thread_id=thread_param,
+        since=opts.since,
+        until=opts.until,
+        min_msg_id=opts.min_msg_id,
     )
     f_opts = FilterOpts(
         min_msg_chars=opts.min_msg_chars
@@ -148,7 +155,7 @@ async def run_analysis(
         text_only=not opts.include_transcripts,
     )
     msgs = filter_messages(msgs, f_opts)
-    if (opts.dedupe_forwards if opts.dedupe_forwards is not None else settings.analyze.dedupe_forwards):
+    if opts.dedupe_forwards if opts.dedupe_forwards is not None else settings.analyze.dedupe_forwards:
         msgs = dedupe(msgs)
 
     if not msgs:
@@ -200,9 +207,7 @@ async def run_analysis(
     # --- Single pass: one chunk OR preset disables reduce
     if len(chunks) <= 1 or not preset.needs_reduce:
         chunk = chunks[0]
-        bhash = batch_hash(
-            preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload
-        )
+        bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload)
         batch_hashes.append(bhash)
         dynamic = format_messages(chunk.messages, period=period, title=None)
         text, cost, hit = await _call_cached(
@@ -227,8 +232,16 @@ async def run_analysis(
         cache_hits += int(hit)
         cache_misses += int(not hit)
         run_id = await _record_run(
-            repo, chat_id, thread_param, preset.name, period, len(msgs),
-            len(chunks), batch_hashes, text, total_cost,
+            repo,
+            chat_id,
+            thread_param,
+            preset.name,
+            period,
+            len(msgs),
+            len(chunks),
+            batch_hashes,
+            text,
+            total_cost,
         )
         return AnalysisResult(
             preset=preset.name,
@@ -249,9 +262,7 @@ async def run_analysis(
     map_sem = asyncio.Semaphore(settings.analyze.map_concurrency)
 
     async def _map(chunk) -> tuple[str, str, float, bool]:
-        bh = batch_hash(
-            preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload
-        )
+        bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
         dynamic = format_messages(chunk.messages, period=period, title=None)
         user = preset.render_user(
             period=_fmt_period(period),
@@ -283,9 +294,7 @@ async def run_analysis(
         cache_hits += int(hit)
         cache_misses += int(not hit)
 
-    reduce_bh = reduce_hash(
-        preset.name, preset.prompt_version, final_model, map_hashes, options_payload
-    )
+    reduce_bh = reduce_hash(preset.name, preset.prompt_version, final_model, map_hashes, options_payload)
     batch_hashes.append(reduce_bh)
 
     joined = "\n\n---\n\n".join(f"[Фрагмент {i + 1}]\n{r[1]}" for i, r in enumerate(map_results))
@@ -315,8 +324,16 @@ async def run_analysis(
     cache_misses += int(not hit)
 
     run_id = await _record_run(
-        repo, chat_id, thread_param, preset.name, period, len(msgs), len(chunks),
-        batch_hashes, text, total_cost,
+        repo,
+        chat_id,
+        thread_param,
+        preset.name,
+        period,
+        len(msgs),
+        len(chunks),
+        batch_hashes,
+        text,
+        total_cost,
     )
     return AnalysisResult(
         preset=preset.name,
