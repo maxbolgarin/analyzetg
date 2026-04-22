@@ -208,3 +208,21 @@ __marimo__/
 
 uv.lock
 config.toml
+
+# Local runtime data — Telegram sessions, SQLite DBs, downloaded media caches.
+# Never commit any of this: session files grant full access to the account.
+storage/*
+!storage/.gitkeep
+!storage/media/
+storage/media/*
+!storage/media/.gitkeep
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local plans / scratch
+/plans/
+/tmp/
+ 
