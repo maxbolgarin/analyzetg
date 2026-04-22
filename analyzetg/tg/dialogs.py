@@ -51,6 +51,29 @@ async def get_unread_state(client: TelegramClient, chat_id: int) -> tuple[int, i
     return int(getattr(d, "unread_count", 0) or 0), int(getattr(d, "read_inbox_max_id", 0) or 0)
 
 
+async def mark_as_read(
+    client: TelegramClient, chat_id: int, max_msg_id: int, thread_id: int | None = None
+) -> bool:
+    """Advance Telegram's read marker for `chat_id` up to `max_msg_id` inclusive.
+
+    Returns True on success. Forum-topic read markers (`thread_id != None`)
+    aren't supported by Telethon's high-level helper — returns False with a
+    log entry rather than raising.
+    """
+    from analyzetg.util.logging import get_logger
+
+    log = get_logger(__name__)
+    if thread_id:
+        log.warning("mark_read.topic_unsupported", chat_id=chat_id, thread_id=thread_id)
+        return False
+    try:
+        await client.send_read_acknowledge(chat_id, max_id=max_msg_id)
+        return True
+    except Exception as e:
+        log.error("mark_read.error", chat_id=chat_id, err=str(e)[:200])
+        return False
+
+
 async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
     """All dialogs with `unread_count > 0`, ordered as Telegram returns them."""
     out: list[UnreadDialog] = []

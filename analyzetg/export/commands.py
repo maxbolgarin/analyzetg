@@ -20,7 +20,12 @@ from analyzetg.db.repo import Repo, open_repo
 from analyzetg.export.markdown import export_csv, export_jsonl, export_md
 from analyzetg.models import Message
 from analyzetg.tg.client import tg_client
-from analyzetg.tg.dialogs import UnreadDialog, get_unread_state, list_unread_dialogs
+from analyzetg.tg.dialogs import (
+    UnreadDialog,
+    get_unread_state,
+    list_unread_dialogs,
+    mark_as_read,
+)
 from analyzetg.tg.resolver import resolve
 from analyzetg.tg.sync import backfill
 from analyzetg.util.logging import get_logger
@@ -81,6 +86,8 @@ async def cmd_dump(
     join: bool,
     with_transcribe: bool,
     include_transcripts: bool,
+    console_out: bool = False,
+    mark_read: bool = False,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
 
@@ -102,12 +109,10 @@ async def cmd_dump(
                 fmt=fmt,
                 with_transcribe=with_transcribe,
                 include_transcripts=include_transcripts,
+                console_out=console_out,
+                mark_read=mark_read,
             )
             return
-
-        if output is None:
-            console.print("[red]--output is required for a single-chat dump.[/]")
-            raise typer.Exit(2)
 
         console.print(f"[dim]→ Resolving[/] {ref}")
         resolved = await resolve(client, repo, ref, join=join)
@@ -168,8 +173,24 @@ async def cmd_dump(
                 if m.transcript and not m.text:
                     m.transcript = None
 
-        _write(msgs, fmt=fmt, output=output, title=resolved.title)
-        console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {output}")
+        if console_out:
+            _print_console(msgs, title=resolved.title, fmt=fmt, count=len(msgs))
+            if output is not None:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                _write(msgs, fmt=fmt, output=output, title=resolved.title)
+                console.print(f"[green]Also saved:[/] {output}")
+        else:
+            if output is None:
+                output = _default_output_path(resolved.title, fmt)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            _write(msgs, fmt=fmt, output=output, title=resolved.title)
+            console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {output}")
+
+        if mark_read and msgs:
+            latest = max(m.msg_id for m in msgs)
+            ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id or None)
+            if ok:
+                console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
 
 
 async def _determine_start(
@@ -221,9 +242,7 @@ async def _pull_history(
         local_max = await repo.get_max_msg_id(chat_id, thread_param, min_msg_id=floor)
         effective = max(floor, local_max or 0)
         if local_max and local_max > floor:
-            console.print(
-                f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]"
-            )
+            console.print(f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]")
         await backfill(
             client,
             repo,
@@ -282,6 +301,8 @@ async def _dump_no_ref(
     fmt: str,
     with_transcribe: bool,
     include_transcripts: bool,
+    console_out: bool,
+    mark_read: bool,
 ) -> None:
     unread = await list_unread_dialogs(client)
     if not unread:
@@ -296,7 +317,14 @@ async def _dump_no_ref(
         console.print("[dim]Aborted.[/]")
         return
 
-    out_dir = _resolve_output_dir(output, len(unread))
+    if console_out:
+        out_dir = None
+    else:
+        out_dir = _resolve_output_dir(output, len(unread))
+        if out_dir is None:
+            out_dir = Path("reports")
+            out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     settings = get_settings()
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
     for u in unread:
@@ -325,12 +353,17 @@ async def _dump_no_ref(
                 for m in msgs:
                     if m.transcript and not m.text:
                         m.transcript = None
-            if out_dir:
-                path = out_dir / f"{u.chat_id}-{_slugify(u.title or 'chat')}.{ext}"
+            if out_dir is None:
+                _print_console(msgs, title=u.title, fmt=fmt, count=len(msgs))
+            else:
+                path = out_dir / f"{_slugify(u.title or str(u.chat_id))}-{stamp}.{ext}"
                 _write(msgs, fmt=fmt, output=path, title=u.title)
                 console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {path}")
-            else:
-                console.print(f"[dim]{len(msgs)} message(s) (use -o <dir> to save).[/]")
+            if mark_read and msgs:
+                latest = max(m.msg_id for m in msgs)
+                ok = await mark_as_read(client, u.chat_id, latest)
+                if ok:
+                    console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
         except Exception as e:
             log.error("dump.no_ref.chat_error", chat_id=u.chat_id, err=str(e)[:200])
             console.print(f"[red]Failed:[/] {e}")
@@ -374,6 +407,59 @@ _SLUG_RE = re.compile(r"[^A-Za-z0-9_\-]+")
 def _slugify(text: str) -> str:
     slug = _SLUG_RE.sub("-", text).strip("-").lower()
     return slug[:40] or "chat"
+
+
+def _default_output_path(title: str | None, fmt: str) -> Path:
+    slug = _slugify(title or "chat")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
+    return Path("reports") / f"{slug}-dump-{stamp}.{ext}"
+
+
+def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: int) -> None:
+    """Render the dump inline. Only `md` uses Rich's Markdown; others print raw."""
+    from rich.rule import Rule
+
+    console.print(Rule(title or "dump", style="cyan"))
+    if fmt == "md":
+        from rich.markdown import Markdown
+
+        from analyzetg.export.markdown import render_md
+
+        console.print(Markdown(render_md(msgs, title=title)))
+    else:
+        # jsonl/csv aren't human-friendly in Rich's renderer — just print raw.
+        import io
+
+        buf = io.StringIO()
+        if fmt == "jsonl":
+            import json
+
+            for m in msgs:
+                buf.write(
+                    json.dumps(
+                        {
+                            "chat_id": m.chat_id,
+                            "msg_id": m.msg_id,
+                            "date": m.date.isoformat(),
+                            "sender_name": m.sender_name,
+                            "text": m.text,
+                            "transcript": m.transcript,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        elif fmt == "csv":
+            import csv as _csv
+
+            w = _csv.writer(buf)
+            w.writerow(["msg_id", "date", "sender_name", "text", "transcript"])
+            for m in msgs:
+                w.writerow([m.msg_id, m.date.isoformat(), m.sender_name, m.text, m.transcript])
+        console.print(buf.getvalue(), highlight=False)
+    console.print(Rule(style="cyan"))
+    console.print(f"[dim]{count} message(s)[/]")
 
 
 def _compute_window(
