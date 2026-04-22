@@ -246,10 +246,22 @@ def transcribe(
 
 @app.command()
 def analyze(
-    chat: int = typer.Option(..., "--chat"),
-    thread: int | None = typer.Option(None, "--thread"),
-    since: str | None = typer.Option(None, "--since"),
-    until: str | None = typer.Option(None, "--until"),
+    ref: str | None = typer.Argument(
+        None,
+        help=(
+            "Chat reference: @user, t.me link, title (fuzzy), or numeric id. "
+            "For a negative numeric id use `--` to separate from flags, e.g. "
+            "`analyzetg analyze -- -1001234567890`. Omit to pick every dialog "
+            "with unread messages (interactive)."
+        ),
+    ),
+    thread: int | None = typer.Option(None, "--thread", help="Forum-topic id."),
+    from_msg: str | None = typer.Option(None, "--from-msg", help="Start at this msg_id (or a message link)."),
+    full_history: bool = typer.Option(
+        False, "--full-history", help="Analyze the whole chat, not just unread."
+    ),
+    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
+    until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days"),
     preset: str = typer.Option("summary", "--preset"),
     prompt_file: Path | None = typer.Option(None, "--prompt-file"),
@@ -260,13 +272,15 @@ def analyze(
     include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
     min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
 ) -> None:
-    """Run an analysis preset against stored messages."""
+    """Analyze a chat. Default window = messages since your Telegram read marker."""
     from analyzetg.analyzer.commands import cmd_analyze
 
     _run(
         cmd_analyze(
-            chat=chat,
+            ref=ref,
             thread=thread,
+            from_msg=from_msg,
+            full_history=full_history,
             since=since,
             until=until,
             last_days=last_days,
@@ -367,61 +381,50 @@ def dump(
     ref: str | None = typer.Argument(
         None,
         help=(
-            "Chat reference: @user, t.me link, title (fuzzy). For a numeric id "
-            "prefer --chat (the shell treats leading '-' as a flag), or use the "
-            "literal '--' separator: `analyzetg dump -- -1001234567890 -o out.md`."
+            "Chat reference: @user, t.me link, title (fuzzy), or numeric id. "
+            "For a negative numeric id use `--` to separate from flags, e.g. "
+            "`analyzetg dump -- -1001234567890 -o out.md`. Omit to pick every "
+            "dialog with unread messages (interactive)."
         ),
     ),
-    chat: int | None = typer.Option(
-        None, "--chat",
-        help="Numeric chat_id (with -100 prefix). Use this for negative IDs.",
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file (single chat) or directory (no-ref mode).",
     ),
-    output: Path = typer.Option(..., "--output", "-o", help="Output file path."),
     fmt: str = typer.Option("md", "--format", help="md | jsonl | csv"),
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days", help="Shortcut for --since now-N."),
     full_history: bool = typer.Option(False, "--full-history", help="Pull the whole chat."),
     thread: int | None = typer.Option(
-        None, "--thread",
+        None,
+        "--thread",
         help="Forum-topic id. Run `analyzetg topics <ref>` first to list topic ids.",
     ),
+    from_msg: str | None = typer.Option(None, "--from-msg", help="Start at this msg_id (or a message link)."),
     join: bool = typer.Option(False, "--join", help="Join via invite link if required."),
     with_transcribe: bool = typer.Option(
         False, "--with-transcribe", help="Transcribe voice/videonote before export (OpenAI Audio)."
     ),
     include_transcripts: bool = typer.Option(
-        True, "--include-transcripts/--text-only",
+        True,
+        "--include-transcripts/--text-only",
         help="Include transcripts in the output (default on).",
     ),
-    no_subscribe: bool = typer.Option(
-        False, "--no-subscribe", help="Don't persist a subscription row for future incremental syncs."
-    ),
 ) -> None:
-    """Pull chat history to a file in one shot. No OpenAI chat analysis.
+    """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
-    Creates/updates a subscription so repeat dumps are incremental and `sync`
-    picks the chat up. Use --with-transcribe to fill voice/videonote transcripts
-    before writing the file.
+    Precedence of start-point flags: --full-history > --from-msg >
+    --since/--until/--last-days > (default: unread). Use --with-transcribe
+    to fill voice/videonote transcripts before writing the file.
     """
     from analyzetg.export.commands import cmd_dump
 
-    if ref is None and chat is None:
-        console.print(
-            "[red]Provide a chat reference.[/] Examples:\n"
-            "  analyzetg dump @somegroup -o out.md\n"
-            "  analyzetg dump --chat -1003865481227 -o out.md\n"
-            "  analyzetg dump -- -1003865481227 -o out.md"
-        )
-        raise typer.Exit(2)
-    if ref is not None and chat is not None:
-        console.print("[red]Pass either a positional ref or --chat, not both.[/]")
-        raise typer.Exit(2)
-    effective_ref = ref if ref is not None else str(chat)
-
     _run(
         cmd_dump(
-            ref=effective_ref,
+            ref=ref,
             output=output,
             fmt=fmt,
             since=since,
@@ -429,10 +432,10 @@ def dump(
             last_days=last_days,
             full_history=full_history,
             thread=thread,
+            from_msg=from_msg,
             join=join,
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
-            no_subscribe=no_subscribe,
         )
     )
 

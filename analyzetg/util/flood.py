@@ -14,7 +14,9 @@ log = get_logger(__name__)
 T = TypeVar("T")
 
 
-def retry_on_flood(max_retries: int = 10) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
+def retry_on_flood(
+    max_retries: int = 10,
+) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Decorator that catches Telethon FloodWaitError and sleeps the requested time + 1s.
 
     Other exceptions propagate immediately.
@@ -61,14 +63,10 @@ def retry_on_429(
                 except retriable as e:
                     # Retry 429 (rate limit) and 5xx; re-raise other 4xx.
                     is_rate_limit = isinstance(e, RateLimitError)
-                    is_4xx_other = (
-                        isinstance(e, APIStatusError)
-                        and not is_rate_limit
-                        and e.status_code < 500
-                    )
+                    is_4xx_other = isinstance(e, APIStatusError) and not is_rate_limit and e.status_code < 500
                     if is_4xx_other:
                         raise
-                    delay = min(base ** attempt, cap) + random.uniform(0, 1)
+                    delay = min(base**attempt, cap) + random.uniform(0, 1)
                     log.warning(
                         "openai.retry",
                         attempt=attempt + 1,

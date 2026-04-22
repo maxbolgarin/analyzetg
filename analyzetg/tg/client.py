@@ -75,9 +75,7 @@ async def tg_client(
     await client.connect()
     try:
         if require_auth and not await client.is_user_authorized():
-            raise RuntimeError(
-                "Telegram session is not authorized. Run `analyzetg init` first."
-            )
+            raise RuntimeError("Telegram session is not authorized. Run `analyzetg init` first.")
         yield client
     finally:
         await client.disconnect()

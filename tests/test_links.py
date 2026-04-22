@@ -100,9 +100,7 @@ def test_fuzzy_fallback() -> None:
     assert p.raw == "Bull Trading"
 
 
-@pytest.mark.parametrize(
-    "s", ["https://example.com/foo", "https://t.me/", ""]
-)
+@pytest.mark.parametrize("s", ["https://example.com/foo", "https://t.me/", ""])
 def test_non_matching_urls_fall_to_fuzzy(s: str) -> None:
     p = parse(s)
     # Empty string and unknown URLs default to fuzzy

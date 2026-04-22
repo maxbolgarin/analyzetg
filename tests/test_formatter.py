@@ -38,8 +38,12 @@ def test_multi_day_same_year() -> None:
 def test_voice_transcript_tag() -> None:
     d = datetime(2026, 4, 19, 12, 0)
     m = _m(
-        1, d, sender_name="Alice", transcript="hello world",
-        media_type="voice", media_duration=23,
+        1,
+        d,
+        sender_name="Alice",
+        transcript="hello world",
+        media_type="voice",
+        media_duration=23,
     )
     out = format_messages([m])
     assert "[voice 0:23]" in out
@@ -56,7 +60,12 @@ def test_reply_marker_resolved() -> None:
 
 def test_duplicate_marker() -> None:
     d = datetime(2026, 4, 19, 12, 0)
-    m = _m(1, d, sender_name="alice", text="news", )
+    m = _m(
+        1,
+        d,
+        sender_name="alice",
+        text="news",
+    )
     m.duplicates = 4
     out = format_messages([m])
     assert "[×5]" in out

@@ -104,9 +104,7 @@ def format_messages(
         body = _body(m)
         if not body:
             continue
-        lines.append(
-            f"[{ts}] {who}{_forward_tag(m)}{_media_tag(m)}: {reply}{body}{_dup_suffix(m)}"
-        )
+        lines.append(f"[{ts}] {who}{_forward_tag(m)}{_media_tag(m)}: {reply}{body}{_dup_suffix(m)}")
     return "\n".join(lines)
 
 

@@ -54,16 +54,36 @@ def export_csv(msgs: list[Message], output: Path) -> None:
         w = csv.writer(f)
         w.writerow(
             [
-                "chat_id", "msg_id", "thread_id", "date", "sender_id", "sender_name",
-                "text", "reply_to", "forward_from", "media_type", "media_doc_id",
-                "media_duration", "transcript",
+                "chat_id",
+                "msg_id",
+                "thread_id",
+                "date",
+                "sender_id",
+                "sender_name",
+                "text",
+                "reply_to",
+                "forward_from",
+                "media_type",
+                "media_doc_id",
+                "media_duration",
+                "transcript",
             ]
         )
         for m in msgs:
             w.writerow(
                 [
-                    m.chat_id, m.msg_id, m.thread_id, m.date.isoformat(),
-                    m.sender_id, m.sender_name, m.text, m.reply_to, m.forward_from,
-                    m.media_type, m.media_doc_id, m.media_duration, m.transcript,
+                    m.chat_id,
+                    m.msg_id,
+                    m.thread_id,
+                    m.date.isoformat(),
+                    m.sender_id,
+                    m.sender_name,
+                    m.text,
+                    m.reply_to,
+                    m.forward_from,
+                    m.media_type,
+                    m.media_doc_id,
+                    m.media_duration,
+                    m.transcript,
                 ]
             )

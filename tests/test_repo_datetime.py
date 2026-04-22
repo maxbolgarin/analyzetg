@@ -36,12 +36,8 @@ async def test_redact_old_messages_respects_retention(repo: Repo) -> None:
 
 async def test_cache_purge_respects_age(repo: Repo) -> None:
     # Insert two cache rows; patch the created_at of one to be old.
-    await repo.cache_put(
-        "hash_new", "summary", "gpt-4o", "v1", "result_new", 100, 0, 10, 0.001
-    )
-    await repo.cache_put(
-        "hash_old", "summary", "gpt-4o", "v1", "result_old", 100, 0, 10, 0.001
-    )
+    await repo.cache_put("hash_new", "summary", "gpt-4o", "v1", "result_new", 100, 0, 10, 0.001)
+    await repo.cache_put("hash_old", "summary", "gpt-4o", "v1", "result_old", 100, 0, 10, 0.001)
 
     old_ts = (datetime.now(UTC) - timedelta(days=60)).isoformat()
     await repo._conn.execute(

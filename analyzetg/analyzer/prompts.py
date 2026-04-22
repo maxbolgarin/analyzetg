@@ -46,13 +46,7 @@ _SYSTEM_DECISIONS = (
     "кто принял — когда — обоснование (если явно). По-русски."
 )
 
-_USER_TEMPLATE_COMMON = (
-    "Период: {period}\n"
-    "Чат: {title}\n"
-    "Сообщений: {msg_count}\n"
-    "---\n"
-    "{messages}"
-)
+_USER_TEMPLATE_COMMON = "Период: {period}\nЧат: {title}\nСообщений: {msg_count}\n---\n{messages}"
 
 
 PRESETS: dict[str, Preset] = {
@@ -61,8 +55,7 @@ PRESETS: dict[str, Preset] = {
         prompt_version="v1",
         system=_SYSTEM_SUMMARY,
         user_template="Задача: сделай структурированное саммари за указанный период "
-        "(5–10 тезисов, по 1–2 строки каждый; выдели топ-3 темы в начале).\n\n"
-        + _USER_TEMPLATE_COMMON,
+        "(5–10 тезисов, по 1–2 строки каждый; выдели топ-3 темы в начале).\n\n" + _USER_TEMPLATE_COMMON,
         needs_reduce=True,
         filter_model="gpt-5.4-nano",
         final_model="gpt-5.4",
@@ -83,8 +76,7 @@ PRESETS: dict[str, Preset] = {
         name="digest",
         prompt_version="v1",
         system=_SYSTEM_DIGEST,
-        user_template="Задача: составь дайджест обсуждения за период.\n\n"
-        + _USER_TEMPLATE_COMMON,
+        user_template="Задача: составь дайджест обсуждения за период.\n\n" + _USER_TEMPLATE_COMMON,
         needs_reduce=True,
         filter_model="gpt-5.4-nano",
         final_model="gpt-5.4",

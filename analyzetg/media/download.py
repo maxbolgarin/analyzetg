@@ -48,9 +48,7 @@ async def download_message(client: TelegramClient, msg_obj, out_path: Path) -> P
     return Path(result)
 
 
-async def transcode_for_openai(
-    src: Path, media_type: str, tmp_dir: Path
-) -> list[Path]:
+async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> list[Path]:
     """Prepare audio for OpenAI:
       - voice (.ogg/opus): pass through.
       - videonote/video: extract mono 16 kHz mp3 at 64k.
@@ -72,8 +70,17 @@ async def transcode_for_openai(
         prepared = tmp_dir / f"{src.stem}_prep.mp3"
         rc, _, err = await _run(
             [
-                ffmpeg, "-y", "-i", str(src),
-                "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k",
+                ffmpeg,
+                "-y",
+                "-i",
+                str(src),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-b:a",
+                "64k",
                 str(prepared),
             ]
         )
@@ -90,7 +97,9 @@ async def transcode_for_openai(
         if not await _ffmpeg_present(ffmpeg):
             raise FfmpegMissing(f"ffmpeg required for chunking voice >{MAX_OPENAI_MB} MB.")
         normalized = tmp_dir / f"{src.stem}_voice.mp3"
-        rc, _, err = await _run([ffmpeg, "-y", "-i", str(prepared), "-ac", "1", "-b:a", "64k", str(normalized)])
+        rc, _, err = await _run(
+            [ffmpeg, "-y", "-i", str(prepared), "-ac", "1", "-b:a", "64k", str(normalized)]
+        )
         if rc != 0:
             raise RuntimeError(f"ffmpeg voice→mp3 failed: {err.decode(errors='ignore')[:500]}")
         intermediate = normalized
@@ -99,8 +108,16 @@ async def transcode_for_openai(
     seg_pattern = tmp_dir / f"{src.stem}_chunk_%03d.mp3"
     rc, _, err = await _run(
         [
-            ffmpeg, "-y", "-i", str(prepared),
-            "-f", "segment", "-segment_time", "600", "-c", "copy",
+            ffmpeg,
+            "-y",
+            "-i",
+            str(prepared),
+            "-f",
+            "segment",
+            "-segment_time",
+            "600",
+            "-c",
+            "copy",
             str(seg_pattern),
         ]
     )
