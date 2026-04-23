@@ -15,7 +15,7 @@ class TelegramCfg(BaseModel):
     api_id: int = 0
     api_hash: str = ""
     session_path: Path = Path("storage/session.sqlite")
-    max_msgs_per_minute: int = 300
+    max_msgs_per_minute: int = 3000
 
 
 class OpenAICfg(BaseModel):
@@ -31,7 +31,7 @@ class OpenAICfg(BaseModel):
 
 class SyncCfg(BaseModel):
     default_lookback_days: int = 7
-    batch_size: int = 200
+    batch_size: int = 500
     concurrency: int = 3
 
 

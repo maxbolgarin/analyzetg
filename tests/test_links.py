@@ -89,6 +89,20 @@ def test_numeric_id_plain() -> None:
     assert p.chat_id == 123456
 
 
+def test_numeric_id_missing_minus_on_channel_is_auto_fixed() -> None:
+    # User pastes the id without the minus — we auto-prepend it for the
+    # canonical -100xxxxxxxxxx form.
+    p = parse("1003865481227")
+    assert p.kind == "numeric_id"
+    assert p.chat_id == -1003865481227
+
+
+def test_small_positive_numeric_id_stays_positive() -> None:
+    # Plain user ids / small group ids aren't channels — don't touch them.
+    p = parse("12345678")
+    assert p.chat_id == 12345678
+
+
 def test_self_marker() -> None:
     assert parse("me").kind == "self"
     assert parse("@me").kind == "self"

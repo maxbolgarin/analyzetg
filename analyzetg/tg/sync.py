@@ -205,7 +205,6 @@ async def sync_subscription(
                     await repo.update_sync_state(sub.chat_id, sub.thread_id, max(m.msg_id for m in batch))
                 count += len(batch)
                 batch.clear()
-                await asyncio.sleep(0.1)
         if batch:
             if not dry_run:
                 await repo.upsert_messages(batch)
@@ -277,15 +276,45 @@ async def backfill(
     limiter = RateLimiter(settings.telegram.max_msgs_per_minute)
     batch: list[Message] = []
     total = 0
-    async for msg in client.iter_messages(**iter_kwargs):  # type: ignore[arg-type]
-        await limiter.acquire()
-        batch.append(normalize(msg, sub))
-        if len(batch) >= settings.sync.batch_size:
+    t0 = asyncio.get_event_loop().time()
+
+    from rich.console import Console
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    _console = Console()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]{task.description}[/]"),
+        TimeElapsedColumn(),
+        transient=True,
+        console=_console,
+    ) as progress:
+        task = progress.add_task("Fetching from Telegram — 0 msgs", total=None)
+        async for msg in client.iter_messages(**iter_kwargs):  # type: ignore[arg-type]
+            await limiter.acquire()
+            batch.append(normalize(msg, sub))
+            if len(batch) >= settings.sync.batch_size:
+                await repo.upsert_messages(batch)
+                total += len(batch)
+                batch.clear()
+                progress.update(task, description=f"Fetching from Telegram — {total} msgs")
+        if batch:
             await repo.upsert_messages(batch)
             total += len(batch)
-            batch.clear()
-            await asyncio.sleep(0.1)
-    if batch:
-        await repo.upsert_messages(batch)
-        total += len(batch)
+            progress.update(task, description=f"Fetching from Telegram — {total} msgs")
+
+    elapsed = asyncio.get_event_loop().time() - t0
+    log.info(
+        "backfill.done",
+        chat_id=chat_id,
+        thread_id=thread_id,
+        pulled=total,
+        elapsed_s=round(elapsed, 2),
+        rate_msgs_per_s=round(total / elapsed, 1) if elapsed > 0.01 else None,
+    )
     return total

@@ -8,6 +8,7 @@ don't have to loop over `iter_dialogs()` themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from analyzetg.tg.client import (
@@ -29,6 +30,7 @@ class UnreadDialog:
     username: str | None
     unread_count: int
     read_inbox_max_id: int
+    last_msg_date: datetime | None = None
 
 
 async def get_unread_state(client: TelegramClient, chat_id: int) -> tuple[int, int]:
@@ -75,13 +77,24 @@ async def mark_as_read(
 
 
 async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
-    """All dialogs with `unread_count > 0`, ordered as Telegram returns them."""
+    """All dialogs with `unread_count > 0`, sorted by unread_count descending.
+
+    Fills `last_msg_date` from the dialog's top-message date (free — it's in
+    the response already). First-unread-message date requires a per-chat
+    `get_messages` call; interactive callers do that lazily.
+    """
     out: list[UnreadDialog] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
         count = int(getattr(d, "unread_count", 0) or 0)
         if count <= 0:
             continue
         entity = d.entity
+        # Dialog.date == top message's date; fall back via .message if needed.
+        last_date: datetime | None = getattr(d, "date", None)
+        if last_date is None:
+            msg = getattr(d, "message", None)
+            if msg is not None:
+                last_date = getattr(msg, "date", None)
         out.append(
             UnreadDialog(
                 chat_id=entity_id(entity),
@@ -90,6 +103,8 @@ async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
                 username=entity_username(entity),
                 unread_count=count,
                 read_inbox_max_id=int(getattr(d, "read_inbox_max_id", 0) or 0),
+                last_msg_date=last_date,
             )
         )
+    out.sort(key=lambda d: (-d.unread_count, (d.title or "").lower()))
     return out

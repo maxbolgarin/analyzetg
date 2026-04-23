@@ -19,6 +19,7 @@ dependencies = [
     "structlog>=24.1",
     "rich>=13.7",
     "python-dateutil>=2.9",
+    "questionary>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,7 @@ dev = [
 ]
 
 [project.scripts]
-analyzetg = "analyzetg.cli:app"
+analyzetg = "analyzetg.cli:main"
 
 [build-system]
 requires = ["hatchling"]

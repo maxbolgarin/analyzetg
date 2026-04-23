@@ -101,7 +101,13 @@ def parse(ref: str) -> ParsedLink:
 
     # Numeric id (with possible -100 prefix or just -)
     if _NUMERIC_RE.match(s):
-        return ParsedLink(kind="numeric_id", chat_id=int(s), raw=raw)
+        chat_id = int(s)
+        # UX: if the user typed a positive channel/supergroup id (shape
+        # `100xxxxxxxxxx`, 13+ digits starting with 100), assume they meant
+        # the negative form and auto-flip. Plain user ids are shorter.
+        if chat_id > 0 and s.startswith("100") and len(s) >= 13:
+            chat_id = -chat_id
+        return ParsedLink(kind="numeric_id", chat_id=chat_id, raw=raw)
 
     # Plain username (@user or user)
     m = _USERNAME_RE.match(s)
