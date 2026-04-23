@@ -337,6 +337,40 @@ class Repo:
             return None
         return int(row["m"])
 
+    async def chat_stats(self, chat_id: int, thread_id: int | None = None) -> dict[str, Any]:
+        """Summary stats for a chat (or thread): count and date range."""
+        sql = "SELECT COUNT(*) AS c, MIN(date) AS dmin, MAX(date) AS dmax FROM messages WHERE chat_id=?"
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return {"count": 0, "date_min": None, "date_max": None}
+        return {
+            "count": int(row["c"] or 0),
+            "date_min": _from_ts(row["dmin"]),
+            "date_max": _from_ts(row["dmax"]),
+        }
+
+    async def top_senders(
+        self, chat_id: int, thread_id: int | None = None, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Top-N senders by message count in a chat (or thread)."""
+        sql = "SELECT sender_name, COUNT(*) AS c FROM messages WHERE chat_id=? AND sender_name IS NOT NULL"
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        sql += " GROUP BY sender_name ORDER BY c DESC LIMIT ?"
+        args.append(limit)
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [{"sender_name": r["sender_name"], "count": int(r["c"])} for r in rows]
+
     async def count_messages(self, chat_id: int, thread_id: int | None = None) -> int:
         sql = "SELECT COUNT(*) AS c FROM messages WHERE chat_id=?"
         args: list[Any] = [chat_id]
@@ -385,6 +419,39 @@ class Repo:
         await cur.close()
         return [self._row_to_msg(r) for r in rows]
 
+    async def count_redactable_messages(
+        self,
+        retention_days: int,
+        chat_id: int | None = None,
+        keep_transcripts: bool = True,
+    ) -> dict[str, int]:
+        """Preview what redact_old_messages would affect. Returns
+        {"messages": N, "with_text": N, "with_transcript": N, "to_redact": N}.
+        `to_redact` = rows that actually have something to null given `keep_transcripts`."""
+        if retention_days <= 0:
+            return {"messages": 0, "with_text": 0, "with_transcript": 0, "to_redact": 0}
+        sql = (
+            "SELECT COUNT(*) AS n,"
+            " SUM(CASE WHEN text IS NOT NULL THEN 1 ELSE 0 END) AS with_text,"
+            " SUM(CASE WHEN transcript IS NOT NULL THEN 1 ELSE 0 END) AS with_transcript,"
+            " SUM(CASE WHEN text IS NOT NULL"
+            "          OR (? = 0 AND transcript IS NOT NULL) THEN 1 ELSE 0 END) AS to_redact"
+            " FROM messages WHERE datetime(date) < datetime('now', ?)"
+        )
+        args: list[Any] = [1 if keep_transcripts else 0, f"-{retention_days} days"]
+        if chat_id is not None:
+            sql += " AND chat_id=?"
+            args.append(chat_id)
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        return {
+            "messages": int(row["n"] or 0),
+            "with_text": int(row["with_text"] or 0),
+            "with_transcript": int(row["with_transcript"] or 0),
+            "to_redact": int(row["to_redact"] or 0),
+        }
+
     async def redact_old_messages(
         self,
         retention_days: int,
@@ -403,6 +470,12 @@ class Repo:
         if chat_id is not None:
             sql += " AND chat_id=?"
             args.append(chat_id)
+        # Skip rows that have nothing left to null — otherwise rowcount
+        # reports matches, not actual redactions.
+        if keep_transcripts:
+            sql += " AND text IS NOT NULL"
+        else:
+            sql += " AND (text IS NOT NULL OR transcript IS NOT NULL)"
         cur = await self._conn.execute(sql, args)
         await self._conn.commit()
         return cur.rowcount or 0
@@ -540,6 +613,105 @@ class Repo:
         cur = await self._conn.execute(sql, args)
         await self._conn.commit()
         return cur.rowcount or 0
+
+    async def cache_stats(self) -> dict[str, Any]:
+        """Summary of analysis_cache: totals + per-(preset, model) breakdown."""
+        cur = await self._conn.execute(
+            """
+            SELECT COUNT(*) AS rows,
+                   COALESCE(SUM(LENGTH(result)), 0) AS result_bytes,
+                   COALESCE(SUM(cost_usd), 0) AS saved_cost_usd,
+                   MIN(created_at) AS oldest,
+                   MAX(created_at) AS newest
+            FROM analysis_cache
+            """
+        )
+        totals = await cur.fetchone()
+        await cur.close()
+        cur = await self._conn.execute(
+            """
+            SELECT preset, model,
+                   COUNT(*) AS rows,
+                   COALESCE(SUM(LENGTH(result)), 0) AS result_bytes,
+                   COALESCE(SUM(cost_usd), 0) AS saved_cost_usd
+            FROM analysis_cache
+            GROUP BY preset, model
+            ORDER BY rows DESC
+            """
+        )
+        by_group = [dict(r) for r in await cur.fetchall()]
+        await cur.close()
+        return {
+            "rows": int(totals["rows"] or 0),
+            "result_bytes": int(totals["result_bytes"] or 0),
+            "saved_cost_usd": float(totals["saved_cost_usd"] or 0.0),
+            "oldest": totals["oldest"],
+            "newest": totals["newest"],
+            "by_group": by_group,
+        }
+
+    async def cache_list(
+        self,
+        preset: str | None = None,
+        model: str | None = None,
+        older_than_days: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Lightweight listing (no result body) for preview/ls."""
+        sql = (
+            "SELECT batch_hash, preset, model, prompt_version,"
+            " prompt_tokens, cached_tokens, completion_tokens, cost_usd,"
+            " LENGTH(result) AS result_bytes, created_at"
+            " FROM analysis_cache WHERE 1=1"
+        )
+        args: list[Any] = []
+        if older_than_days:
+            sql += " AND datetime(created_at) < datetime('now', ?)"
+            args.append(f"-{older_than_days} days")
+        if preset:
+            sql += " AND preset=?"
+            args.append(preset)
+        if model:
+            sql += " AND model=?"
+            args.append(model)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(int(limit))
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def cache_iter_full(
+        self,
+        preset: str | None = None,
+        model: str | None = None,
+        older_than_days: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Full rows incl. result — for export."""
+        sql = "SELECT * FROM analysis_cache WHERE 1=1"
+        args: list[Any] = []
+        if older_than_days:
+            sql += " AND datetime(created_at) < datetime('now', ?)"
+            args.append(f"-{older_than_days} days")
+        if preset:
+            sql += " AND preset=?"
+            args.append(preset)
+        if model:
+            sql += " AND model=?"
+            args.append(model)
+        sql += " ORDER BY created_at DESC"
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def vacuum(self) -> int:
+        """Run VACUUM and return reclaimed bytes (file-size delta)."""
+        before = self._path.stat().st_size if self._path.exists() else 0
+        await self._conn.commit()
+        await self._conn.execute("VACUUM")
+        after = self._path.stat().st_size if self._path.exists() else 0
+        return max(0, before - after)
 
     async def record_run(
         self,

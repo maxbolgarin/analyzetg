@@ -21,6 +21,7 @@ from analyzetg.tg.client import (
     entity_username,
     tg_client,
 )
+from analyzetg.tg.dialogs import get_unread_state
 from analyzetg.tg.links import parse
 from analyzetg.tg.resolver import resolve
 from analyzetg.tg.topics import (
@@ -143,6 +144,271 @@ async def cmd_dialogs(search: str | None, kind: str | None, limit: int) -> None:
                 break
         console.print(table)
         console.print(f"[dim]{shown} row(s)[/]")
+
+
+# ------------------------------------------------------------------- describe
+
+
+DEFAULT_KINDS = ("forum", "supergroup", "group")
+
+
+async def cmd_describe(
+    ref: str | None,
+    *,
+    kind: str | None = None,
+    search: str | None = None,
+    limit: int | None = None,
+    show_all: bool = False,
+) -> None:
+    """Overview of dialogs, or details about one chat.
+
+    With no ref and no filter flags, opens an interactive picker so you
+    can choose a chat and see its details. With filter flags (--all /
+    --kind / --search / --limit) or a ref, behaves non-interactively.
+    """
+    # No ref and no filters → interactive chat picker.
+    has_filters = bool(kind or search or limit or show_all)
+    if ref is None and not has_filters:
+        from analyzetg.interactive import run_interactive_describe
+
+        await run_interactive_describe()
+        return
+
+    settings = get_settings()
+    async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
+        if ref is None:
+            await _describe_overview(
+                client,
+                repo,
+                kind=kind,
+                search=search,
+                limit=limit,
+                show_all=show_all,
+            )
+            return
+        await _describe_one(client, repo, ref)
+
+
+async def _describe_overview(
+    client,
+    repo,
+    *,
+    kind: str | None,
+    search: str | None,
+    limit: int | None,
+    show_all: bool,
+) -> None:
+    console.print("[dim]→ Listing dialogs...[/]")
+    rows: list[tuple] = []
+    async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
+        entity = d.entity
+        k = _chat_kind(entity)
+        t = entity_title(entity)
+        u = entity_username(entity)
+        eid = entity_id(entity)
+        unread = int(getattr(d, "unread_count", 0) or 0)
+
+        # Apply filters BEFORE hitting the DB — saves N queries.
+        if kind and k != kind:
+            continue
+        if search:
+            hay = f"{t or ''} {u or ''}".lower()
+            if search.lower() not in hay:
+                continue
+        if not show_all:
+            if k not in DEFAULT_KINDS:
+                continue
+            if unread <= 0:
+                continue
+
+        stats = await repo.chat_stats(eid)
+        rows.append((unread, eid, k, t or "", u or "", stats["count"], stats["date_max"]))
+
+    rows.sort(key=lambda r: (-r[0], -r[5]))
+    if limit:
+        rows = rows[:limit]
+
+    # Title hint reflects the filter state.
+    desc_parts = []
+    if show_all:
+        desc_parts.append("all")
+    else:
+        desc_parts.append("unread")
+        if kind is None:
+            desc_parts.append("forums/groups/supergroups")
+    if kind:
+        desc_parts.append(f"kind={kind}")
+    if search:
+        desc_parts.append(f"search={search!r}")
+    title = "Dialogs (" + ", ".join(desc_parts) + ")"
+
+    table = Table(title=title)
+    for col in ("id", "kind", "title", "username", "unread", "stored", "last_msg"):
+        table.add_column(col)
+    for unread, eid, k, t, u, stored, dmax in rows:
+        table.add_row(
+            str(eid),
+            k,
+            t,
+            f"@{u}" if u else "",
+            str(unread) if unread else "",
+            str(stored) if stored else "",
+            dmax.strftime("%Y-%m-%d %H:%M") if dmax else "",
+        )
+    console.print(table)
+    hint_parts = [f"{len(rows)} row(s)"]
+    if not show_all:
+        hint_parts.append("default filter: unread + forums/groups/supergroups")
+        hint_parts.append("pass --all to see everything")
+    console.print(f"[dim]{'. '.join(hint_parts)}.[/]")
+    console.print("[dim]Use `describe <ref>` for details on one chat.[/]")
+
+
+async def _describe_one(client, repo, ref: str) -> None:
+    resolved = await resolve(client, repo, ref, prompt_choice=_tui_choose)
+    chat_id = resolved.chat_id
+    kind = resolved.kind
+
+    # Pull live dialog-level state (unread, read marker, last message date).
+    unread_count, read_marker = await get_unread_state(client, chat_id)
+    last_msg_date = await _fetch_last_msg_date(client, chat_id)
+
+    # Header
+    badge = f"[bold]{resolved.title or chat_id}[/]"
+    console.print(f"\n{badge} [dim](id={chat_id}, kind={kind})[/]")
+
+    # --- Left/right-ish labeled properties
+    def _row(label: str, value: str | None, *, dim_label: bool = True) -> None:
+        if value is None or value == "":
+            return
+        label_fmt = f"[dim]{label:>14}:[/]" if dim_label else f"{label:>14}:"
+        console.print(f"  {label_fmt} {value}")
+
+    if resolved.username:
+        _row("username", f"@{resolved.username} — https://t.me/{resolved.username}")
+    _row("unread", str(unread_count) if unread_count else None)
+    _row(
+        "read marker",
+        f"msg_id > {read_marker}" if read_marker and unread_count else None,
+    )
+    if last_msg_date:
+        _row("last message", last_msg_date.strftime("%Y-%m-%d %H:%M"))
+
+    # Channel/supergroup/forum extended info
+    info: dict = {}
+    if kind in ("channel", "supergroup", "forum"):
+        try:
+            info = await get_full_channel_info(client, chat_id)
+        except Exception as e:
+            log.warning("describe.full_channel_failed", err=str(e)[:200])
+            info = {}
+
+        # Kind details
+        type_bits = []
+        if info.get("broadcast"):
+            type_bits.append("broadcast")
+        if info.get("megagroup"):
+            type_bits.append("megagroup")
+        if info.get("forum"):
+            type_bits.append("forum")
+        if info.get("verified"):
+            type_bits.append("[green]verified[/]")
+        if info.get("scam"):
+            type_bits.append("[red]scam[/]")
+        if info.get("restricted"):
+            type_bits.append("[yellow]restricted[/]")
+        if type_bits:
+            _row("type", " ".join(type_bits))
+
+        # Participants & moderation
+        parts = info.get("participants_count")
+        online = info.get("online_count")
+        if parts is not None:
+            val = f"{parts:,}"
+            if online:
+                val += f" ([green]{online}[/] online)"
+            _row("participants", val)
+        if info.get("admins_count"):
+            _row("admins", str(info["admins_count"]))
+        if info.get("banned_count"):
+            _row("banned", str(info["banned_count"]))
+
+        # Links, discussion, pin, slowmode
+        if info.get("invite_link"):
+            _row("invite link", info["invite_link"])
+        elif resolved.username:
+            pass  # already shown above as username link
+        if info.get("linked_chat_id"):
+            _row("linked chat", str(info["linked_chat_id"]))
+        if info.get("pinned_msg_id"):
+            pin_link = _msg_link(resolved.username, chat_id, info["pinned_msg_id"])
+            _row("pinned msg", pin_link)
+        slow = info.get("slowmode_seconds")
+        if slow:
+            _row("slow mode", f"{slow}s between messages")
+
+        if info.get("about"):
+            # Split "about" on blank lines so long descriptions stay readable.
+            first = info["about"].splitlines()[0]
+            if len(info["about"]) > 200:
+                first = first[:200] + "…"
+            _row("about", first)
+
+    # Forums → topics table
+    if kind == "forum":
+        topics = await list_forum_topics(client, chat_id)
+        if topics:
+            tt = Table(title=f"Topics ({len(topics)})")
+            for col in ("id", "title", "unread", "top_msg", "stored", "closed", "pinned"):
+                tt.add_column(col)
+            for tp in topics:
+                st = await repo.chat_stats(chat_id, thread_id=tp.topic_id)
+                tt.add_row(
+                    str(tp.topic_id),
+                    tp.title,
+                    str(tp.unread_count) if tp.unread_count else "",
+                    str(tp.top_message or ""),
+                    str(st["count"]) if st["count"] else "",
+                    "yes" if tp.closed else "",
+                    "yes" if tp.pinned else "",
+                )
+            console.print(tt)
+
+    # Local DB stats
+    stats = await repo.chat_stats(chat_id)
+    if stats["count"]:
+        dmin = stats["date_min"].strftime("%Y-%m-%d %H:%M") if stats["date_min"] else "—"
+        dmax = stats["date_max"].strftime("%Y-%m-%d %H:%M") if stats["date_max"] else "—"
+        console.print(
+            f"\n[bold]Local DB[/]: {stats['count']} message(s), from [cyan]{dmin}[/] to [cyan]{dmax}[/]"
+        )
+        top = await repo.top_senders(chat_id, limit=5)
+        if top:
+            console.print("[bold]Top senders[/]:")
+            for row in top:
+                console.print(f"  {row['sender_name']} — {row['count']}")
+    else:
+        console.print("\n[dim]Local DB: no messages stored for this chat yet.[/]")
+
+
+async def _fetch_last_msg_date(client, chat_id: int):
+    """Fetch the date of the most recent message in the chat. Returns datetime or None."""
+    try:
+        async for m in client.iter_messages(chat_id, limit=1):
+            return getattr(m, "date", None)
+    except Exception as e:
+        log.debug("describe.last_msg_failed", chat_id=chat_id, err=str(e)[:200])
+    return None
+
+
+def _msg_link(username: str | None, chat_id: int, msg_id: int) -> str:
+    """Render a t.me link to a specific message (prefer @username form)."""
+    if username:
+        return f"{msg_id} — https://t.me/{username}/{msg_id}"
+    if chat_id < 0 and abs(chat_id) > 1_000_000_000_000:
+        internal = abs(chat_id) - 1_000_000_000_000
+        return f"{msg_id} — https://t.me/c/{internal}/{msg_id}"
+    return str(msg_id)
 
 
 # -------------------------------------------------------------------- topics

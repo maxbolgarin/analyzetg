@@ -83,6 +83,7 @@ def format_messages(
     *,
     period: tuple[datetime | None, datetime | None] | None = None,
     title: str | None = None,
+    link_template: str | None = None,
 ) -> str:
     if not msgs:
         return ""
@@ -96,6 +97,8 @@ def format_messages(
         b = period[1].strftime("%Y-%m-%d %H:%M") if period[1] else "…"
         lines.append(f"Период: {a} — {b}")
     lines.append(f"Сообщений: {len(msgs)}")
+    if link_template:
+        lines.append(f"Ссылка на сообщение: {link_template}")
     lines.append("")
     for m in msgs:
         ts = m.date.strftime(date_fmt)
@@ -104,11 +107,18 @@ def format_messages(
         body = _body(m)
         if not body:
             continue
-        lines.append(f"[{ts}] {who}{_forward_tag(m)}{_media_tag(m)}: {reply}{body}{_dup_suffix(m)}")
+        lines.append(
+            f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}: {reply}{body}{_dup_suffix(m)}"
+        )
     return "\n".join(lines)
 
 
-def chat_header_preamble(title: str | None, period: tuple[datetime | None, datetime | None] | None) -> str:
+def chat_header_preamble(
+    title: str | None,
+    period: tuple[datetime | None, datetime | None] | None,
+    *,
+    link_template: str | None = None,
+) -> str:
     """Static (cacheable) portion of the prompt — appears before dynamic messages."""
     parts = []
     if title:
@@ -117,4 +127,28 @@ def chat_header_preamble(title: str | None, period: tuple[datetime | None, datet
         a = period[0].strftime("%Y-%m-%d") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d") if period[1] else "…"
         parts.append(f"Период: {a} — {b}")
+    if link_template:
+        parts.append(f"Ссылка на сообщение: {link_template}")
     return "\n".join(parts)
+
+
+def build_link_template(
+    *,
+    chat_username: str | None,
+    chat_internal_id: int | None,
+    thread_id: int | None = None,
+) -> str | None:
+    """Build a `https://t.me/...{msg_id}` template for the given chat.
+
+    Returns a string with a literal `{msg_id}` placeholder the model can
+    substitute, or None if no enough info to form a link.
+    """
+    if chat_username:
+        base = f"https://t.me/{chat_username}"
+    elif chat_internal_id is not None:
+        base = f"https://t.me/c/{chat_internal_id}"
+    else:
+        return None
+    if thread_id:
+        return f"{base}/{thread_id}/{{msg_id}}"
+    return f"{base}/{{msg_id}}"

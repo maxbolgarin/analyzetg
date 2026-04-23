@@ -11,7 +11,11 @@ from typing import Any
 
 from analyzetg.analyzer.chunker import build_chunks
 from analyzetg.analyzer.filters import FilterOpts, dedupe, filter_messages
-from analyzetg.analyzer.formatter import chat_header_preamble, format_messages
+from analyzetg.analyzer.formatter import (
+    build_link_template,
+    chat_header_preamble,
+    format_messages,
+)
 from analyzetg.analyzer.hasher import batch_hash, reduce_hash
 from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
 from analyzetg.analyzer.prompts import PRESETS, REDUCE_PROMPT, Preset, load_custom_preset
@@ -131,6 +135,8 @@ async def run_analysis(
     thread_id: int | None,
     title: str | None,
     opts: AnalysisOptions,
+    chat_username: str | None = None,
+    chat_internal_id: int | None = None,
 ) -> AnalysisResult:
     settings = get_settings()
     preset = _load_preset(opts)
@@ -174,7 +180,12 @@ async def run_analysis(
         )
 
     period = (opts.since, opts.until)
-    static_ctx = chat_header_preamble(title, period)
+    link_template = build_link_template(
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
+        thread_id=thread_id,
+    )
+    static_ctx = chat_header_preamble(title, period, link_template=link_template)
     # user_overhead: template minus {messages} — static, cacheable
     user_overhead = preset.render_user(
         period=_fmt_period(period),
@@ -209,7 +220,7 @@ async def run_analysis(
         chunk = chunks[0]
         bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload)
         batch_hashes.append(bhash)
-        dynamic = format_messages(chunk.messages, period=period, title=None)
+        dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
         text, cost, hit = await _call_cached(
             repo=repo,
             oai=oai,
@@ -263,7 +274,7 @@ async def run_analysis(
 
     async def _map(chunk) -> tuple[str, str, float, bool]:
         bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
-        dynamic = format_messages(chunk.messages, period=period, title=None)
+        dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
         user = preset.render_user(
             period=_fmt_period(period),
             title=title or "—",

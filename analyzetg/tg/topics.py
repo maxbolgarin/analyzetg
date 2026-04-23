@@ -21,15 +21,20 @@ class ForumTopic:
     top_message: int | None = None
     closed: bool = False
     pinned: bool = False
+    unread_count: int = 0
+    read_inbox_max_id: int = 0
 
 
 async def list_forum_topics(client: TelegramClient, chat_id: int) -> list[ForumTopic]:
     """Paginate GetForumTopicsRequest until exhausted."""
-    from telethon.tl.functions.channels import GetForumTopicsRequest  # type: ignore[attr-defined]
+    from datetime import datetime
 
-    channel = await client.get_input_entity(chat_id)
+    # Lives under `messages` in Telethon ≥ 1.36 (was moved from `channels`).
+    from telethon.tl.functions.messages import GetForumTopicsRequest  # type: ignore[attr-defined]
+
+    peer = await client.get_input_entity(chat_id)
     out: list[ForumTopic] = []
-    offset_date = 0
+    offset_date: datetime | None = None
     offset_id = 0
     offset_topic = 0
     seen_ids: set[int] = set()
@@ -38,7 +43,7 @@ async def list_forum_topics(client: TelegramClient, chat_id: int) -> list[ForumT
     for _ in range(200):
         resp = await client(
             GetForumTopicsRequest(
-                channel=channel,
+                peer=peer,
                 offset_date=offset_date,
                 offset_id=offset_id,
                 offset_topic=offset_topic,
@@ -62,6 +67,8 @@ async def list_forum_topics(client: TelegramClient, chat_id: int) -> list[ForumT
                     top_message=getattr(t, "top_message", None),
                     closed=bool(getattr(t, "closed", False)),
                     pinned=bool(getattr(t, "pinned", False)),
+                    unread_count=int(getattr(t, "unread_count", 0) or 0),
+                    read_inbox_max_id=int(getattr(t, "read_inbox_max_id", 0) or 0),
                 )
             )
         if len(batch_topics) < 100 or new_in_batch == 0:
@@ -71,7 +78,7 @@ async def list_forum_topics(client: TelegramClient, chat_id: int) -> list[ForumT
         offset_topic = getattr(last, "id", 0) or 0
         msgs = getattr(resp, "messages", []) or []
         if msgs and getattr(msgs[-1], "date", None):
-            offset_date = int(msgs[-1].date.timestamp())
+            offset_date = msgs[-1].date
     else:
         log.warning("topics.pagination_hit_safety_cap", collected=len(out))
     return out
@@ -91,17 +98,54 @@ async def get_linked_chat_id(client: TelegramClient, chat_id: int) -> int | None
 
 
 async def get_full_channel_info(client: TelegramClient, chat_id: int) -> dict:
-    """Collect subscriber count + linked chat id for `channel-info`."""
+    """Rich metadata for a channel/supergroup/forum: participants, admins,
+    online count, slowmode, pinned msg, invite link, linked discussion."""
     from telethon.tl.functions.channels import GetFullChannelRequest  # type: ignore[attr-defined]
 
-    channel = await client.get_input_entity(chat_id)
-    full = await client(GetFullChannelRequest(channel=channel))
+    channel_entity = await client.get_input_entity(chat_id)
+    full = await client(GetFullChannelRequest(channel=channel_entity))
+    fc = full.full_chat
+
+    invite_link: str | None = None
+    exported = getattr(fc, "exported_invite", None)
+    if exported is not None:
+        invite_link = getattr(exported, "link", None)
+
+    # The Channel object (from the chats array) carries per-channel flags.
+    ch = None
+    chats = getattr(full, "chats", None) or []
+    for c in chats:
+        if getattr(c, "id", None) is not None and int(c.id) == abs(chat_id) - 1_000_000_000_000:
+            ch = c
+            break
+    if ch is None and chats:
+        ch = chats[0]
+
+    username: str | None = None
+    if ch is not None:
+        username = getattr(ch, "username", None)
+        # If no @username, try usernames[] (multi-username channels).
+        if not username:
+            usernames = getattr(ch, "usernames", None) or []
+            if usernames:
+                username = getattr(usernames[0], "username", None)
+
     return {
-        "participants_count": getattr(full.full_chat, "participants_count", None),
-        "linked_chat_id": (
-            int(f"-100{full.full_chat.linked_chat_id}")
-            if getattr(full.full_chat, "linked_chat_id", None)
-            else None
-        ),
-        "about": getattr(full.full_chat, "about", None),
+        "participants_count": getattr(fc, "participants_count", None),
+        "admins_count": getattr(fc, "admins_count", None),
+        "kicked_count": getattr(fc, "kicked_count", None),
+        "banned_count": getattr(fc, "banned_count", None),
+        "online_count": getattr(fc, "online_count", None),
+        "linked_chat_id": (int(f"-100{fc.linked_chat_id}") if getattr(fc, "linked_chat_id", None) else None),
+        "about": getattr(fc, "about", None),
+        "slowmode_seconds": getattr(fc, "slowmode_seconds", None),
+        "pinned_msg_id": getattr(fc, "pinned_msg_id", None),
+        "invite_link": invite_link,
+        "username": username,
+        "broadcast": bool(getattr(ch, "broadcast", False)) if ch else None,
+        "megagroup": bool(getattr(ch, "megagroup", False)) if ch else None,
+        "forum": bool(getattr(ch, "forum", False)) if ch else None,
+        "restricted": bool(getattr(ch, "restricted", False)) if ch else None,
+        "scam": bool(getattr(ch, "scam", False)) if ch else None,
+        "verified": bool(getattr(ch, "verified", False)) if ch else None,
     }

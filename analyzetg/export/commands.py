@@ -28,6 +28,7 @@ from analyzetg.tg.dialogs import (
 )
 from analyzetg.tg.resolver import resolve
 from analyzetg.tg.sync import backfill
+from analyzetg.tg.topics import ForumTopic, list_forum_topics
 from analyzetg.util.logging import get_logger
 
 console = Console()
@@ -88,32 +89,38 @@ async def cmd_dump(
     include_transcripts: bool,
     console_out: bool = False,
     mark_read: bool = False,
+    all_flat: bool = False,
+    all_per_topic: bool = False,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
 
     Default starting point is the dialog's unread marker. Pass
     `--last-days`, `--from-msg`, `--full-history`, or `--since/--until` to
     override. When <ref> is omitted, iterates every dialog with unread
-    messages after a confirmation prompt.
+    messages after a confirmation prompt. Forum chats support
+    `--thread N`, `--all-flat` (whole forum, explicit period required), or
+    `--all-per-topic` (one file per topic).
     """
+    # No ref → interactive wizard (pick chat → thread → period → run).
+    # Wizard opens its own tg_client; return before this function tries to.
+    if ref is None:
+        from analyzetg.interactive import run_interactive_dump
+
+        await run_interactive_dump(
+            fmt=fmt,
+            output=output,
+            with_transcribe=with_transcribe,
+            include_transcripts=include_transcripts,
+            console_out=console_out,
+            mark_read=mark_read,
+        )
+        return
+
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        if ref is None:
-            await _dump_no_ref(
-                client=client,
-                repo=repo,
-                output=output,
-                fmt=fmt,
-                with_transcribe=with_transcribe,
-                include_transcripts=include_transcripts,
-                console_out=console_out,
-                mark_read=mark_read,
-            )
-            return
-
         console.print(f"[dim]→ Resolving[/] {ref}")
         resolved = await resolve(client, repo, ref, join=join)
         chat_id = resolved.chat_id
@@ -132,65 +139,325 @@ async def cmd_dump(
         ):
             from_msg_id = resolved.msg_id
 
-        start_msg_id = await _determine_start(
-            client=client,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            full_history=full_history,
-            from_msg_id=from_msg_id,
-            time_window=(since_dt, until_dt),
-        )
+        # --- Forum routing
+        is_forum = resolved.kind == "forum"
+        if is_forum and thread_id == 0 and not all_flat and not all_per_topic:
+            all_flat, all_per_topic, thread_id = await _forum_pick_mode(client, chat_id, resolved.title)
 
-        console.print("[dim]→ Fetching new messages from Telegram...[/]")
-        await _pull_history(
-            client=client,
-            repo=repo,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            start_msg_id=start_msg_id,
-            since_dt=since_dt,
-        )
-
-        if with_transcribe:
-            await _transcribe_pending(
+        if is_forum and all_per_topic:
+            await _dump_forum_per_topic(
                 client=client,
                 repo=repo,
                 settings=settings,
                 chat_id=chat_id,
+                chat_title=resolved.title,
                 since_dt=since_dt,
                 until_dt=until_dt,
+                from_msg_id=from_msg_id,
+                full_history=full_history,
+                fmt=fmt,
+                output=output,
+                with_transcribe=with_transcribe,
+                include_transcripts=include_transcripts,
+                console_out=console_out,
+                mark_read=mark_read,
+            )
+            return
+
+        if is_forum and all_flat:
+            if not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
+                console.print(
+                    "[red]--all-flat on a forum needs an explicit period.[/]\n"
+                    "Pass [cyan]--last-days N[/], [cyan]--full-history[/], or "
+                    "[cyan]--since/--until[/]."
+                )
+                raise typer.Exit(2)
+            thread_id = None
+
+        # Single topic in a forum + unread-default → resolve topic's marker.
+        if (
+            is_forum
+            and thread_id
+            and thread_id > 0
+            and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
+        ):
+            console.print("[dim]→ Looking up topic's unread marker...[/]")
+            topics = await list_forum_topics(client, chat_id)
+            matched = next((t for t in topics if t.topic_id == thread_id), None)
+            if matched is None:
+                console.print(f"[red]Topic {thread_id} not found in this forum.[/]")
+                raise typer.Exit(2)
+            if matched.unread_count == 0:
+                console.print(
+                    f"[yellow]No unread messages in topic '{matched.title}'.[/] "
+                    "Pass --last-days / --full-history to dump anyway."
+                )
+                raise typer.Exit(0)
+            from_msg_id = matched.read_inbox_max_id + 1
+            console.print(
+                f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
+                f"after msg_id={matched.read_inbox_max_id}[/]"
             )
 
-        msgs = await repo.iter_messages(
-            chat_id,
+        await _dump_single(
+            client=client,
+            repo=repo,
+            settings=settings,
+            chat_id=chat_id,
             thread_id=thread_id,
-            since=since_dt,
-            until=until_dt,
-            min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
+            title=resolved.title,
+            since_dt=since_dt,
+            until_dt=until_dt,
+            from_msg_id=from_msg_id,
+            full_history=full_history,
+            fmt=fmt,
+            output=output,
+            with_transcribe=with_transcribe,
+            include_transcripts=include_transcripts,
+            console_out=console_out,
+            mark_read=mark_read,
         )
-        if not include_transcripts:
-            for m in msgs:
-                if m.transcript and not m.text:
-                    m.transcript = None
 
-        if console_out:
-            _print_console(msgs, title=resolved.title, fmt=fmt, count=len(msgs))
-            if output is not None:
-                output.parent.mkdir(parents=True, exist_ok=True)
-                _write(msgs, fmt=fmt, output=output, title=resolved.title)
-                console.print(f"[green]Also saved:[/] {output}")
-        else:
-            if output is None:
-                output = _default_output_path(resolved.title, fmt)
+
+def _has_explicit_period(
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    from_msg_id: int | None,
+    full_history: bool,
+) -> bool:
+    return bool(since_dt or until_dt or from_msg_id is not None or full_history)
+
+
+async def _dump_single(
+    *,
+    client,
+    repo: Repo,
+    settings,
+    chat_id: int,
+    thread_id: int | None,
+    title: str | None,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    from_msg_id: int | None,
+    full_history: bool,
+    fmt: str,
+    output: Path | None,
+    with_transcribe: bool,
+    include_transcripts: bool,
+    console_out: bool,
+    mark_read: bool,
+) -> None:
+    """Dump one chat (or one thread, or flat-forum) to a file or console."""
+    start_msg_id = await _determine_start(
+        client=client,
+        chat_id=chat_id,
+        thread_id=thread_id if thread_id else 0,
+        full_history=full_history,
+        from_msg_id=from_msg_id,
+        time_window=(since_dt, until_dt),
+    )
+
+    console.print("[dim]→ Fetching new messages from Telegram...[/]")
+    await _pull_history(
+        client=client,
+        repo=repo,
+        chat_id=chat_id,
+        thread_id=thread_id if thread_id else 0,
+        start_msg_id=start_msg_id,
+        since_dt=since_dt,
+    )
+
+    if with_transcribe:
+        await _transcribe_pending(
+            client=client,
+            repo=repo,
+            settings=settings,
+            chat_id=chat_id,
+            since_dt=since_dt,
+            until_dt=until_dt,
+        )
+
+    msgs = await repo.iter_messages(
+        chat_id,
+        thread_id=thread_id,
+        since=since_dt,
+        until=until_dt,
+        min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
+    )
+    if not include_transcripts:
+        for m in msgs:
+            if m.transcript and not m.text:
+                m.transcript = None
+
+    if console_out:
+        _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
+        if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
-            _write(msgs, fmt=fmt, output=output, title=resolved.title)
-            console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {output}")
+            _write(msgs, fmt=fmt, output=output, title=title)
+            console.print(f"[green]Also saved:[/] {output}")
+    else:
+        target = output if output is not None else _default_output_path(title, fmt)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write(msgs, fmt=fmt, output=target, title=title)
+        console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {target}")
 
-        if mark_read and msgs:
-            latest = max(m.msg_id for m in msgs)
-            ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id or None)
-            if ok:
-                console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+    if mark_read and msgs:
+        latest = max(m.msg_id for m in msgs)
+        ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
+        if ok:
+            console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+
+
+async def _dump_forum_per_topic(
+    *,
+    client,
+    repo: Repo,
+    settings,
+    chat_id: int,
+    chat_title: str | None,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    from_msg_id: int | None,
+    full_history: bool,
+    fmt: str,
+    output: Path | None,
+    with_transcribe: bool,
+    include_transcripts: bool,
+    console_out: bool,
+    mark_read: bool,
+) -> None:
+    console.print("[dim]→ Listing forum topics...[/]")
+    topics = await list_forum_topics(client, chat_id)
+    explicit_period = _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
+    targets = topics if explicit_period else [t for t in topics if t.unread_count > 0]
+    if not targets:
+        console.print(
+            "[yellow]No topics with unread messages.[/] "
+            "Pass --last-days / --full-history to dump everything anyway."
+        )
+        return
+
+    _print_topics_table(targets, with_unread=True)
+    if not typer.confirm(f"Dump {len(targets)} topic(s)?", default=True):
+        console.print("[dim]Aborted.[/]")
+        return
+
+    if console_out:
+        out_dir = None
+    else:
+        chat_slug = _slugify(chat_title or str(chat_id))
+        if output is not None and output.exists() and output.is_dir():
+            out_dir = output / chat_slug
+        elif output is not None and output.suffix:
+            console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
+            raise typer.Exit(2)
+        else:
+            out_dir = (output or Path("reports")) / chat_slug
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
+    for t in targets:
+        topic_title = f"{chat_title or chat_id} / {t.title}"
+        console.print(f"\n[bold cyan]>>[/] {t.title} (topic_id={t.topic_id})")
+        try:
+            topic_from_msg = from_msg_id
+            topic_full = full_history
+            if not explicit_period:
+                topic_from_msg = t.read_inbox_max_id + 1 if t.read_inbox_max_id else None
+                if topic_from_msg is None:
+                    topic_full = True
+            per_file = out_dir / f"{_slugify(t.title or str(t.topic_id))}-{stamp}.{ext}" if out_dir else None
+            await _dump_single(
+                client=client,
+                repo=repo,
+                settings=settings,
+                chat_id=chat_id,
+                thread_id=t.topic_id,
+                title=topic_title,
+                since_dt=since_dt,
+                until_dt=until_dt,
+                from_msg_id=topic_from_msg,
+                full_history=topic_full,
+                fmt=fmt,
+                output=per_file,
+                with_transcribe=with_transcribe,
+                include_transcripts=include_transcripts,
+                console_out=console_out,
+                mark_read=mark_read,
+            )
+        except typer.Exit:
+            raise
+        except Exception as e:
+            log.error(
+                "dump.forum_per_topic.error",
+                chat_id=chat_id,
+                topic_id=t.topic_id,
+                err=str(e)[:200],
+            )
+            console.print(f"[red]Topic {t.title} failed:[/] {e}")
+
+
+async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
+    """Interactively pick a forum mode for dump. Returns (all_flat, all_per_topic, thread_id)."""
+    import sys as _sys
+
+    console.print("[dim]→ Listing forum topics...[/]")
+    topics = await list_forum_topics(client, chat_id)
+    if not topics:
+        console.print("[yellow]No topics in this forum.[/]")
+        raise typer.Exit(0)
+
+    if not _sys.stdin.isatty():
+        _print_topics_table(topics, with_unread=True)
+        console.print(
+            "\n[red]This is a forum — pick one of:[/]\n"
+            "  --thread <id>       single topic\n"
+            "  --all-per-topic     one file per topic\n"
+            "  --all-flat          whole forum as one dump (needs a period flag)\n"
+        )
+        raise typer.Exit(2)
+
+    _print_topics_table(topics, with_unread=True)
+    while True:
+        answer = typer.prompt("Pick topic id, A=all-flat, P=per-topic, Q=quit", default="P").strip()
+        up = answer.upper()
+        if up == "Q":
+            console.print("[dim]Aborted.[/]")
+            raise typer.Exit(0)
+        if up == "A":
+            return True, False, 0
+        if up == "P":
+            return False, True, 0
+        if answer.isdigit():
+            tid = int(answer)
+            if any(t.topic_id == tid for t in topics):
+                return False, False, tid
+            console.print(f"[red]No topic with id={tid}.[/]")
+            continue
+        console.print("[red]Not a valid choice. Try again.[/]")
+
+
+def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -> None:
+    from rich.table import Table as _Table
+
+    t = _Table(title="Forum topics")
+    cols = ["id", "title", "unread", "top_msg", "closed", "pinned"]
+    if not with_unread:
+        cols.remove("unread")
+    for col in cols:
+        t.add_column(col)
+    for topic in topics:
+        row = [
+            str(topic.topic_id),
+            topic.title,
+            str(topic.unread_count) if with_unread else None,
+            str(topic.top_message or ""),
+            "yes" if topic.closed else "",
+            "yes" if topic.pinned else "",
+        ]
+        t.add_row(*[c for c in row if c is not None])
+    console.print(t)
 
 
 async def _determine_start(
@@ -291,6 +558,30 @@ async def _transcribe_pending(
                 )
 
     await asyncio.gather(*[work(m) for m in pending])
+
+
+async def run_all_unread_dump(
+    *,
+    fmt: str = "md",
+    output: Path | None = None,
+    with_transcribe: bool = False,
+    include_transcripts: bool = True,
+    console_out: bool = False,
+    mark_read: bool = False,
+) -> None:
+    """Public: dump every unread chat in one batch (was the old no-ref default)."""
+    settings = get_settings()
+    async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
+        await _dump_no_ref(
+            client=client,
+            repo=repo,
+            output=output,
+            fmt=fmt,
+            with_transcribe=with_transcribe,
+            include_transcripts=include_transcripts,
+            console_out=console_out,
+            mark_read=mark_read,
+        )
 
 
 async def _dump_no_ref(

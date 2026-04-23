@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from analyzetg.analyzer.formatter import format_messages
+from analyzetg.analyzer.formatter import (
+    build_link_template,
+    chat_header_preamble,
+    format_messages,
+)
 from analyzetg.models import Message
 
 
@@ -22,8 +26,49 @@ def test_single_day_uses_hhmm_only() -> None:
     d = datetime(2026, 4, 19, 12, 34)
     msgs = [_m(1, d, sender_name="Alice", text="hello")]
     out = format_messages(msgs)
-    assert "[12:34]" in out
+    assert "[12:34 #1]" in out
     assert "04-19" not in out
+
+
+def test_message_line_includes_msg_id() -> None:
+    d = datetime(2026, 4, 19, 12, 0)
+    out = format_messages([_m(54321, d, sender_name="a", text="x")])
+    assert "#54321" in out
+
+
+def test_link_template_appears_in_header_when_given() -> None:
+    d = datetime(2026, 4, 19, 12, 0)
+    msgs = [_m(1, d, sender_name="a", text="x")]
+    tmpl = "https://t.me/viberadar/{msg_id}"
+    out = format_messages(msgs, link_template=tmpl)
+    assert tmpl in out
+
+
+def test_chat_header_preamble_carries_link_template() -> None:
+    d = datetime(2026, 4, 19)
+    tmpl = "https://t.me/c/1234567890/{msg_id}"
+    out = chat_header_preamble("Chat", (d, d), link_template=tmpl)
+    assert tmpl in out
+
+
+def test_build_link_template_variants() -> None:
+    # Public channel.
+    assert (
+        build_link_template(chat_username="viberadar", chat_internal_id=None)
+        == "https://t.me/viberadar/{msg_id}"
+    )
+    # Private chat → /c/ form.
+    assert (
+        build_link_template(chat_username=None, chat_internal_id=1234567890)
+        == "https://t.me/c/1234567890/{msg_id}"
+    )
+    # Forum topic — thread_id injected.
+    assert (
+        build_link_template(chat_username="forum", chat_internal_id=None, thread_id=7)
+        == "https://t.me/forum/7/{msg_id}"
+    )
+    # No info → None (prompt will omit link instructions).
+    assert build_link_template(chat_username=None, chat_internal_id=None) is None
 
 
 def test_multi_day_same_year() -> None:

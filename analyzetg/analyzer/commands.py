@@ -3,11 +3,17 @@
 `cmd_analyze` resolves a chat reference, pulls messages fresh from Telegram
 (no subscription row, no sync_state writes), and hands off to the existing
 analysis pipeline. Default start-point is the dialog's unread marker.
+
+Forum chats are first-class: `--thread N` targets one topic; `--all-flat`
+collapses the whole forum into one analysis; `--all-per-topic` runs one
+analysis per topic with unread. Without any mode flag in a TTY, a picker
+prompts for choice.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +33,7 @@ from analyzetg.tg.dialogs import (
 )
 from analyzetg.tg.resolver import resolve
 from analyzetg.tg.sync import backfill
+from analyzetg.tg.topics import ForumTopic, list_forum_topics
 from analyzetg.util.logging import get_logger
 
 console = Console()
@@ -39,6 +46,20 @@ def _parse_ymd(s: str | None) -> datetime | None:
     return datetime.strptime(s, "%Y-%m-%d")
 
 
+def _derive_internal_id(chat_id: int) -> int | None:
+    """Strip the `-100` prefix Telethon uses for channels/supergroups.
+
+    Returns None for regular users / small groups where the id isn't
+    suitable for a t.me/c/ link.
+    """
+    if chat_id >= 0:
+        return None
+    abs_id = abs(chat_id)
+    if abs_id > 1_000_000_000_000:
+        return abs_id - 1_000_000_000_000
+    return None
+
+
 def _parse_from_msg(value: str | None) -> int | None:
     if not value:
         return None
@@ -47,6 +68,15 @@ def _parse_from_msg(value: str | None) -> int | None:
     from analyzetg.tg.links import parse
 
     return parse(value).msg_id
+
+
+def _has_explicit_period(
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    from_msg_id: int | None,
+    full_history: bool,
+) -> bool:
+    return bool(since_dt or until_dt or from_msg_id is not None or full_history)
 
 
 async def cmd_analyze(
@@ -68,16 +98,66 @@ async def cmd_analyze(
     no_cache: bool = False,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
+    all_flat: bool = False,
+    all_per_topic: bool = False,
 ) -> None:
+    # No ref → interactive wizard (pick chat → thread → preset → period → run).
+    # Wizard opens its own tg_client; return before this function tries to.
+    if ref is None:
+        from analyzetg.interactive import run_interactive_analyze
+
+        await run_interactive_analyze(
+            console_out=console_out,
+            output=output,
+            mark_read=mark_read,
+        )
+        return
+
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        if ref is None:
-            await _run_no_ref(
+        console.print(f"[dim]→ Resolving[/] {ref}")
+        resolved = await resolve(client, repo, ref)
+        chat_id = resolved.chat_id
+        thread_id = thread if thread is not None else (resolved.thread_id or 0)
+        title = resolved.title
+        console.print(
+            f"[dim]→ Resolved[/] {title or chat_id} "
+            f"[dim](id={chat_id}, kind={resolved.kind}"
+            f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
+        )
+
+        # A link like /group/100/5000 carries a msg_id; treat it as start
+        # unless an explicit time window / full-history flag was passed.
+        if (
+            from_msg_id is None
+            and not full_history
+            and resolved.msg_id is not None
+            and since_dt is None
+            and until_dt is None
+        ):
+            from_msg_id = resolved.msg_id
+
+        # --- Forum routing
+        is_forum = resolved.kind == "forum"
+        if is_forum and thread_id == 0 and not all_flat and not all_per_topic:
+            # No explicit topic / mode. Decide via interactive picker or bail.
+            all_flat, all_per_topic, thread_id = await _forum_pick_mode(client, chat_id, title)
+
+        if is_forum and all_per_topic:
+            await _run_forum_per_topic(
                 client=client,
                 repo=repo,
+                chat_id=chat_id,
+                chat_title=title,
+                chat_username=resolved.username,
+                chat_internal_id=_derive_internal_id(chat_id),
+                since_dt=since_dt,
+                until_dt=until_dt,
+                from_msg_id=from_msg_id,
+                full_history=full_history,
                 preset=preset,
                 prompt_file=prompt_file,
                 model=model,
@@ -91,71 +171,327 @@ async def cmd_analyze(
             )
             return
 
-        console.print(f"[dim]→ Resolving[/] {ref}")
-        resolved = await resolve(client, repo, ref)
-        chat_id = resolved.chat_id
-        thread_id = thread if thread is not None else (resolved.thread_id or 0)
-        title = resolved.title
-        console.print(
-            f"[dim]→ Resolved[/] {title or chat_id} "
-            f"[dim](id={chat_id}, kind={resolved.kind}"
-            f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
-        )
-        # A link like /group/100/5000 carries a msg_id; treat it as start
-        # unless an explicit time window / full-history flag was passed.
+        if is_forum and all_flat:
+            if not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
+                console.print(
+                    "[red]--all-flat on a forum needs an explicit period.[/]\n"
+                    "Pass [cyan]--last-days N[/], [cyan]--full-history[/], or "
+                    "[cyan]--since/--until[/]. Forum-wide unread across topics "
+                    "isn't collapsible into one marker — use "
+                    "[cyan]--all-per-topic[/] instead."
+                )
+                raise typer.Exit(2)
+            # thread_id=None → iter_messages skips the thread filter entirely.
+            thread_id = None
+
+        # --- Single topic in a forum + unread-default: resolve the topic's
+        # own read marker so the unread-default path has a usable anchor.
         if (
-            from_msg_id is None
-            and not full_history
-            and resolved.msg_id is not None
-            and since_dt is None
-            and until_dt is None
+            is_forum
+            and thread_id
+            and thread_id > 0
+            and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
         ):
-            from_msg_id = resolved.msg_id
+            from analyzetg.tg.topics import list_forum_topics
 
-        start_msg_id = await _determine_start(
-            client=client,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            full_history=full_history,
-            from_msg_id=from_msg_id,
-            time_window=(since_dt, until_dt),
-        )
+            console.print("[dim]→ Looking up topic's unread marker...[/]")
+            topics = await list_forum_topics(client, chat_id)
+            matched = next((t for t in topics if t.topic_id == thread_id), None)
+            if matched is None:
+                console.print(f"[red]Topic {thread_id} not found in this forum.[/]")
+                raise typer.Exit(2)
+            if matched.unread_count == 0:
+                console.print(
+                    f"[yellow]No unread messages in topic '{matched.title}'.[/] "
+                    "Pass --last-days / --full-history to analyze anyway."
+                )
+                raise typer.Exit(0)
+            from_msg_id = matched.read_inbox_max_id + 1
+            console.print(
+                f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
+                f"after msg_id={matched.read_inbox_max_id}[/]"
+            )
 
-        console.print("[dim]→ Fetching new messages from Telegram...[/]")
-        await _pull_history(
+        # --- Single-chat / single-topic / flat-forum path
+        await _run_single(
             client=client,
             repo=repo,
             chat_id=chat_id,
             thread_id=thread_id,
-            start_msg_id=start_msg_id,
+            title=title,
+            chat_username=resolved.username,
+            chat_internal_id=_derive_internal_id(chat_id),
             since_dt=since_dt,
-        )
-        console.print("[dim]→ Running analysis...[/]")
-
-        opts = AnalysisOptions(
+            until_dt=until_dt,
+            from_msg_id=from_msg_id,
+            full_history=full_history,
             preset=preset,
             prompt_file=prompt_file,
-            model_override=model,
-            filter_model_override=filter_model,
-            use_cache=not no_cache,
+            model=model,
+            filter_model=filter_model,
+            output=output,
+            console_out=console_out,
+            mark_read=mark_read,
+            no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
-            since=since_dt,
-            until=until_dt,
-            # start_msg_id is inclusive of the next message (msg_id > start).
-            # When full_history / time-window drives selection, keep it None.
-            min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
         )
-        result = await run_analysis(repo=repo, chat_id=chat_id, thread_id=thread_id, title=title, opts=opts)
 
-        if mark_read and result.msg_count > 0:
-            latest = await repo.get_max_msg_id(chat_id, thread_id or None)
-            if latest:
-                ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id or None)
-                if ok:
-                    console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+
+async def _run_single(
+    *,
+    client,
+    repo: Repo,
+    chat_id: int,
+    thread_id: int | None,
+    title: str | None,
+    chat_username: str | None,
+    chat_internal_id: int | None,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    from_msg_id: int | None,
+    full_history: bool,
+    preset: str,
+    prompt_file: Path | None,
+    model: str | None,
+    filter_model: str | None,
+    output: Path | None,
+    console_out: bool,
+    mark_read: bool,
+    no_cache: bool,
+    include_transcripts: bool,
+    min_msg_chars: int | None,
+) -> None:
+    """Analyze one chat or one thread. Shared by ref-mode and per-topic loop."""
+    start_msg_id = await _determine_start(
+        client=client,
+        chat_id=chat_id,
+        thread_id=thread_id if thread_id else 0,
+        full_history=full_history,
+        from_msg_id=from_msg_id,
+        time_window=(since_dt, until_dt),
+    )
+    console.print("[dim]→ Fetching new messages from Telegram...[/]")
+    await _pull_history(
+        client=client,
+        repo=repo,
+        chat_id=chat_id,
+        thread_id=thread_id if thread_id else 0,
+        start_msg_id=start_msg_id,
+        since_dt=since_dt,
+    )
+    console.print("[dim]→ Running analysis...[/]")
+
+    opts = AnalysisOptions(
+        preset=preset,
+        prompt_file=prompt_file,
+        model_override=model,
+        filter_model_override=filter_model,
+        use_cache=not no_cache,
+        include_transcripts=include_transcripts,
+        min_msg_chars=min_msg_chars,
+        since=since_dt,
+        until=until_dt,
+        min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
+    )
+    result = await run_analysis(
+        repo=repo,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        title=title,
+        opts=opts,
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
+    )
+
+    if mark_read and result.msg_count > 0:
+        # For flat-forum (thread_id=None), send_read_acknowledge moves the
+        # dialog-level marker; individual topic markers aren't touched by
+        # Telethon's high-level helper, so we skip (mark_as_read already does).
+        latest = await repo.get_max_msg_id(chat_id, thread_id if thread_id else None)
+        if latest:
+            ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
+            if ok:
+                console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
 
     _print_and_write(result, output=output, title=title, console_out=console_out)
+
+
+async def _run_forum_per_topic(
+    *,
+    client,
+    repo: Repo,
+    chat_id: int,
+    chat_title: str | None,
+    chat_username: str | None,
+    chat_internal_id: int | None,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    from_msg_id: int | None,
+    full_history: bool,
+    preset: str,
+    prompt_file: Path | None,
+    model: str | None,
+    filter_model: str | None,
+    output: Path | None,
+    console_out: bool,
+    mark_read: bool,
+    no_cache: bool,
+    include_transcripts: bool,
+    min_msg_chars: int | None,
+) -> None:
+    """One analysis per topic; reports land in reports/{chat-slug}/."""
+    console.print("[dim]→ Listing forum topics...[/]")
+    topics = await list_forum_topics(client, chat_id)
+    explicit_period = _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
+    targets = topics if explicit_period else [t for t in topics if t.unread_count > 0]
+    if not targets:
+        console.print(
+            "[yellow]No topics with unread messages.[/] "
+            "Pass --last-days / --full-history to analyze everything anyway."
+        )
+        return
+
+    _print_topics_table(targets, with_unread=True)
+    total_unread = sum(t.unread_count for t in targets)
+    if not typer.confirm(
+        f"Analyze {len(targets)} topic(s)"
+        + (f" with {total_unread} unread" if not explicit_period else "")
+        + "?",
+        default=True,
+    ):
+        console.print("[dim]Aborted.[/]")
+        return
+
+    if console_out:
+        out_dir = None
+    else:
+        chat_slug = _slugify(chat_title or str(chat_id))
+        if output is not None and output.exists() and output.is_dir():
+            out_dir = output / chat_slug
+        elif output is not None and output.suffix:
+            console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
+            raise typer.Exit(2)
+        else:
+            out_dir = (output or Path("reports")) / chat_slug
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    for t in targets:
+        topic_title = f"{chat_title or chat_id} / {t.title}"
+        console.print(
+            f"\n[bold cyan]>>[/] {t.title} "
+            f"(topic_id={t.topic_id}" + (f", {t.unread_count} unread" if not explicit_period else "") + ")"
+        )
+        try:
+            # Per-topic unread marker (not the dialog-level one).
+            topic_from_msg = from_msg_id
+            topic_full = full_history
+            if not explicit_period:
+                # Use topic's own read marker as the start.
+                topic_from_msg = t.read_inbox_max_id + 1 if t.read_inbox_max_id else None
+                # If topic has no read_inbox_max_id but unread_count > 0 (rare),
+                # fall back to "full topic history".
+                if topic_from_msg is None:
+                    topic_full = True
+
+            per_file = (
+                out_dir / f"{_slugify(t.title or str(t.topic_id))}-{preset}-{stamp}.md" if out_dir else None
+            )
+            await _run_single(
+                client=client,
+                repo=repo,
+                chat_id=chat_id,
+                thread_id=t.topic_id,
+                title=topic_title,
+                chat_username=chat_username,
+                chat_internal_id=chat_internal_id,
+                since_dt=since_dt,
+                until_dt=until_dt,
+                from_msg_id=topic_from_msg,
+                full_history=topic_full,
+                preset=preset,
+                prompt_file=prompt_file,
+                model=model,
+                filter_model=filter_model,
+                output=per_file,
+                console_out=console_out,
+                mark_read=mark_read,
+                no_cache=no_cache,
+                include_transcripts=include_transcripts,
+                min_msg_chars=min_msg_chars,
+            )
+        except typer.Exit:
+            raise
+        except Exception as e:
+            log.error(
+                "analyze.forum_per_topic.error",
+                chat_id=chat_id,
+                topic_id=t.topic_id,
+                err=str(e)[:200],
+            )
+            console.print(f"[red]Topic {t.title} failed:[/] {e}")
+
+
+async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
+    """Interactively pick a forum mode. Returns (all_flat, all_per_topic, thread_id)."""
+    console.print("[dim]→ Listing forum topics...[/]")
+    topics = await list_forum_topics(client, chat_id)
+    if not topics:
+        console.print("[yellow]No topics in this forum.[/]")
+        raise typer.Exit(0)
+
+    if not sys.stdin.isatty():
+        _print_topics_table(topics, with_unread=True)
+        console.print(
+            "\n[red]This is a forum — pick one of:[/]\n"
+            "  --thread <id>       single topic\n"
+            "  --all-per-topic     one analysis per topic\n"
+            "  --all-flat          whole forum as one chat (needs a period flag)\n"
+            "Or run without flags in a terminal for an interactive picker."
+        )
+        raise typer.Exit(2)
+
+    _print_topics_table(topics, with_unread=True)
+    prompt = "Pick topic id, [cyan]A[/]ll-flat, [cyan]P[/]er-topic, [cyan]Q[/]uit"
+    while True:
+        answer = typer.prompt(prompt.replace("[cyan]", "").replace("[/]", ""), default="P")
+        answer = answer.strip()
+        up = answer.upper()
+        if up == "Q":
+            console.print("[dim]Aborted.[/]")
+            raise typer.Exit(0)
+        if up == "A":
+            return True, False, 0
+        if up == "P":
+            return False, True, 0
+        if answer.isdigit():
+            tid = int(answer)
+            if any(t.topic_id == tid for t in topics):
+                return False, False, tid
+            console.print(f"[red]No topic with id={tid}.[/]")
+            continue
+        console.print("[red]Not a valid choice. Try again.[/]")
+
+
+def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -> None:
+    t = Table(title="Forum topics")
+    cols = ["id", "title", "unread", "top_msg", "closed", "pinned"]
+    if not with_unread:
+        cols.remove("unread")
+    for col in cols:
+        t.add_column(col)
+    for topic in topics:
+        row = [
+            str(topic.topic_id),
+            topic.title,
+            str(topic.unread_count) if with_unread else None,
+            str(topic.top_message or ""),
+            "yes" if topic.closed else "",
+            "yes" if topic.pinned else "",
+        ]
+        t.add_row(*[c for c in row if c is not None])
+    console.print(t)
 
 
 async def _determine_start(
@@ -171,14 +507,12 @@ async def _determine_start(
     if full_history:
         return None
     if from_msg_id is not None:
-        # from-msg is inclusive: the analyzer filters with msg_id > (n-1) = n.
         return max(from_msg_id - 1, 0)
     if time_window[0] is not None or time_window[1] is not None:
         return None
-    # Default: unread marker.
     if thread_id:
         console.print(
-            "[red]Per-topic unread is not exposed by Telegram's high-level API.[/]\n"
+            "[red]Per-topic unread isn't exposed by Telegram for arbitrary threads.[/]\n"
             "Pass [cyan]--last-days N[/], [cyan]--from-msg <id>[/], or [cyan]--full-history[/]."
         )
         raise typer.Exit(2)
@@ -203,12 +537,7 @@ async def _pull_history(
     start_msg_id: int | None,
     since_dt: datetime | None,
 ) -> None:
-    """Fetch messages from Telegram into the local DB for the target window.
-
-    Consults the local DB first — if we already have messages above
-    `start_msg_id`, we only fetch what's newer than our local tail. This
-    avoids re-downloading the same range on repeat runs.
-    """
+    """Fetch messages from Telegram, skipping any range already in the DB."""
     thread_param = thread_id if thread_id else None
     if start_msg_id is not None or (since_dt is None):
         floor = start_msg_id if start_msg_id is not None else 0
@@ -225,7 +554,6 @@ async def _pull_history(
             direction="forward",
         )
     else:
-        # Pure time-window pull without a msg_id anchor.
         await backfill(
             client,
             repo,
@@ -269,7 +597,6 @@ async def _run_no_ref(
     else:
         out_dir = _resolve_output_dir(output, len(unread))
         if out_dir is None:
-            # Default — save every chat's report, don't spam the terminal.
             out_dir = Path("reports")
             out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -295,7 +622,15 @@ async def _run_no_ref(
                 min_msg_chars=min_msg_chars,
                 min_msg_id=u.read_inbox_max_id,
             )
-            result = await run_analysis(repo=repo, chat_id=u.chat_id, thread_id=0, title=u.title, opts=opts)
+            result = await run_analysis(
+                repo=repo,
+                chat_id=u.chat_id,
+                thread_id=0,
+                title=u.title,
+                opts=opts,
+                chat_username=u.username,
+                chat_internal_id=_derive_internal_id(u.chat_id),
+            )
             per_file = (
                 out_dir / f"{_slugify(u.title or str(u.chat_id))}-{preset}-{stamp}.md" if out_dir else None
             )
@@ -369,7 +704,6 @@ def _print_and_write(
         console.print(Rule(title or "result", style="cyan"))
         console.print(Markdown(result.final_result))
         console.print(Rule(style="cyan"))
-        # If user *also* passed -o, save the file alongside the console output.
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(result.final_result, encoding="utf-8")
@@ -397,6 +731,38 @@ def _compute_window(
         since_dt = until_dt - timedelta(days=last_days)
         return since_dt, until_dt
     return _parse_ymd(since), _parse_ymd(until)
+
+
+async def run_all_unread_analyze(
+    *,
+    preset: str = "summary",
+    prompt_file: Path | None = None,
+    model: str | None = None,
+    filter_model: str | None = None,
+    output: Path | None = None,
+    console_out: bool = False,
+    mark_read: bool = False,
+    no_cache: bool = False,
+    include_transcripts: bool = True,
+    min_msg_chars: int | None = None,
+) -> None:
+    """Public: run the batch-across-all-unread-chats flow (was the old no-ref default)."""
+    settings = get_settings()
+    async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
+        await _run_no_ref(
+            client=client,
+            repo=repo,
+            preset=preset,
+            prompt_file=prompt_file,
+            model=model,
+            filter_model=filter_model,
+            output=output,
+            console_out=console_out,
+            mark_read=mark_read,
+            no_cache=no_cache,
+            include_transcripts=include_transcripts,
+            min_msg_chars=min_msg_chars,
+        )
 
 
 async def cmd_stats(since: str | None, by: str) -> None:

@@ -21,10 +21,15 @@ app = typer.Typer(
     add_completion=False,
     rich_markup_mode="rich",
 )
+
+PANEL_MAIN = "Main"
+PANEL_SYNC = "Sync & subscriptions"
+PANEL_MAINT = "Maintenance"
+
 chats_app = typer.Typer(help="Manage subscriptions (what to sync).", no_args_is_help=True)
 cache_app = typer.Typer(help="Analysis cache maintenance.", no_args_is_help=True)
-app.add_typer(chats_app, name="chats")
-app.add_typer(cache_app, name="cache")
+app.add_typer(chats_app, name="chats", rich_help_panel=PANEL_SYNC)
+app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 
 console = Console()
 
@@ -44,7 +49,7 @@ def _run(coro) -> None:
 # =============================================================== 5.1 Setup & nav
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_MAIN)
 def init() -> None:
     """Interactive first-time setup: log in to Telegram and verify OpenAI key."""
     from analyzetg.tg.commands import cmd_init
@@ -52,26 +57,72 @@ def init() -> None:
     _run(cmd_init())
 
 
-@app.command()
-def dialogs(
+@app.command(rich_help_panel=PANEL_MAIN)
+def describe(
+    ref: str | None = typer.Argument(
+        None,
+        help=(
+            "Chat reference. Without it, prints an overview of dialogs. "
+            "For a chat: shows kind, username, stats, and (for forums) topics. "
+            "For a channel: shows linked discussion group and subscriber count."
+        ),
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Filter overview by kind: user | group | supergroup | channel | forum.",
+    ),
     search: str | None = typer.Option(None, "--search", help="Substring filter on title/username."),
-    kind: str | None = typer.Option(None, "--kind", help="user | group | channel | forum"),
-    limit: int = typer.Option(50, "--limit", help="Max rows."),
+    limit: int | None = typer.Option(None, "--limit", help="Max rows in overview."),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Show every dialog, including read ones and all kinds. "
+        "Default overview: chats with unread messages in forum/group/supergroup.",
+    ),
 ) -> None:
-    """List available dialogs (chats the user is in)."""
+    """List chats (no ref) or inspect one chat (with ref).
+
+    Default overview shows unread forums/groups/supergroups — the places
+    real discussion happens. Use --all to see everything, or narrow with
+    --kind / --search / --limit. With a ref, forums get a topics table
+    and channels get linked-discussion + subscriber count.
+    """
+    from analyzetg.tg.commands import cmd_describe
+
+    _run(
+        cmd_describe(
+            ref,
+            kind=kind,
+            search=search,
+            limit=limit,
+            show_all=show_all,
+        )
+    )
+
+
+# --- Hidden compatibility aliases: the consolidated `describe` absorbs these.
+# Kept callable so existing scripts don't break.
+
+
+@app.command(hidden=True)
+def dialogs(
+    search: str | None = typer.Option(None, "--search"),
+    kind: str | None = typer.Option(None, "--kind"),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """Deprecated: use `describe` instead."""
     from analyzetg.tg.commands import cmd_dialogs
 
     _run(cmd_dialogs(search=search, kind=kind, limit=limit))
 
 
-@app.command()
+@app.command(hidden=True)
 def topics(
-    chat_ref: str | None = typer.Argument(
-        None, help="Chat reference (link/@user/title). For a numeric id use --chat."
-    ),
-    chat: int | None = typer.Option(None, "--chat", help="Numeric chat_id (-100-prefixed)."),
+    chat_ref: str | None = typer.Argument(None),
+    chat: int | None = typer.Option(None, "--chat"),
 ) -> None:
-    """List forum topics for a supergroup with topics enabled."""
+    """Deprecated: use `describe <ref>` instead."""
     from analyzetg.tg.commands import cmd_topics
 
     if chat_ref is None and chat is None:
@@ -80,17 +131,17 @@ def topics(
     _run(cmd_topics(chat_ref if chat_ref is not None else str(chat)))
 
 
-@app.command()
-def resolve(anything: str = typer.Argument(..., help="Any link/username/id/fuzzy string.")) -> None:
-    """Diagnostic: parse a reference, resolve it, and show what we'd do with it."""
+@app.command(hidden=True)
+def resolve(anything: str = typer.Argument(...)) -> None:
+    """Diagnostic: parse a reference and show the resolution path."""
     from analyzetg.tg.commands import cmd_resolve
 
     _run(cmd_resolve(anything))
 
 
-@app.command("channel-info")
-def channel_info(ref: str = typer.Argument(..., help="Channel reference.")) -> None:
-    """Show channel's linked discussion group and subscriber count."""
+@app.command("channel-info", hidden=True)
+def channel_info(ref: str = typer.Argument(...)) -> None:
+    """Deprecated: use `describe <channel-ref>` instead."""
     from analyzetg.tg.commands import cmd_channel_info
 
     _run(cmd_channel_info(ref))
@@ -188,7 +239,7 @@ async def _remove_sub(chat_id: int, thread: int, purge: bool) -> None:
 # ================================================================ 5.3 Sync
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_SYNC)
 def sync(
     chat: int | None = typer.Option(None, "--chat"),
     thread: int | None = typer.Option(None, "--thread"),
@@ -200,13 +251,17 @@ def sync(
     _run(cmd_sync(chat=chat, thread=thread, dry_run=dry_run))
 
 
-@app.command()
+@app.command(hidden=True)
 def backfill(
     chat: int = typer.Option(..., "--chat"),
     from_msg: str = typer.Option(..., "--from-msg"),
     direction: str = typer.Option("back", "--direction", help="back | forward"),
 ) -> None:
-    """One-shot history backfill starting from a specific message."""
+    """One-shot history backfill starting from a specific message.
+
+    Niche helper — most users want `analyze --from-msg <id>` or
+    `dump --from-msg <id>` instead.
+    """
     from analyzetg.tg.commands import cmd_backfill
 
     _run(cmd_backfill(chat=chat, from_msg=from_msg, direction=direction))
@@ -215,7 +270,7 @@ def backfill(
 # ========================================================= 5.3 Transcriptions
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_SYNC)
 def transcribe(
     chat: int | None = typer.Option(None, "--chat"),
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
@@ -244,7 +299,7 @@ def transcribe(
 # =================================================================== 5.4 Analyze
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_MAIN)
 def analyze(
     ref: str | None = typer.Argument(
         None,
@@ -279,11 +334,26 @@ def analyze(
         "--mark-read",
         help="After analysis, advance Telegram's read marker to cover every processed message.",
     ),
+    all_flat: bool = typer.Option(
+        False,
+        "--all-flat",
+        help="Forum only: analyze the whole forum as one chat. Needs an explicit period flag.",
+    ),
+    all_per_topic: bool = typer.Option(
+        False,
+        "--all-per-topic",
+        help="Forum only: one report per topic. Reports land in reports/{chat}/.",
+    ),
     no_cache: bool = typer.Option(False, "--no-cache"),
     include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
     min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
 ) -> None:
-    """Analyze a chat. Default window = messages since your Telegram read marker."""
+    """Analyze a chat. Default window = messages since your Telegram read marker.
+
+    For forum chats: `--thread N` targets one topic, `--all-flat` treats
+    the forum as one chat (needs --last-days / --full-history),
+    `--all-per-topic` runs one analysis per topic.
+    """
     from analyzetg.analyzer.commands import cmd_analyze
 
     _run(
@@ -305,6 +375,8 @@ def analyze(
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
+            all_flat=all_flat,
+            all_per_topic=all_per_topic,
         )
     )
 
@@ -312,7 +384,7 @@ def analyze(
 # ============================================================== 5.5 Maintenance
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_MAINT)
 def stats(
     since: str | None = typer.Option(None, "--since"),
     by: str = typer.Option("preset", "--by", help="chat | preset | model | day | kind"),
@@ -328,17 +400,212 @@ def cache_purge(
     older_than: str = typer.Option("30d", "--older-than", help="Nd"),
     preset: str | None = typer.Option(None, "--preset"),
     model: str | None = typer.Option(None, "--model"),
+    vacuum: bool = typer.Option(False, "--vacuum", help="Run VACUUM after purge to reclaim disk."),
 ) -> None:
     """Delete cached analysis results by age and filters."""
-    _run(_cache_purge(older_than, preset, model))
+    _run(_cache_purge(older_than, preset, model, vacuum))
 
 
-async def _cache_purge(older_than: str, preset: str | None, model: str | None) -> None:
+async def _cache_purge(
+    older_than: str,
+    preset: str | None,
+    model: str | None,
+    vacuum: bool,
+) -> None:
     settings = get_settings()
     days = _parse_duration_days(older_than)
     async with open_repo(settings.storage.data_path) as repo:
         removed = await repo.cache_purge(older_than_days=days, preset=preset, model=model)
         console.print(f"[green]Purged[/] {removed} analysis_cache rows older than {days} days.")
+        if vacuum:
+            reclaimed = await repo.vacuum()
+            console.print(f"[green]Vacuumed[/] DB — reclaimed {_fmt_bytes(reclaimed)}.")
+
+
+@cache_app.command("stats")
+def cache_stats_cmd() -> None:
+    """Show analysis cache size, age range and per-(preset, model) breakdown."""
+    _run(_cache_stats())
+
+
+async def _cache_stats() -> None:
+    from rich.table import Table
+
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        s = await repo.cache_stats()
+    if s["rows"] == 0:
+        console.print("[yellow]analysis_cache is empty.[/]")
+        return
+    console.print(
+        f"[bold]analysis_cache[/] — {s['rows']} rows, "
+        f"{_fmt_bytes(s['result_bytes'])} of result text, "
+        f"saved ~${s['saved_cost_usd']:.4f} in re-runs.\n"
+        f"Age range: {s['oldest']}  →  {s['newest']}"
+    )
+    t = Table(title="By (preset, model)", show_lines=False)
+    t.add_column("preset")
+    t.add_column("model")
+    t.add_column("rows", justify="right")
+    t.add_column("size", justify="right")
+    t.add_column("saved $", justify="right")
+    for r in s["by_group"]:
+        t.add_row(
+            str(r["preset"]),
+            str(r["model"]),
+            str(r["rows"]),
+            _fmt_bytes(int(r["result_bytes"])),
+            f"${float(r['saved_cost_usd']):.4f}",
+        )
+    console.print(t)
+
+
+@cache_app.command("ls")
+def cache_ls_cmd(
+    preset: str | None = typer.Option(None, "--preset"),
+    model: str | None = typer.Option(None, "--model"),
+    older_than: str | None = typer.Option(None, "--older-than", help="Nd / Nw"),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """List cache entries (newest first). No result body — use `show` for that."""
+    _run(_cache_ls(preset, model, older_than, limit))
+
+
+async def _cache_ls(
+    preset: str | None,
+    model: str | None,
+    older_than: str | None,
+    limit: int,
+) -> None:
+    from rich.table import Table
+
+    settings = get_settings()
+    days = _parse_duration_days(older_than) if older_than else None
+    async with open_repo(settings.storage.data_path) as repo:
+        rows = await repo.cache_list(preset=preset, model=model, older_than_days=days, limit=limit)
+    if not rows:
+        console.print("[yellow]No matching entries.[/]")
+        return
+    t = Table(show_lines=False)
+    t.add_column("hash")
+    t.add_column("preset")
+    t.add_column("model")
+    t.add_column("ver")
+    t.add_column("size", justify="right")
+    t.add_column("cost", justify="right")
+    t.add_column("created_at")
+    for r in rows:
+        t.add_row(
+            str(r["batch_hash"])[:10],
+            str(r["preset"]),
+            str(r["model"]),
+            str(r["prompt_version"]),
+            _fmt_bytes(int(r["result_bytes"] or 0)),
+            f"${float(r['cost_usd'] or 0):.4f}",
+            str(r["created_at"]),
+        )
+    console.print(t)
+
+
+@cache_app.command("show")
+def cache_show_cmd(
+    batch_hash: str = typer.Argument(..., help="Full hash or unique prefix."),
+) -> None:
+    """Print a stored analysis result."""
+    _run(_cache_show(batch_hash))
+
+
+async def _cache_show(batch_hash: str) -> None:
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        row = await repo.cache_get(batch_hash)
+        if row is None:
+            # Prefix match fallback — unique prefix only.
+            matches = [
+                r for r in await repo.cache_list(limit=10_000) if str(r["batch_hash"]).startswith(batch_hash)
+            ]
+            if len(matches) == 0:
+                console.print(f"[red]No entry matching[/] {batch_hash}.")
+                raise typer.Exit(1)
+            if len(matches) > 1:
+                console.print(f"[red]Ambiguous prefix[/] — {len(matches)} matches. Use a longer prefix.")
+                raise typer.Exit(2)
+            row = await repo.cache_get(matches[0]["batch_hash"])
+            assert row is not None
+    console.print(
+        f"[bold]{row['batch_hash']}[/]  preset={row['preset']}  model={row['model']}  "
+        f"ver={row['prompt_version']}  cost=${float(row['cost_usd'] or 0):.4f}  "
+        f"created={row['created_at']}\n"
+    )
+    console.print(row["result"])
+
+
+@cache_app.command("export")
+def cache_export_cmd(
+    output: Path = typer.Option(
+        ..., "--output", "-o", help="File path. Extension picks format if --format omitted."
+    ),
+    fmt: str | None = typer.Option(None, "--format", help="jsonl | md"),
+    preset: str | None = typer.Option(None, "--preset"),
+    model: str | None = typer.Option(None, "--model"),
+    older_than: str | None = typer.Option(None, "--older-than", help="Export entries OLDER than this age."),
+) -> None:
+    """Export cached analyses to jsonl or md before (optionally) purging."""
+    _run(_cache_export(output, fmt, preset, model, older_than))
+
+
+async def _cache_export(
+    output: Path,
+    fmt: str | None,
+    preset: str | None,
+    model: str | None,
+    older_than: str | None,
+) -> None:
+    import json
+
+    if fmt is None:
+        suffix = output.suffix.lower().lstrip(".")
+        fmt = suffix if suffix in {"jsonl", "md"} else "jsonl"
+    if fmt not in {"jsonl", "md"}:
+        console.print(f"[red]Unknown format[/] {fmt}. Use jsonl or md.")
+        raise typer.Exit(2)
+
+    settings = get_settings()
+    days = _parse_duration_days(older_than) if older_than else None
+    async with open_repo(settings.storage.data_path) as repo:
+        rows = await repo.cache_iter_full(preset=preset, model=model, older_than_days=days)
+
+    if not rows:
+        console.print("[yellow]No matching entries — nothing written.[/]")
+        return
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "jsonl":
+        with output.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+    else:  # md
+        with output.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(
+                    f"## {r['batch_hash']}\n\n"
+                    f"- preset: `{r['preset']}`\n"
+                    f"- model: `{r['model']}`\n"
+                    f"- prompt_version: `{r['prompt_version']}`\n"
+                    f"- cost_usd: {r['cost_usd']}\n"
+                    f"- created_at: {r['created_at']}\n\n"
+                    f"{r['result']}\n\n---\n\n"
+                )
+    console.print(f"[green]Wrote[/] {len(rows)} entries → {output} ({fmt}).")
+
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size} B"
 
 
 def _parse_duration_days(s: str) -> int:
@@ -350,20 +617,51 @@ def _parse_duration_days(s: str) -> int:
     return int(s)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_MAINT)
 def cleanup(
     retention: str = typer.Option("90d", "--retention"),
     chat: int | None = typer.Option(None, "--chat"),
     keep_transcripts: bool = typer.Option(True, "--keep-transcripts/--no-keep-transcripts"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:
     """Null-out old message texts; keep transcripts/analysis cache."""
-    _run(_cleanup(retention, chat, keep_transcripts))
+    _run(_cleanup(retention, chat, keep_transcripts, yes))
 
 
-async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool) -> None:
+async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes: bool) -> None:
     settings = get_settings()
     days = _parse_duration_days(retention)
     async with open_repo(settings.storage.data_path) as repo:
+        preview = await repo.count_redactable_messages(
+            retention_days=days,
+            chat_id=chat,
+            keep_transcripts=keep_transcripts,
+        )
+        if preview["to_redact"] == 0:
+            if preview["messages"] == 0:
+                console.print(f"[yellow]Nothing to redact[/] older than {days} days.")
+            else:
+                console.print(
+                    f"[yellow]Already clean[/] — {preview['messages']} matching rows "
+                    f"older than {days} days, but nothing left to null "
+                    f"(text already NULL{'; transcripts kept' if keep_transcripts else ''})."
+                )
+            return
+
+        scope = f"chat={chat}" if chat is not None else "all chats"
+        transcript_line = "0 [dim](kept)[/]" if keep_transcripts else str(preview["with_transcript"])
+        console.print(
+            f"[bold]Cleanup preview[/] ({scope}, older than {days} days):\n"
+            f"  messages matched:        {preview['messages']}\n"
+            f"  [red]rows to redact[/]:          {preview['to_redact']}\n"
+            f"  [red]text to null-out[/]:        {preview['with_text']}\n"
+            f"  transcripts to null-out: {transcript_line}\n"
+            f"[dim]Row metadata (ids, dates, authors) is preserved.[/]"
+        )
+        if not yes and not typer.confirm("Proceed with redaction?", default=False):
+            console.print("[yellow]Aborted.[/]")
+            return
+
         redacted = await repo.redact_old_messages(
             retention_days=days,
             chat_id=chat,
@@ -375,7 +673,7 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool) -> 
         )
 
 
-@app.command()
+@app.command(hidden=True)
 def export(
     chat: int = typer.Option(..., "--chat"),
     fmt: str = typer.Option("md", "--format", help="jsonl | csv | md"),
@@ -389,7 +687,7 @@ def export(
     _run(cmd_export(chat=chat, fmt=fmt, output=output, since=since, until=until))
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_MAIN)
 def dump(
     ref: str | None = typer.Argument(
         None,
@@ -437,6 +735,16 @@ def dump(
         "--mark-read",
         help="After dumping, advance Telegram's read marker to cover every processed message.",
     ),
+    all_flat: bool = typer.Option(
+        False,
+        "--all-flat",
+        help="Forum only: dump whole forum as one file. Needs an explicit period flag.",
+    ),
+    all_per_topic: bool = typer.Option(
+        False,
+        "--all-per-topic",
+        help="Forum only: one file per topic. Reports land in reports/{chat}/.",
+    ),
 ) -> None:
     """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
@@ -462,6 +770,8 @@ def dump(
             include_transcripts=include_transcripts,
             console_out=console_out,
             mark_read=mark_read,
+            all_flat=all_flat,
+            all_per_topic=all_per_topic,
         )
     )
 
@@ -485,5 +795,37 @@ def compute_period(
     return parse_ymd(since), parse_ymd(until)
 
 
-if __name__ == "__main__":
+_NEG_NUM_RE = __import__("re").compile(r"^-\d+$")
+
+
+def _preprocess_argv() -> None:
+    """Let users type bare negative numeric chat ids as positional args.
+
+    `analyzetg analyze -1003865481227` would normally fail because Click sees
+    `-1003865481227` as a short-option token. We inject the `--` separator
+    before any bare negative-number argument so it falls into a positional
+    argument slot. No-op if `--` already appeared before it.
+    """
+    import sys as _sys
+
+    argv = _sys.argv
+    out = [argv[0]] if argv else []
+    seen_dd = False
+    for arg in argv[1:]:
+        if arg == "--":
+            seen_dd = True
+        elif not seen_dd and _NEG_NUM_RE.match(arg):
+            out.append("--")
+            seen_dd = True
+        out.append(arg)
+    _sys.argv = out
+
+
+def main() -> None:
+    """Entry point — preprocesses argv, then hands off to Typer."""
+    _preprocess_argv()
     app()
+
+
+if __name__ == "__main__":
+    main()
