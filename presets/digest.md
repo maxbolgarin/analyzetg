@@ -4,7 +4,8 @@ prompt_version: v2
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1400
+output_budget_tokens: 2000
+map_output_tokens: 1200
 ---
 Ты составляешь короткий дайджест обсуждения: 5–10 самых важных тем,
 1–2 строки на каждую. Пропускай шум, повторы, приветствия и бытовые

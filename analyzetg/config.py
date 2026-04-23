@@ -49,7 +49,7 @@ class MediaCfg(BaseModel):
 class AnalyzeCfg(BaseModel):
     min_msg_chars: int = 3
     output_budget_tokens: int = 1500
-    safety_margin_tokens: int = 2000
+    safety_margin_tokens: int = 4000
     chunk_soft_break_minutes: int = 30
     dedupe_forwards: bool = True
     map_concurrency: int = 4

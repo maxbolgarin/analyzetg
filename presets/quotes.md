@@ -4,7 +4,8 @@ prompt_version: v1
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1600
+output_budget_tokens: 2500
+map_output_tokens: 1500
 ---
 Ты отбираешь памятные цитаты из чата — формулировки, которые хочется
 сохранить: меткое наблюдение, сильная позиция, ироничный комментарий

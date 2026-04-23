@@ -4,7 +4,8 @@ prompt_version: v2
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1400
+output_budget_tokens: 2500
+map_output_tokens: 1500
 ---
 Ты извлекаешь конкретные действия и задачи из переписки: кто должен что
 сделать, к какому сроку, что именно решено. Строго без воды. Если в

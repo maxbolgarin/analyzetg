@@ -4,7 +4,8 @@ prompt_version: v2
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1200
+output_budget_tokens: 2500
+map_output_tokens: 1500
 ---
 Ты выделяешь принятые решения из обсуждения. Решение — это договорённость
 о том, что будет (или не будет) сделано, какой подход выбран, что

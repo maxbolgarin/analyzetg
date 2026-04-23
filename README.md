@@ -1,332 +1,425 @@
 # analyzetg
 
-Локальный Python CLI: скачивает историю Telegram-чатов (личные, группы,
-форум-топики, каналы, комментарии), транскрибирует голосовые/кружочки/видео
-и анализирует всё это через OpenAI. По умолчанию работает с
-«непрочитанным» — точкой, на которой остановился твой Telegram-клиент —
-и сохраняет результаты в файлы `reports/` с кликабельными ссылками на
-исходные сообщения.
+A local Python CLI that pulls your Telegram chats (DMs, groups, forum
+topics, channels, channel comments), transcribes voice messages, video
+notes and videos via OpenAI, and analyzes the result with GPT. By default
+it starts from Telegram's **unread marker** — the spot where you stopped
+reading — and writes a Markdown report to `reports/` with clickable
+links back to every cited message.
+
+Everything is local. The only network calls are to Telegram (via
+[Telethon](https://docs.telethon.dev)) and OpenAI.
 
 ```bash
-# 1. один раз: залогиниться в Telegram и проверить ключ OpenAI
-uv run analyzetg init
+# First time
+atg init                      # log in to Telegram, verify OpenAI key
 
-# 2. без <ref> — интерактивный выбор чата, потом запуск
-uv run analyzetg analyze          # выбрать чат → preset → период → analyze
-uv run analyzetg dump             # выбрать чат → период → dump
-uv run analyzetg describe         # выбрать чат → показать детали
+# Most common: interactive wizard — pick a chat, pick a preset, done
+atg analyze                   # pick chat → preset → period → runs
 
-# 3. с <ref> — прямой запуск без меню
-uv run analyzetg analyze @somegroup
-uv run analyzetg dump @somegroup -o unread.md
-uv run analyzetg describe @somegroup
+# Direct, when you know which chat
+atg analyze @somegroup                  # summary of unread messages
+atg analyze @somegroup --console        # render in terminal instead of a file
+atg analyze @somegroup --last-days 7 --preset digest
 
-# 4. отрендерить результат прямо в терминале (без файла)
-uv run analyzetg analyze @somegroup --console
-
-# 5. пройтись по всем чатам с непрочитанным — в интерактивном режиме
-#    первой строкой будет "🚀 Run on ALL N unread chats"
-uv run analyzetg analyze
+# Dump history to a file, no OpenAI
+atg dump @somegroup -o history.md --last-days 30
 ```
 
-Никаких подписок, никакого «сперва sync, потом analyze» — одна команда
-резолвит ссылку, дочитывает только то, что ты ещё не видел, и гонит
-результат через OpenAI. Всё остальное — локально в SQLite.
+---
 
-## Требования
+## Installation
 
-- Python ≥ 3.11, [`uv`](https://github.com/astral-sh/uv)
-- `ffmpeg` на PATH — только для транскрипции видео/кружков
-- Telegram `api_id`/`api_hash` с <https://my.telegram.org>
-- OpenAI API key
+Five steps, in order. Don't skip — `atg` won't run without the credentials
+from step 3.
 
-## Установка
+### 1. Install the prerequisites
+
+- **Python 3.11+**
+- **[`uv`](https://github.com/astral-sh/uv)** — install with
+  `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **`ffmpeg`** on PATH — **only** if you want to transcribe videos
+  (voice messages and video notes work without it)
+
+### 2. Clone the repo
 
 ```bash
 git clone https://github.com/maxbolgarin/analyzetg.git
 cd analyzetg
-uv sync --extra dev
-cp .env.example .env        # впиши TELEGRAM_API_ID / _HASH / OPENAI_API_KEY
+```
+
+All the commands below assume you're in this directory.
+
+### 3. Get your API credentials
+
+- **Telegram** `api_id` / `api_hash` — log in at
+  <https://my.telegram.org> → *API development tools* → create an app.
+- **OpenAI** API key — <https://platform.openai.com/api-keys>.
+
+### 4. Configure (required before installing)
+
+```bash
+cp .env.example .env
 cp config.toml.example config.toml
-chmod 700 storage           # БД не шифруется — полагаемся на FS-права
 ```
 
-После этого `uv run analyzetg init` — интерактивный логин в Telegram.
+Open **`.env`** and paste the credentials from step 3:
 
-## Что делает команда по умолчанию
-
-`analyze <ref>` и `dump <ref>` по умолчанию берут **только непрочитанные**
-сообщения: у Telegram-диалога есть маркер `read_inbox_max_id` — все
-сообщения с `id > marker` считаются непрочитанными. Мы их выкачиваем и
-анализируем.
-
-Порядок приоритета флагов начала (первый совпавший выигрывает):
-
-1. `--full-history` — вся история чата.
-2. `--from-msg <id>` (или ссылка на сообщение) — начиная с этого
-   сообщения включительно.
-3. `--since YYYY-MM-DD` / `--until YYYY-MM-DD` / `--last-days N` — по дате.
-4. без флагов → непрочитанное.
-
-Если флагов нет и непрочитанного тоже нет — команда сразу выходит и
-подсказывает, как проанализировать что-то другое.
-
-### Куда попадает результат
-
-- По умолчанию `analyze` пишет файл `reports/{chat}-{preset}-{YYYY-MM-DD_HHMM}.md`
-  и печатает в консоль только путь к нему. Никаких простыней markdown
-  в терминал.
-- `-o <path>` — свой путь.
-- `--console` / `-c` — отрендерить результат прямо в терминале через
-  Rich (нормальные заголовки, списки, таблицы, без сырого markdown).
-  С `-o` вместе работает: покажет в терминале И сохранит в файл.
-- В режиме без `<ref>` (обход всех непрочитанных) `-o` трактуется как
-  директория: получается по файлу на чат.
-
-### Ссылки на сообщения в результатах
-
-Пресеты цитируют источник каждого тезиса / решения / задачи ссылкой
-вида `[#12345](https://t.me/username/12345)`. Для приватных чатов —
-`https://t.me/c/<internal>/12345`, для форум-топиков — с префиксом
-`/{topic_id}/`. Работает для публичных каналов, супергрупп, форумов и
-закрытых групп. Для личных переписок (нет username, chat_id > 0) ссылки
-не формируются — пресет подставляет просто `#12345`.
-
-## Типичные сценарии
-
-```bash
-# непрочитанное → summary-пресет (дефолт), файл в reports/
-uv run analyzetg analyze @somegroup
-
-# отрендерить в терминал красиво, без файла
-uv run analyzetg analyze @somegroup --console
-
-# последние 7 дней → дайджест в конкретный файл
-uv run analyzetg analyze @somegroup --last-days 7 --preset digest -o out.md
-
-# найти самое ценное, не читая всё
-uv run analyzetg analyze @somegroup --preset highlights
-
-# открытые вопросы, на которые стоит вернуться
-uv run analyzetg analyze @somegroup --preset questions
-
-# собрать внешние ссылки из чата
-uv run analyzetg analyze @somegroup --preset links
-
-# с конкретного сообщения (ссылка несёт msg_id)
-uv run analyzetg analyze "https://t.me/somegroup/10000"
-
-# вся история, action_items → в файл
-uv run analyzetg analyze @somegroup --full-history --preset action_items
-
-# проанализировал и сразу пометил прочитанным в TG
-uv run analyzetg analyze @somegroup --mark-read
-
-# только скачать историю (без OpenAI)
-uv run analyzetg dump @somegroup -o history.md --last-days 30
-uv run analyzetg dump @somegroup -o dump.jsonl --format jsonl --with-transcribe
-
-# форум-топик — тред берём из ссылки или через --thread
-uv run analyzetg analyze "https://t.me/somegroup/123" --last-days 3
-uv run analyzetg analyze @somegroup --thread 123 --full-history
+```
+TELEGRAM_API_ID=1234567
+TELEGRAM_API_HASH=abcdef0123456789abcdef0123456789
+OPENAI_API_KEY=sk-...
 ```
 
-Без `<ref>` команда показывает таблицу всех диалогов с непрочитанным,
-спрашивает подтверждение и гонит preset по каждому. По умолчанию пишет
-в `reports/` по файлу на чат; `-o <dir>` — своя директория; `--console` —
-отрендерить всё подряд прямо в терминал.
-
-## Форумы (топики)
-
-Форум-чаты (группы с топиками) обрабатываются отдельно — у каждого
-топика свой маркер непрочитанного, и общий маркер диалога ничего не
-значит. Есть три режима, которые работают и для `analyze`, и для `dump`:
+`config.toml` has sane defaults — model choices, pricing table, chunk
+sizes. Leave it alone until you want to tune something.
 
 ```bash
-# один конкретный топик — обычный анализ, t.me-ссылки содержат /thread/
-uv run analyzetg analyze @forumchat --thread 42
+mkdir -p storage && chmod 700 storage   # SQLite isn't encrypted; rely on FS perms
+```
 
-# одно саммари по всему форуму (требует явный период)
-uv run analyzetg analyze @forumchat --all-flat --last-days 3
+### 5. Install the CLI
 
-# по отдельному файлу на каждый топик (unread по каждому)
-uv run analyzetg analyze @forumchat --all-per-topic
+```bash
+# Install globally (editable — your source edits take effect immediately)
+uv tool install --editable .
+```
+
+That puts two commands on your PATH: **`atg`** (short) and `analyzetg`
+(long). They're identical — use whichever you prefer.
+
+> **Prefer not to install globally?** Skip `uv tool install` entirely,
+> run `uv sync --extra dev` once, and prefix every command with
+> `uv run` — e.g. `uv run atg analyze @somegroup`.
+
+### 6. First-time login
+
+```bash
+atg init
+```
+
+Interactive wizard: sends a code to your Telegram, creates the local
+session at `storage/session.sqlite`, and does a 1-token OpenAI ping to
+confirm your key. Only needed once.
+
+---
+
+## Where does `atg` read config and write data?
+
+**Everything is resolved relative to the current working directory.**
+Run `atg` from the repo directory (the one containing your `.env` and
+`config.toml`) and you'll get:
+
+```
+./.env                          ← credentials (step 4)
+./config.toml                   ← models, pricing, tuning (step 4)
+./storage/session.sqlite        ← Telegram session (created by atg init)
+./storage/data.sqlite           ← chats, messages, analysis cache
+./reports/{chat}/analyze/…md    ← analysis reports (default output)
+```
+
+If you `cd` somewhere else and run `atg`, it will look for `.env` and
+`config.toml` **in that directory** — and won't find them, so the
+command will fail with missing credentials. Two ways to avoid that:
+
+- **Always `cd` into the repo first** (simplest).
+- **Add a shell alias** that pins the directory (works from anywhere):
+  ```bash
+  # ~/.zshrc or ~/.bashrc
+  alias atg='(cd ~/path/to/analyzetg && atg "$@")'
+  ```
+  Reports will still land in the repo's `reports/` dir.
+
+---
+
+## Everyday usage
+
+`atg` always has to know **which chat** to work on. You can either launch
+the interactive wizard or point it at a chat directly.
+
+### The wizard (no chat ref)
+
+```bash
+atg analyze            # → pick a chat → pick a preset → pick a period → go
+atg dump               # → pick a chat → pick a period → dump to file
+atg describe           # → pick a chat → show details / topics
+```
+
+Navigation: **↑/↓** move, **type** to filter, **Enter** to select,
+**ESC** to go back a step, **Ctrl-C** to quit. The first item in the
+chat list is always *"Run on ALL N unread chats"* — picking it
+batch-processes every chat with unread messages at once.
+
+### Direct (with a chat ref)
+
+```bash
+atg analyze @somegroup                   # summary of unread
+atg analyze https://t.me/somegroup       # same, via link
+atg analyze -1001234567890               # by numeric chat_id
+atg analyze "Bull Trading"               # fuzzy title match
+```
+
+`<ref>` accepts:
+
+| Form | Example |
+|---|---|
+| `@username` | `@durov` |
+| `https://t.me/…` | `https://t.me/durov/123` (jumps to message 123) |
+| Forum-topic link | `https://t.me/somegroup/100/5000` (topic 100, msg 5000) |
+| Private link | `https://t.me/c/1234567890/5000` |
+| Invite link | `https://t.me/+AbCdEf...` (add `--join` to join it) |
+| Numeric `chat_id` | `-1001234567890` or `1001234567890` |
+| Fuzzy title | `"Bull Trading"` — substring match across your dialogs |
+
+### What you get back
+
+By default `atg analyze` writes a Markdown file to
+`reports/{chat}-{preset}-{YYYY-MM-DD_HHMM}.md` and prints its path.
+Every cited claim includes a clickable link back to the source message:
+
+```markdown
+Фонды переходят на индексные структуры с 2026 Q1. [#1586](https://t.me/c/3865481227/584/1586)
+```
+
+Flags:
+
+- **`--console` / `-c`** — render the result in your terminal (pretty,
+  Rich-formatted) instead of saving. Combine with `-o` to do both.
+- **`-o <path>`** — custom output path. For batch mode (no `<ref>`) it's
+  treated as a directory.
+- **`--mark-read`** — after the analysis, advance Telegram's read
+  marker to cover every processed message (so the chat looks "read" in
+  your other Telegram clients).
+
+---
+
+## Presets
+
+What kind of analysis do you want? Pick a preset with `--preset`:
+
+| Preset | What it produces |
+|---|---|
+| `summary` (default) | Top-3 themes + 5–10 bullet points + tone + key messages |
+| `digest` | Short numbered list of topics, 1–2 lines each |
+| `action_items` | Markdown table: *Who / What / Deadline / Status / Link* |
+| `decisions` | Markdown table: *Decision / Who / When / Rationale / Link* |
+| `highlights` | 5–15 most valuable messages, sorted by importance |
+| `questions` | Open questions table: *unanswered / partial / no consensus* |
+| `quotes` | Verbatim memorable quotes with author and link |
+| `links` | External URLs from the chat, grouped by topic |
+| `custom --prompt-file path.md` | Your own one-off prompt, no file in `presets/` needed |
+
+Prompts live in [`presets/*.md`](presets/) — edit them, add your own,
+commit them to your fork. Bump `prompt_version` inside the preset file
+to invalidate the cache after you change the prompt.
+
+---
+
+## Time window
+
+By default `analyze` and `dump` process **only unread messages**
+(`msg_id > read_marker`). To change that:
+
+| Flag | Meaning |
+|---|---|
+| `--last-days 7` | Last N days |
+| `--since 2026-01-15 --until 2026-01-20` | Explicit date range (either end optional) |
+| `--from-msg <id>` / message link | Start at a specific message, inclusive |
+| `--full-history` | Entire chat |
+
+Precedence when multiple are set: `--full-history` > `--from-msg` >
+`--since / --until / --last-days` > unread default.
+
+---
+
+## Forum chats (topics)
+
+Forums are chats with topics, and each topic has its own unread marker.
+Three modes, work for both `analyze` and `dump`:
+
+```bash
+# One specific topic — message links include /thread/
+atg analyze @forumchat --thread 42
+
+# Whole forum as one analysis (requires an explicit period)
+atg analyze @forumchat --all-flat --last-days 3
+
+# One report per topic (each topic's own unread)
+atg analyze @forumchat --all-per-topic
 # → reports/{chat-slug}/{topic-slug}-summary-YYYY-MM-DD_HHMM.md
 ```
 
-Если запустить `analyze @forumchat` без флагов в терминале — покажется
-таблица топиков и интерактивный выбор (номер топика / `A`ll-flat /
-`P`er-topic / `Q`uit). В non-TTY режиме команда требует флаг явно.
+Launch `atg analyze @forumchat` without any of these and you get the
+wizard: a table of topics with unread counts + a *"one topic"* /
+*"all-flat"* / *"per-topic"* chooser.
 
-`analyzetg describe @forumchat` показывает топики со счётчиками непрочитанного
-и количеством сообщений, уже лежащих в локальной БД.
+`atg describe @forumchat` prints the topic list with unread counts and
+how many messages are already in your local DB.
 
-## Интерактивный режим
+---
 
-Вшит в `analyze`, `dump`, `describe` как дефолт: запускаешь команду без
-`<ref>` → мастер. Передаёшь `<ref>` → прямой запуск без меню.
-
-```bash
-uv run analyzetg analyze            # → выбор чата (список с unread) → ...
-uv run analyzetg analyze @chat      # → прямой запуск
-```
-
-Мастер для `analyze`: чат → (если форум) топик/режим → пресет → период
-(unread / 7 дней / 30 дней / вся история / свои даты) → подтверждение.
-Output и mark-read задаются флагами на команду (`--console`, `-o`,
-`--mark-read`) — они показываются в шапке мастера.
-
-Первая строка списка чатов — "🚀 Run on ALL N unread chats" — запускает
-batch-обработку всех непрочитанных (сохраняет старое поведение).
-
-## Ссылки на чат
-
-`<ref>` принимает всё:
-
-- `@username`
-- `https://t.me/durov` / `https://t.me/durov/123` (с msg_id)
-- `https://t.me/somegroup/100/5000` (форум-топик)
-- `https://t.me/c/1234567890/5000` (приватная ссылка)
-- `https://t.me/+AbCdEf...` (invite — добавь `--join`)
-- `-1001234567890` — числовой chat_id. Все три варианта работают:
-  `analyzetg analyze -1001234567890` (CLI автоматически экранирует
-  минус), `analyzetg analyze -- -1001234567890`,
-  `analyzetg analyze 1001234567890` (без минуса — тоже интерпретируется
-  как канал `-100xxxxxxxxxx`).
-- `"Bull Trading"` (fuzzy-поиск по диалогам)
-
-## CLI cheatsheet
-
-`analyzetg --help` разбивает команды на три группы:
-
-**Main** — для ежедневного использования:
-
-| Команда | Что делает |
-|---|---|
-| `init` | Авторизация Telegram + smoke-check OpenAI |
-| `describe [<ref>]` | Без ref — интерактивный пик чата → детали. С ref — детали конкретного чата. С `--all`/`--kind`/`--search`/`--limit` — табличный обзор |
-| `analyze [<ref>] [...]` | Без ref — мастер (чат → пресет → период → запуск). С ref — прямой запуск. Флаги `--console` / `-o` / `--mark-read` |
-| `dump [<ref>] [...]` | Без ref — мастер (чат → период → запуск). С ref — прямой дамп в md/jsonl/csv |
-
-**Sync & subscriptions** — долгосрочное слежение за набором чатов:
-
-| Команда | Что делает |
-|---|---|
-| `sync [--chat] [--thread] [--dry-run]` | Инкрементально докачать новое по всем подпискам |
-| `chats add/list/enable/disable/remove` | Управление подписками |
-| `transcribe [--chat] [--since] [--limit]` | Транскрибировать voice/vnote/video |
-
-**Maintenance** — обслуживание:
-
-| Команда | Что делает |
-|---|---|
-| `stats [--since] [--by]` | Траты + cache hit rate |
-| `cleanup --retention 90d` | NULL-ить старые тексты сообщений |
-| `cache purge --older-than 30d` | Очистка кэша анализа |
-
-Старые `dialogs`/`topics`/`channel-info`/`resolve`/`backfill`/`export`
-остались как скрытые алиасы (не показываются в `--help`, но продолжают
-работать), чтобы не ломать существующие скрипты. Их функциональность
-вошла в `describe` / `analyze` / `dump`.
-
-### Полезные флаги `analyze` / `dump`
-
-- `--console` / `-c` — рендер в терминал вместо файла (Rich: заголовки,
-  таблицы, цитаты).
-- `--mark-read` — после обработки продвинуть Telegram-маркер прочитанного
-  до последнего проанализированного сообщения (видно в других клиентах).
-- `--full-history` / `--from-msg <id>` / `--last-days N` /
-  `--since / --until` — задать период вручную, обойти unread-дефолт.
-- `--thread <id>` / `--all-flat` / `--all-per-topic` — режимы для форум-чатов
-  (см. раздел «Форумы»).
-- `-o <path>` — свой путь для вывода (файл для одиночного ref,
-  директория для no-ref и per-topic режимов).
-- `--no-cache` — отключить локальный `analysis_cache` (принудительно
-  пересчитать).
-
-### Пресеты для `analyze`
-
-Живут в [`presets/*.md`](presets/). Можно править, можно добавлять свои —
-файл = пресет.
-
-| Пресет | Что выдаёт |
-|---|---|
-| `summary` | Топ-3 темы + 5–10 тезисов + тон + ключевые сообщения (дефолт) |
-| `digest` | Короткий пронумерованный список тем, 1–2 строки на каждую |
-| `action_items` | Markdown-таблица задач: `Кто / Что / Срок / Статус / Ссылка` |
-| `decisions` | Markdown-таблица решений: `Решение / Кто / Когда / Обоснование / Ссылка` |
-| `highlights` | 5–15 самых ценных сообщений, отсортированных по важности |
-| `questions` | Таблица открытых вопросов (`без ответа` / `частично` / `ответ был, но не консенсус`) |
-| `quotes` | Дословные памятные цитаты с автором и ссылкой |
-| `links` | Внешние URL из чата, сгруппированные по темам |
-| `custom --prompt-file path.md` | Свой промпт одноразово, без файла в `presets/` |
-
-Формат пресета и как добавить свой — в [`presets/README.md`](presets/README.md).
-
-### Когда нужны подписки (`chats add` / `sync`)
-
-Они для долгосрочного слежения за набором чатов: подписываешься,
-`sync --all` по крону докачивает новое, ты можешь накопить историю
-и потом гонять `analyze` по датам, не теряя контекст между запусками.
-
-Для одноразового «глянь, что там нового» это не нужно — `analyze <ref>`
-сам резолвит чат и докачивает недостающее.
+## Useful recipes
 
 ```bash
-uv run analyzetg chats add @somegroup          # подписаться
-uv run analyzetg chats list                    # что подписано
-uv run analyzetg sync                          # докачать новое по всем
-uv run analyzetg chats remove <chat_id>        # отписаться
+# Render a chat's unread in the terminal, no file
+atg analyze @somegroup --console
+
+# Short digest of the last week, custom path
+atg analyze @somegroup --last-days 7 --preset digest -o weekly.md
+
+# Extract the most valuable messages
+atg analyze @somegroup --preset highlights
+
+# Open questions that still deserve a reply
+atg analyze @somegroup --preset questions
+
+# All external links mentioned in the chat, grouped by topic
+atg analyze @somegroup --preset links
+
+# From a specific message onwards (link embeds the msg_id)
+atg analyze "https://t.me/somegroup/10000"
+
+# Whole chat history → action items
+atg analyze @somegroup --full-history --preset action_items
+
+# Analyze and mark read in Telegram afterwards
+atg analyze @somegroup --mark-read
+
+# Dump-only (no OpenAI): history for the last 30 days
+atg dump @somegroup -o history.md --last-days 30
+
+# Dump with voice/videonote transcripts filled in
+atg dump @somegroup -o dump.jsonl --format jsonl --with-transcribe
 ```
 
-## Архитектура в двух словах
+---
 
-```
-CLI (Typer)  ──►  Resolver (Telethon)     ──►  SQLite: chats
-                  backfill (iter_messages)──►  SQLite: messages
-                  Transcriber (OpenAI)    ──►  SQLite: media_transcripts
-                  Analyzer (OpenAI)       ──►  SQLite: analysis_cache, runs, usage_log
-```
+## Cost & caching
 
-Два SQLite файла в `storage/`:
+`analyzetg` is aggressive about caching so repeat runs are cheap or free.
 
-- `session.sqlite` — сессия Telethon.
-- `data.sqlite` — чаты, сообщения, транскрипты, кэш анализа, журнал токенов/цен.
-
-Выходные отчёты — в `reports/` (по умолчанию gitignored).
-
-Кэш на трёх уровнях:
-
-1. **Дедуп транскрипций по `document_id`** — один голос = одна транскрипция,
-   даже если переслан в 10 чатов.
-2. **Локальный `analysis_cache`** по `sha256(preset|version|model|sorted(msg_ids)|opts)`.
-   Меняешь промпт в пресете → бампаешь `prompt_version` → кэш
-   инвалидируется для этого пресета.
-3. **OpenAI prompt caching** (автоматически при длине префикса > 1024 токенов;
-   фиксированный порядок *system → static → dynamic* и `temperature=0.2`
-   максимизируют хиты).
-
-Map-reduce включается автоматически, когда период не влезает в один chunk:
-дешёвая модель (`gpt-5.4-nano`) собирает mini-summaries по фрагментам,
-умная (`gpt-5.4`) — сводит их в финальный отчёт. Каждый map-вызов
-кэшируется независимо → досинк одного фрагмента пересчитывает только его.
-
-Инкрементальная выгрузка: перед тем как идти в Telegram за сообщениями,
-`analyze` / `dump` смотрят на максимальный `msg_id` в локальной БД над
-порогом — если он выше маркера непрочитанного, дозапрашиваются только
-ещё более новые сообщения. Повторные запуски без новых событий в чате
-вообще не ходят в сеть.
-
-## Разработка
+### Check what you've spent
 
 ```bash
-uv run pytest              # unit-тесты
-uv run ruff check .        # линт
-uv run ruff format .       # форматирование
+atg stats                     # totals by preset (cost_usd, tokens, calls)
+atg stats --by model          # or break down by model
+atg stats --by day            # or by day
 ```
 
-Полная спецификация: [`docs/analyzetg-spec.md`](docs/analyzetg-spec.md).
+### Analysis cache (local, biggest win)
 
-## Лицензия
+Every analysis result is hashed by *preset + prompt version + model +
+message ids + options* and stored in the local SQLite
+`analysis_cache` table. Re-run the same command → zero-cost hit.
 
-MIT — см. [LICENSE](LICENSE).
+```bash
+atg cache stats               # rows, disk size, saved $, breakdown
+atg cache ls --limit 20       # latest entries
+atg cache show <hash-prefix>  # print a stored result
+atg cache export -o old.jsonl --older-than 30d   # archive before purging
+atg cache purge --older-than 30d --vacuum        # delete + reclaim disk
+```
+
+### OpenAI prompt cache (server-side, free discount)
+
+When prompt prefix ≥ 1024 tokens and identical within ~5–10 minutes,
+OpenAI automatically discounts the repeated tokens. `atg stats` shows
+the hit rate; `config.toml` enforces `temperature=0.2` and a fixed
+*system → static → dynamic* message order to maximize it.
+
+### Transcription dedup
+
+Each Telegram voice/videonote has a stable `document_id`. One
+transcription per document, even if the voice is forwarded across 10
+chats.
+
+---
+
+## Maintenance
+
+```bash
+# Null out old message texts (privacy / disk reclaim)
+atg cleanup --retention 90d                  # preview + confirmation prompt
+atg cleanup --retention 90d --yes            # skip the prompt
+
+# Clean up old cache results
+atg cache purge --older-than 30d --vacuum
+
+# Per-chat retention
+atg cleanup --retention 30d --chat 1234567890
+```
+
+`cleanup` preserves row metadata (ids, dates, authors, transcripts) — it
+only NULLs the raw `text` column, so you keep the ability to re-analyze
+later with `--with-transcribe` without losing the structure.
+
+---
+
+## Subscriptions (optional)
+
+You don't need these for one-off analysis — `atg analyze @chat` already
+resolves the chat and fetches what's missing. Subscriptions are for
+**long-term tracking**: a fixed set of chats you want to keep in your
+local DB, sync on a cron, and analyze by date ranges across many runs.
+
+```bash
+atg chats add @somegroup         # subscribe
+atg chats list                   # see what's subscribed
+atg sync                         # fetch new messages for every subscription
+atg transcribe --since 2026-01-01   # transcribe pending voices in a window
+atg chats remove <chat_id>       # unsubscribe
+```
+
+Forum support: `atg chats add @forum --all-topics` subscribes to every
+topic; `--thread N` subscribes to one.
+
+Channel with comments: `atg chats add @channel --with-comments`
+subscribes to both the channel and its linked discussion group.
+
+---
+
+## How it works (short)
+
+```
+CLI (Typer)
+   └─ Resolver (Telethon)   ──► SQLite: chats
+   └─ Backfill             ──► SQLite: messages
+   └─ Transcriber (OpenAI) ──► SQLite: media_transcripts
+   └─ Analyzer (OpenAI)    ──► SQLite: analysis_cache, runs, usage_log
+```
+
+Two SQLite files under `storage/`:
+
+- `session.sqlite` — Telethon session.
+- `data.sqlite` — chats, messages, transcripts, analysis cache, token
+  usage log.
+
+Reports land in `reports/` (gitignored by default).
+
+Analyses larger than one context window are automatically **map-reduced**:
+a cheap model (`gpt-5.4-nano`) summarizes chunks in parallel, then the
+flagship model (`gpt-5.4`) merges them into the final report. Each map
+call is cached independently, so adding one new message re-costs only
+one chunk.
+
+Before every network call, `analyze` and `dump` compare the local
+max `msg_id` against Telegram's read marker — if nothing new exists,
+the command exits without hitting the network at all.
+
+---
+
+## Development
+
+```bash
+uv run pytest                 # unit tests (9+ test files)
+uv run ruff check .           # lint
+uv run ruff format .          # format
+```
+
+Full spec: [`docs/analyzetg-spec.md`](docs/analyzetg-spec.md) (if present).
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

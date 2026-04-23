@@ -58,16 +58,40 @@ async def mark_as_read(
 ) -> bool:
     """Advance Telegram's read marker for `chat_id` up to `max_msg_id` inclusive.
 
-    Returns True on success. Forum-topic read markers (`thread_id != None`)
-    aren't supported by Telethon's high-level helper — returns False with a
-    log entry rather than raising.
+    - Regular chat: uses Telethon's high-level `send_read_acknowledge`.
+    - Forum topic (`thread_id` set): uses the raw `messages.ReadDiscussionRequest`
+      which is the same mechanism Telegram uses for both forum topics and
+      channel-comment threads. `thread_id` goes into `msg_id` (the topic's
+      anchor message), `read_max_id` is the highest message now read.
+
+    Returns True on success, False (with a log entry) on any failure.
     """
     from analyzetg.util.logging import get_logger
 
     log = get_logger(__name__)
     if thread_id:
-        log.warning("mark_read.topic_unsupported", chat_id=chat_id, thread_id=thread_id)
-        return False
+        try:
+            from telethon.tl.functions.messages import (  # type: ignore[attr-defined]
+                ReadDiscussionRequest,
+            )
+
+            entity = await client.get_input_entity(chat_id)
+            await client(
+                ReadDiscussionRequest(
+                    peer=entity,
+                    msg_id=int(thread_id),
+                    read_max_id=int(max_msg_id),
+                )
+            )
+            return True
+        except Exception as e:
+            log.error(
+                "mark_read.topic_error",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                err=str(e)[:200],
+            )
+            return False
     try:
         await client.send_read_acknowledge(chat_id, max_id=max_msg_id)
         return True
@@ -79,17 +103,19 @@ async def mark_as_read(
 async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
     """All dialogs with `unread_count > 0`, sorted by unread_count descending.
 
-    Fills `last_msg_date` from the dialog's top-message date (free — it's in
-    the response already). First-unread-message date requires a per-chat
-    `get_messages` call; interactive callers do that lazily.
+    For forum chats the dialog-level `unread_count` is unreliable (Telegram
+    caps it at 99,999 and doesn't decrement when topics are read). We fix
+    it here by summing per-topic `unread_count` from `GetForumTopicsRequest`
+    — one RPC per forum, in parallel with a small concurrency cap.
     """
+    import asyncio as _asyncio
+
     out: list[UnreadDialog] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
         count = int(getattr(d, "unread_count", 0) or 0)
         if count <= 0:
             continue
         entity = d.entity
-        # Dialog.date == top message's date; fall back via .message if needed.
         last_date: datetime | None = getattr(d, "date", None)
         if last_date is None:
             msg = getattr(d, "message", None)
@@ -106,5 +132,33 @@ async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
                 last_msg_date=last_date,
             )
         )
+
+    # Fix inflated forum counts: sum per-topic unread_count instead.
+    forums = [d for d in out if d.kind == "forum"]
+    if forums:
+        from analyzetg.util.logging import get_logger as _get_logger
+
+        log = _get_logger(__name__)
+        from analyzetg.tg.topics import list_forum_topics
+
+        sem = _asyncio.Semaphore(5)
+
+        async def _fix_forum(d: UnreadDialog) -> None:
+            async with sem:
+                try:
+                    topics = await list_forum_topics(client, d.chat_id)
+                    real = sum(t.unread_count for t in topics)
+                    d.unread_count = real
+                except Exception as e:
+                    log.warning(
+                        "list_unread_dialogs.forum_fix_failed",
+                        chat_id=d.chat_id,
+                        err=str(e)[:200],
+                    )
+
+        await _asyncio.gather(*[_fix_forum(d) for d in forums])
+
+    # Drop any forum whose real count turned out to be 0.
+    out = [d for d in out if d.unread_count > 0]
     out.sort(key=lambda d: (-d.unread_count, (d.title or "").lower()))
     return out

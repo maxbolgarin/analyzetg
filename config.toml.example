@@ -5,7 +5,7 @@
 [telegram]
 # api_id / api_hash are read from .env (TELEGRAM_API_ID / TELEGRAM_API_HASH).
 session_path = "storage/session.sqlite"
-max_msgs_per_minute = 300
+max_msgs_per_minute = 3000
 
 [openai]
 # api_key is read from .env (OPENAI_API_KEY).
@@ -27,7 +27,7 @@ temperature = 0.2
 
 [sync]
 default_lookback_days = 7
-batch_size = 200
+batch_size = 500
 concurrency = 3
 
 [media]
@@ -43,7 +43,10 @@ ffmpeg_path = "ffmpeg"
 [analyze]
 min_msg_chars = 3
 output_budget_tokens = 1500
-safety_margin_tokens = 2000
+# Cushion between packed-chunk size and the model's hard context cap.
+# Tiktoken undercounts Cyrillic and some emoji; 4000 absorbs that gap.
+# Bump higher if you ever hit context_length_exceeded on non-English chats.
+safety_margin_tokens = 4000
 chunk_soft_break_minutes = 30
 dedupe_forwards = true
 map_concurrency = 4

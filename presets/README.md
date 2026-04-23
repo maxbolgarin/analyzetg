@@ -34,7 +34,8 @@ prompt_version: v2              # бамп инвалидирует analysis_cac
 needs_reduce: true              # нужна ли reduce-стадия для map-reduce
 filter_model: gpt-5.4-nano      # модель для map-фазы (чанков)
 final_model: gpt-5.4            # модель для финального ответа / single-chunk
-output_budget_tokens: 1500      # max токенов на ответ
+output_budget_tokens: 1500      # max токенов на финальный ответ (reduce)
+map_output_tokens: 1500         # max токенов на чанк в map-фазе (по умолчанию 1500)
 ---
 Текст system-промпта. Задаёт роль модели.
 
