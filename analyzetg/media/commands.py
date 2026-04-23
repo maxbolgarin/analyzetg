@@ -96,7 +96,8 @@ async def cmd_transcribe(
                             "transcribe.error",
                             chat_id=m.chat_id,
                             msg_id=m.msg_id,
-                            err=str(e)[:200],
+                            media_type=m.media_type,
+                            err=str(e)[:800],
                         )
                     done += 1
                     progress.update(task, advance=1)

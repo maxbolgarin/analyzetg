@@ -31,6 +31,15 @@ async def _run(cmd: list[str]) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, stdout, stderr
 
 
+def _ffmpeg_fail(cmd: list[str], stderr: bytes, stage: str) -> RuntimeError:
+    """Build a RuntimeError that keeps the *tail* of stderr (where the real
+    error is) rather than the banner, plus the failing command for repro.
+    """
+    tail = stderr.decode(errors="ignore").strip().splitlines()[-4:]
+    tail_str = " | ".join(line.strip() for line in tail) or "<no stderr>"
+    return RuntimeError(f"ffmpeg {stage} failed. cmd={' '.join(cmd)} tail={tail_str}")
+
+
 async def _ffmpeg_present(path: str) -> bool:
     try:
         rc, _, _ = await _run([path, "-version"])
@@ -75,24 +84,26 @@ async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> lis
                 f"ffmpeg not found at '{ffmpeg}'. Install ffmpeg or update config.media.ffmpeg_path."
             )
         prepared = tmp_dir / f"{src.stem}_prep.mp3"
-        rc, _, err = await _run(
-            [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(src),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-b:a",
-                "64k",
-                str(prepared),
-            ]
-        )
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(src),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "64k",
+            str(prepared),
+        ]
+        rc, _, err = await _run(cmd)
         if rc != 0:
-            raise RuntimeError(f"ffmpeg transcode failed: {err.decode(errors='ignore')[:500]}")
+            raise _ffmpeg_fail(cmd, err, "transcode")
 
     size_mb = prepared.stat().st_size / (1024 * 1024)
     if size_mb <= MAX_OPENAI_MB:
@@ -104,32 +115,46 @@ async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> lis
         if not await _ffmpeg_present(ffmpeg):
             raise FfmpegMissing(f"ffmpeg required for chunking voice >{MAX_OPENAI_MB} MB.")
         normalized = tmp_dir / f"{src.stem}_voice.mp3"
-        rc, _, err = await _run(
-            [ffmpeg, "-y", "-i", str(prepared), "-ac", "1", "-b:a", "64k", str(normalized)]
-        )
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(prepared),
+            "-ac",
+            "1",
+            "-b:a",
+            "64k",
+            str(normalized),
+        ]
+        rc, _, err = await _run(cmd)
         if rc != 0:
-            raise RuntimeError(f"ffmpeg voice→mp3 failed: {err.decode(errors='ignore')[:500]}")
+            raise _ffmpeg_fail(cmd, err, "voice→mp3")
         intermediate = normalized
         prepared = normalized
 
     seg_pattern = tmp_dir / f"{src.stem}_chunk_%03d.mp3"
-    rc, _, err = await _run(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(prepared),
-            "-f",
-            "segment",
-            "-segment_time",
-            "600",
-            "-c",
-            "copy",
-            str(seg_pattern),
-        ]
-    )
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(prepared),
+        "-f",
+        "segment",
+        "-segment_time",
+        "600",
+        "-c",
+        "copy",
+        str(seg_pattern),
+    ]
+    rc, _, err = await _run(cmd)
     if rc != 0:
-        raise RuntimeError(f"ffmpeg segment failed: {err.decode(errors='ignore')[:500]}")
+        raise _ffmpeg_fail(cmd, err, "segment")
     chunks = sorted(tmp_dir.glob(f"{src.stem}_chunk_*.mp3"))
     if not chunks:
         raise RuntimeError("ffmpeg produced no chunks")
