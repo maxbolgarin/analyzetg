@@ -70,6 +70,7 @@ class Message:
     media_duration: int | None = None
     transcript: str | None = None
     transcript_model: str | None = None
+    reactions: dict[str, int] | None = None
     # Derived, not persisted:
     duplicates: int = 0
 

@@ -81,6 +81,7 @@ class AnalysisOptions:
     since: datetime | None = None
     until: datetime | None = None
     min_msg_id: int | None = None
+    max_msg_id: int | None = None
     dedupe_forwards: bool | None = None
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
@@ -178,13 +179,16 @@ async def run_analysis(
     filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
 
     # --- Load + filter + dedupe
+    # thread_param (int) is used for DB records; thread_id (Optional) is
+    # forwarded as-is so iter_messages skips the filter entirely on None.
     thread_param = thread_id if thread_id is not None else 0
     msgs = await repo.iter_messages(
         chat_id,
-        thread_id=thread_param,
+        thread_id=thread_id,
         since=opts.since,
         until=opts.until,
         min_msg_id=opts.min_msg_id,
+        max_msg_id=opts.max_msg_id,
     )
     f_opts = FilterOpts(
         min_msg_chars=opts.min_msg_chars

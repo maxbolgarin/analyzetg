@@ -21,6 +21,36 @@ log = get_logger(__name__)
 # ------------------------------------------------------------- media detection
 
 
+def detect_reactions(msg: Any) -> dict[str, int] | None:
+    """Extract reactions from a Telethon message as {emoji-or-id: count}.
+
+    Returns None when the message has no reactions. Custom emoji fall back to
+    `custom:<document_id>` so the LLM at least sees *that* people reacted, even
+    if it can't render the glyph.
+    """
+    reactions = getattr(msg, "reactions", None)
+    if reactions is None:
+        return None
+    results = getattr(reactions, "results", None) or []
+    out: dict[str, int] = {}
+    for r in results:
+        reaction = getattr(r, "reaction", None)
+        count = int(getattr(r, "count", 0) or 0)
+        if count <= 0 or reaction is None:
+            continue
+        emoticon = getattr(reaction, "emoticon", None)
+        if emoticon:
+            key = str(emoticon)
+        else:
+            doc_id = getattr(reaction, "document_id", None)
+            if doc_id is None:
+                continue
+            key = f"custom:{int(doc_id)}"
+        # Same key can appear twice in rare cases; sum counts defensively.
+        out[key] = out.get(key, 0) + count
+    return out or None
+
+
 def detect_media(msg: Any) -> tuple[str | None, int | None, int | None]:
     """Return (media_type, doc_id, duration_sec) per spec §8.1."""
     try:
@@ -131,6 +161,7 @@ def normalize(msg: Any, subscription: Subscription) -> Message:
         media_type=media_type,  # type: ignore[arg-type]
         media_doc_id=doc_id,
         media_duration=duration,
+        reactions=detect_reactions(msg),
     )
 
 

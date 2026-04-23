@@ -83,12 +83,13 @@ async def cmd_analyze(
     *,
     ref: str | None,
     thread: int | None,
+    msg: str | None = None,
     from_msg: str | None,
     full_history: bool,
     since: str | None,
     until: str | None,
     last_days: int | None,
-    preset: str,
+    preset: str | None,
     prompt_file: Path | None,
     model: str | None,
     filter_model: str | None,
@@ -103,10 +104,13 @@ async def cmd_analyze(
     all_per_topic: bool = False,
     folder: str | None = None,
 ) -> None:
+    # Default preset — overridden later for single-msg mode.
+    effective_preset = preset or "summary"
+
     # No ref but --folder → batch-analyze unread chats in that folder; skip wizard.
     if ref is None and folder:
         await run_all_unread_analyze(
-            preset=preset,
+            preset=effective_preset,
             prompt_file=prompt_file,
             model=model,
             filter_model=filter_model,
@@ -137,10 +141,23 @@ async def cmd_analyze(
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
+    msg_id = _parse_from_msg(msg)
+
+    # If --msg is a full link with a chat identifier, it's authoritative —
+    # use it as the ref so an ambiguous/stale text ref can't misdirect us.
+    effective_ref = ref
+    if msg:
+        from analyzetg.tg.links import parse as _parse_link
+
+        msg_parsed = _parse_link(msg)
+        if msg_parsed.chat_id is not None or msg_parsed.username:
+            if ref and ref != msg:
+                console.print(f"[dim]→ Using chat from --msg link; ignoring ref '{ref}'[/]")
+            effective_ref = msg
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]→ Resolving[/] {ref}")
-        resolved = await resolve(client, repo, ref)
+        console.print(f"[dim]→ Resolving[/] {effective_ref}")
+        resolved = await resolve(client, repo, effective_ref)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
         title = resolved.title
@@ -150,16 +167,42 @@ async def cmd_analyze(
             f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
         )
 
-        # A link like /group/100/5000 carries a msg_id; treat it as start
-        # unless an explicit time window / full-history flag was passed.
+        # A link like /group/100/5000 carries a msg_id. When no other period
+        # flags were given, default to single-msg mode. Pass --from-msg /
+        # --last-days / --full-history for the "from this point forward" intent.
         if (
-            from_msg_id is None
+            msg_id is None
+            and from_msg_id is None
             and not full_history
             and resolved.msg_id is not None
             and since_dt is None
             and until_dt is None
         ):
-            from_msg_id = resolved.msg_id
+            msg_id = resolved.msg_id
+
+        if msg_id is not None:
+            # User didn't specify a preset? Pick the single-msg one rather
+            # than forcing a 3-topics/key-messages layout onto one message.
+            await _run_single_msg(
+                client=client,
+                repo=repo,
+                chat_id=chat_id,
+                thread_id=thread_id or None,
+                title=title,
+                chat_username=resolved.username,
+                chat_internal_id=_derive_internal_id(chat_id),
+                msg_id=msg_id,
+                preset=preset or "single_msg",
+                prompt_file=prompt_file,
+                model=model,
+                filter_model=filter_model,
+                output=output,
+                console_out=console_out,
+                no_cache=no_cache,
+                include_transcripts=include_transcripts,
+                min_msg_chars=min_msg_chars,
+            )
+            return
 
         # --- Forum routing
         is_forum = resolved.kind == "forum"
@@ -179,7 +222,7 @@ async def cmd_analyze(
                 until_dt=until_dt,
                 from_msg_id=from_msg_id,
                 full_history=full_history,
-                preset=preset,
+                preset=effective_preset,
                 prompt_file=prompt_file,
                 model=model,
                 filter_model=filter_model,
@@ -246,7 +289,7 @@ async def cmd_analyze(
             until_dt=until_dt,
             from_msg_id=from_msg_id,
             full_history=full_history,
-            preset=preset,
+            preset=effective_preset,
             prompt_file=prompt_file,
             model=model,
             filter_model=filter_model,
@@ -257,6 +300,121 @@ async def cmd_analyze(
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
         )
+
+
+async def _run_single_msg(
+    *,
+    client,
+    repo: Repo,
+    chat_id: int,
+    thread_id: int | None,
+    title: str | None,
+    chat_username: str | None,
+    chat_internal_id: int | None,
+    msg_id: int,
+    preset: str,
+    prompt_file: Path | None,
+    model: str | None,
+    filter_model: str | None,
+    output: Path | None,
+    console_out: bool,
+    no_cache: bool,
+    include_transcripts: bool,
+    min_msg_chars: int | None,
+) -> None:
+    """Analyze exactly one message.
+
+    Fetches it via Telethon if missing from the DB, auto-transcribes voice /
+    videonote / video when `include_transcripts` is on, then runs the selected
+    preset bounded to that single msg_id.
+    """
+    from analyzetg.models import Subscription
+    from analyzetg.tg.sync import normalize
+
+    # Try local DB first (use thread_id=None so topic filter doesn't miss it).
+    existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
+    if not existing:
+        console.print(f"[dim]→ Fetching message {msg_id} from Telegram...[/]")
+        tel_msg = await client.get_messages(chat_id, ids=msg_id)
+        if tel_msg is None:
+            console.print(f"[red]Message {msg_id} not found in chat {chat_id}.[/]")
+            raise typer.Exit(2)
+        sub = await repo.get_subscription(chat_id, thread_id or 0) or Subscription(
+            chat_id=chat_id,
+            thread_id=thread_id or 0,
+            title=title,
+            source_kind="topic" if thread_id else "chat",
+        )
+        await repo.upsert_messages([normalize(tel_msg, sub)])
+        existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
+        if not existing:
+            console.print(f"[red]Failed to persist message {msg_id}.[/]")
+            raise typer.Exit(2)
+
+    loaded = existing[0]
+
+    # Auto-transcribe media if missing and user wants transcripts.
+    if (
+        include_transcripts
+        and loaded.media_type in {"voice", "videonote", "video"}
+        and not loaded.transcript
+        and loaded.media_doc_id
+    ):
+        duration = loaded.media_duration or 0
+        console.print(f"[dim]→ Transcribing {loaded.media_type} ({duration}s)...[/]")
+        try:
+            from analyzetg.media.transcribe import transcribe_message
+
+            await transcribe_message(client=client, repo=repo, msg=loaded)
+        except Exception as e:
+            console.print(f"[yellow]Transcription failed: {e}[/]")
+        # Re-read to pick up the transcript we just wrote.
+        refreshed = await repo.iter_messages(
+            chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id
+        )
+        if refreshed:
+            loaded = refreshed[0]
+
+    # Guard: if there's nothing analyzable, bail with a useful message
+    # instead of letting the pipeline silently return "msgs=0".
+    has_text = bool((loaded.text or "").strip())
+    has_transcript = bool((loaded.transcript or "").strip())
+    if not has_text and not has_transcript:
+        hint = ""
+        if loaded.media_type in {"voice", "videonote", "video"}:
+            hint = (
+                f" The {loaded.media_type} has no transcript — "
+                "check ffmpeg, OPENAI_API_KEY, or the max_media_duration setting."
+            )
+        elif loaded.media_type == "photo":
+            hint = " It's a photo with no caption; nothing text-analyzable."
+        console.print(f"[yellow]Nothing to analyze for msg {msg_id}.[/]{hint}")
+        raise typer.Exit(0)
+
+    console.print("[dim]→ Running analysis...[/]")
+    opts = AnalysisOptions(
+        preset=preset,
+        prompt_file=prompt_file,
+        model_override=model,
+        filter_model_override=filter_model,
+        use_cache=not no_cache,
+        include_transcripts=include_transcripts,
+        min_msg_chars=min_msg_chars,
+        min_msg_id=msg_id - 1,
+        max_msg_id=msg_id,
+    )
+    # Pass thread_id=None: msg_id is chat-unique; thread filter would risk
+    # excluding a forum-topic message we just fetched outside the subscription.
+    result = await run_analysis(
+        repo=repo,
+        chat_id=chat_id,
+        thread_id=None,
+        title=title,
+        opts=opts,
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
+    )
+    _print_and_write(result, output=output, title=title, console_out=console_out)
 
 
 async def _run_single(

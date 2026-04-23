@@ -349,12 +349,19 @@ def analyze(
         None,
         help=(
             "Chat reference: @user, t.me link, title (fuzzy), or numeric id. "
+            "A message link like t.me/c/ID/MSG is treated as single-message "
+            "mode (analyze just that one message, auto-transcribing voice/video). "
             "For a negative numeric id use `--` to separate from flags, e.g. "
             "`analyzetg analyze -- -1001234567890`. Omit to pick every dialog "
             "with unread messages (interactive)."
         ),
     ),
     thread: int | None = typer.Option(None, "--thread", help="Forum-topic id."),
+    msg: str | None = typer.Option(
+        None,
+        "--msg",
+        help="Analyze just one message (id or link). Auto-transcribes voice/video if needed.",
+    ),
     from_msg: str | None = typer.Option(None, "--from-msg", help="Start at this msg_id (or a message link)."),
     full_history: bool = typer.Option(
         False, "--full-history", help="Analyze the whole chat, not just unread."
@@ -362,7 +369,11 @@ def analyze(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days"),
-    preset: str = typer.Option("summary", "--preset"),
+    preset: str | None = typer.Option(
+        None,
+        "--preset",
+        help="Analysis preset (default: 'summary' for chats, 'single_msg' when analyzing one message).",
+    ),
     prompt_file: Path | None = typer.Option(None, "--prompt-file"),
     model: str | None = typer.Option(None, "--model"),
     filter_model: str | None = typer.Option(None, "--filter-model"),
@@ -422,6 +433,7 @@ def analyze(
         cmd_analyze(
             ref=ref,
             thread=thread,
+            msg=msg,
             from_msg=from_msg,
             full_history=full_history,
             since=since,

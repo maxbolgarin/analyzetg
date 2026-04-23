@@ -113,11 +113,16 @@ async def resolve(
         if cached:
             try:
                 entity = await client.get_entity(cached["id"])
+                return await _record_and_return(repo, entity, parsed)
             except Exception:
-                entity = await client.get_entity(parsed.username)
-        else:
+                pass  # fall through to live lookup
+        try:
             entity = await client.get_entity(parsed.username)
-        return await _record_and_return(repo, entity, parsed)
+            return await _record_and_return(repo, entity, parsed)
+        except ValueError as e:
+            # Telethon raises ValueError("No user has ...") on UsernameNotOccupied.
+            # Fall through to fuzzy: the ref might be a dialog title, not a @username.
+            log.info("resolve.username_miss", username=parsed.username, err=str(e)[:80])
 
     # Fuzzy / fallback: search iter_dialogs by title+username
     return await _fuzzy_resolve(
