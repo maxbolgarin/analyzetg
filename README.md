@@ -123,12 +123,22 @@ If you `cd` somewhere else and run `atg`, it will look for `.env` and
 command will fail with missing credentials. Two ways to avoid that:
 
 - **Always `cd` into the repo first** (simplest).
-- **Add a shell alias** that pins the directory (works from anywhere):
-  ```bash
-  # ~/.zshrc or ~/.bashrc
-  alias atg='(cd ~/path/to/analyzetg && atg "$@")'
+- **Add a shell function + alias** that pins the directory (works from anywhere):
+
+  **zsh** (`~/.zshrc`):
+  ```zsh
+  _atg_run() { (cd ~/path/to/analyzetg && command atg "$@"); }
+  alias atg='nocorrect _atg_run'
   ```
-  Reports will still land in the repo's `reports/` dir.
+  `nocorrect` disables zsh's spell-correction for `atg` arguments — without it, typing `atg stats` can trigger `zsh: correct 'stats' to 'stat'?` and end with a parse error.
+
+  **bash** (`~/.bashrc`):
+  ```bash
+  atg() { (cd ~/path/to/analyzetg && command atg "$@"); }
+  ```
+
+  Reload with `source ~/.zshrc` (or open a new terminal). Reports will
+  still land in the repo's `reports/` dir, not wherever you invoked from.
 
 ---
 
