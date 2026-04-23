@@ -8,8 +8,10 @@ a Telegram client.
 
 from __future__ import annotations
 
+import asyncio as _asyncio
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +19,15 @@ import questionary
 from prompt_toolkit.keys import Keys
 from rich.console import Console
 
-from analyzetg.analyzer.prompts import PRESETS
+from analyzetg.analyzer.chunker import model_context_window
+from analyzetg.analyzer.prompts import PRESETS, Preset
 from analyzetg.config import get_settings
 from analyzetg.db.repo import open_repo
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import list_unread_dialogs
 from analyzetg.tg.topics import list_forum_topics
 from analyzetg.util.logging import get_logger
+from analyzetg.util.pricing import chat_cost
 
 console = Console()
 log = get_logger(__name__)
@@ -52,6 +56,11 @@ BACK = object()
 
 # Sentinel returned by _pick_chat when the user picks "Run on all N unread".
 ALL_UNREAD = object()
+
+# Rough token estimate per formatted message line (sender + timestamp + body).
+# Used only for up-front cost previews; the real pipeline counts exactly via
+# tiktoken. Cyrillic runs ~1.5x the English rate — this is a middle ground.
+_AVG_TOKENS_PER_MSG = 60
 
 
 def _bind_escape(question, value):
@@ -129,6 +138,7 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
         "filter_model": None,
         "output": answers.output_path,
         "console_out": answers.console_out,
+        "save_default": False,
         "mark_read": answers.mark_read,
         "no_cache": False,
         "include_transcripts": True,
@@ -138,74 +148,10 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
     }
 
 
-async def run_interactive_analyze(
-    *,
-    console_out: bool = False,
-    output: Path | None = None,
-    mark_read: bool = False,
-) -> None:
-    """Default UX for `analyzetg analyze` (no ref). Walk wizard, then run."""
-    answers = await _collect_answers(
-        mode="analyze",
-        console_out=console_out,
-        output=output,
-        mark_read=mark_read,
-    )
-    if answers is None:
-        return
-    # Wizard's Telegram session is already closed. Dispatching now opens a
-    # new one inside whichever command we hand off to.
-    if answers.run_on_all_unread:
-        from analyzetg.analyzer.commands import run_all_unread_analyze
-
-        await run_all_unread_analyze(
-            preset=answers.preset,
-            output=output,
-            console_out=console_out,
-            mark_read=answers.mark_read,
-        )
-        return
-
-    from analyzetg.analyzer.commands import cmd_analyze
-
-    await cmd_analyze(**build_analyze_args(answers))
-
-
-async def run_interactive_dump(
-    *,
-    fmt: str = "md",
-    output: Path | None = None,
-    with_transcribe: bool = False,
-    include_transcripts: bool = True,
-    console_out: bool = False,
-    mark_read: bool = False,
-) -> None:
-    """Default UX for `analyzetg dump` (no ref). Wizard without preset step."""
-    answers = await _collect_answers(
-        mode="dump",
-        console_out=console_out,
-        output=output,
-        mark_read=mark_read,
-    )
-    if answers is None:
-        return
-
-    if answers.run_on_all_unread:
-        from analyzetg.export.commands import run_all_unread_dump
-
-        await run_all_unread_dump(
-            fmt=fmt,
-            output=output,
-            with_transcribe=with_transcribe,
-            include_transcripts=include_transcripts,
-            console_out=console_out,
-            mark_read=answers.mark_read,
-        )
-        return
-
-    from analyzetg.export.commands import cmd_dump
-
-    # Translate answers → cmd_dump kwargs (period → since/until/last_days).
+def build_dump_args(
+    answers: InteractiveAnswers, *, fmt: str, with_transcribe: bool, include_transcripts: bool
+) -> dict[str, Any]:
+    """Turn interactive answers into `cmd_dump` kwargs. Pure."""
     last_days: int | None = None
     full_history = False
     since: str | None = None
@@ -220,23 +166,105 @@ async def run_interactive_dump(
         since = answers.custom_since
         until = answers.custom_until
 
-    await cmd_dump(
-        ref=answers.chat_ref,
-        output=output,
-        fmt=fmt,
-        since=since,
-        until=until,
-        last_days=last_days,
-        full_history=full_history,
-        thread=answers.thread_id,
-        from_msg=None,
-        join=False,
-        with_transcribe=with_transcribe,
-        include_transcripts=include_transcripts,
+    return {
+        "ref": answers.chat_ref,
+        "output": answers.output_path,
+        "fmt": fmt,
+        "since": since,
+        "until": until,
+        "last_days": last_days,
+        "full_history": full_history,
+        "thread": answers.thread_id,
+        "from_msg": None,
+        "join": False,
+        "with_transcribe": with_transcribe,
+        "include_transcripts": include_transcripts,
+        "console_out": answers.console_out,
+        "save_default": False,
+        "mark_read": answers.mark_read,
+        "all_flat": answers.forum_all_flat,
+        "all_per_topic": answers.forum_all_per_topic,
+    }
+
+
+async def run_interactive_analyze(
+    *,
+    console_out: bool = False,
+    output: Path | None = None,
+    save_default: bool = False,
+    mark_read: bool | None = None,
+) -> None:
+    """Default UX for `analyzetg analyze` (no ref). Walk wizard, then run."""
+    answers = await _collect_answers(
+        mode="analyze",
         console_out=console_out,
-        mark_read=answers.mark_read,
-        all_flat=answers.forum_all_flat,
-        all_per_topic=answers.forum_all_per_topic,
+        output=output,
+        save_default=save_default,
+        mark_read=mark_read,
+    )
+    if answers is None:
+        return
+    # Wizard's Telegram session is already closed. Dispatching now opens a
+    # new one inside whichever command we hand off to.
+    if answers.run_on_all_unread:
+        from analyzetg.analyzer.commands import run_all_unread_analyze
+
+        await run_all_unread_analyze(
+            preset=answers.preset,
+            output=answers.output_path,
+            console_out=answers.console_out,
+            mark_read=answers.mark_read,
+        )
+        return
+
+    from analyzetg.analyzer.commands import cmd_analyze
+
+    await cmd_analyze(**build_analyze_args(answers))
+
+
+async def run_interactive_dump(
+    *,
+    fmt: str = "md",
+    output: Path | None = None,
+    save_default: bool = False,
+    with_transcribe: bool = False,
+    include_transcripts: bool = True,
+    console_out: bool = False,
+    mark_read: bool | None = None,
+) -> None:
+    """Default UX for `analyzetg dump` (no ref). Wizard without preset step."""
+    answers = await _collect_answers(
+        mode="dump",
+        console_out=console_out,
+        output=output,
+        save_default=save_default,
+        mark_read=mark_read,
+    )
+    if answers is None:
+        return
+
+    if answers.run_on_all_unread:
+        from analyzetg.export.commands import run_all_unread_dump
+
+        await run_all_unread_dump(
+            fmt=fmt,
+            output=answers.output_path,
+            with_transcribe=with_transcribe,
+            include_transcripts=include_transcripts,
+            console_out=answers.console_out,
+            mark_read=answers.mark_read,
+        )
+        return
+
+    from analyzetg.export.commands import cmd_dump
+
+    await cmd_dump(
+        **build_dump_args(
+            answers,
+            fmt=fmt,
+            with_transcribe=with_transcribe,
+            include_transcripts=include_transcripts,
+        )
     )
 
 
@@ -265,32 +293,35 @@ async def _collect_answers(
     mode: str,  # "analyze" | "dump"
     console_out: bool,
     output: Path | None,
-    mark_read: bool,
+    save_default: bool,
+    mark_read: bool | None,
 ) -> InteractiveAnswers | None:
     """State-machine wizard: each step can go back one without losing context.
 
     `mode` controls which steps appear: "analyze" walks through preset;
-    "dump" skips the preset step.
+    "dump" skips the preset step. CLI flags pre-fill steps and skip the
+    corresponding prompt:
+      - `console_out`, `output`, or `save_default` → skip the output step.
+      - `mark_read is not None` → skip the mark-read step.
     """
     settings = get_settings()
+    # Whether the user already made these choices at the CLI. If so, the
+    # matching wizard step is suppressed and the forced value is used.
+    output_forced = console_out or output is not None or save_default
+    mark_read_forced = mark_read is not None
+
     async with tg_client(settings) as client, open_repo(settings.storage.data_path):
         console.print("[bold cyan]analyzetg[/] — interactive mode")
         # Show the immutable settings so the user knows what will happen.
-        out_label = (
-            "console (rendered markdown)"
-            if console_out
-            else (f"{output}" if output else "reports/ (auto-named file)")
-        )
-        console.print(f"  [dim]output:[/]    [bold]{out_label}[/]")
-        console.print(
-            f"  [dim]mark read:[/] [bold]{'yes' if mark_read else 'no'}[/]"
-            + ("" if mark_read else " [dim](use --mark-read to enable)[/]")
-        )
-        if not console_out and not output:
-            console.print(
-                "  [dim]↳ pass[/] [cyan]--console[/] / [cyan]-c[/] [dim]or[/] "
-                "[cyan]-o <path>[/] [dim]to change output.[/]"
+        if output_forced:
+            out_label = (
+                "console (rendered markdown)"
+                if console_out
+                else (f"{output}" if output is not None else "reports/ (auto-named file)")
             )
+            console.print(f"  [dim]output (from CLI):[/]    [bold]{out_label}[/]")
+        if mark_read_forced:
+            console.print(f"  [dim]mark read (from CLI):[/] [bold]{'yes' if mark_read else 'no'}[/]")
         console.print(
             "[dim]Tips: ↑/↓ to navigate, type to filter, Enter to select, "
             "ESC to go back (Ctrl-C to cancel).[/]\n"
@@ -304,6 +335,15 @@ async def _collect_answers(
         period: str | None = None
         custom_since: str | None = None
         custom_until: str | None = None
+        # Local, step-level state for output + mark_read — start from CLI
+        # overrides when present, otherwise get set by the wizard steps.
+        chosen_console_out = bool(console_out)
+        chosen_output_path: Path | None = output
+        chosen_mark_read: bool = bool(mark_read)
+        # Per-period message counts for the current chat (filled once we
+        # know the chat and, for forums, the thread). Used by `_pick_period`
+        # to decorate choices and by the confirm step to estimate cost.
+        period_counts: dict[str, int | None] = {}
 
         run_on_all = False
         step = "chat"
@@ -318,7 +358,11 @@ async def _collect_answers(
                     # Still let the user pick a preset for analyze; skip
                     # everything else (thread/period/custom-range) — batch
                     # is always "each chat's own unread".
-                    step = "preset" if mode == "analyze" else "confirm"
+                    step = (
+                        "preset"
+                        if mode == "analyze"
+                        else _next_step_after_mark_read(output_forced, mark_read_forced)
+                    )
                     continue
                 chat = result
                 step = "thread" if chat["kind"] == "forum" else ("preset" if mode == "analyze" else "period")
@@ -338,16 +382,31 @@ async def _collect_answers(
                 # Only runs for analyze mode.
                 result = await _pick_preset()
                 if result is BACK:
-                    step = "chat" if run_on_all else ("thread" if chat["kind"] == "forum" else "chat")
+                    step = (
+                        "chat" if run_on_all else ("thread" if chat and chat["kind"] == "forum" else "chat")
+                    )
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
                     return None
                 preset = result
-                step = "mark_read" if run_on_all else "period"
+                step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "period"
 
             elif step == "period":
-                result = await _pick_period(force_explicit=forum_all_flat)
+                # Lazily fetch per-period counts once we know chat+thread.
+                # `unread_hint` comes from the dialog picker (chat object).
+                if not period_counts and chat is not None:
+                    unread_hint = int(chat.get("unread") or 0)
+                    period_counts = await _fetch_period_counts(
+                        client,
+                        chat_id=int(chat["chat_id"]),
+                        thread_id=thread_id,
+                        unread_hint=unread_hint,
+                    )
+                result = await _pick_period(
+                    force_explicit=forum_all_flat,
+                    counts=period_counts,
+                )
                 if result is BACK:
                     if mode == "analyze":
                         step = "preset"
@@ -358,17 +417,35 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 period, custom_since, custom_until = result
-                step = "mark_read"
+                # Output step is next unless the user already set it via CLI.
+                step = "mark_read" if output_forced else "output"
 
-            elif step == "mark_read":
-                result = await _pick_mark_read(default=mark_read)
+            elif step == "output":
+                result = await _pick_output(
+                    default_path=output,
+                )
                 if result is BACK:
-                    step = ("preset" if mode == "analyze" else "chat") if run_on_all else "period"
+                    step = "period" if not run_on_all else ("preset" if mode == "analyze" else "chat")
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
                     return None
-                mark_read = bool(result)
+                chosen_console_out, chosen_output_path = result
+                step = "confirm" if mark_read_forced else "mark_read"
+
+            elif step == "mark_read":
+                result = await _pick_mark_read(default=chosen_mark_read)
+                if result is BACK:
+                    if output_forced:
+                        # No output step → go back to period / preset.
+                        step = "period" if not run_on_all else ("preset" if mode == "analyze" else "chat")
+                    else:
+                        step = "output"
+                    continue
+                if result is None:
+                    console.print("[dim]Cancelled.[/]")
+                    return None
+                chosen_mark_read = bool(result)
                 step = "confirm"
 
             elif step == "confirm":
@@ -389,10 +466,43 @@ async def _collect_answers(
                     summary_bits.append(f"period={period}")
                     if period == "custom":
                         summary_bits.append(f"({custom_since or ''}..{custom_until or ''})")
-                summary_bits.append("console" if console_out else "save to reports/")
-                if mark_read:
+                summary_bits.append(
+                    "console"
+                    if chosen_console_out
+                    else (f"file={chosen_output_path}" if chosen_output_path else "save to reports/")
+                )
+                if chosen_mark_read:
                     summary_bits.append("mark-read")
                 console.print("[bold]Plan:[/] " + " / ".join(summary_bits))
+
+                # Only show a cost estimate for the analyze flow (dump
+                # doesn't hit OpenAI for chat completion) and when we have
+                # a concrete count.
+                if mode == "analyze" and not run_on_all and preset is not None:
+                    n_msgs = _count_for_period(period, period_counts)
+                    if n_msgs is not None and n_msgs > 0:
+                        cost_lo, cost_hi = _estimate_cost(
+                            n_messages=n_msgs,
+                            preset=PRESETS.get(preset) or PRESETS["summary"],
+                            settings=settings,
+                        )
+                        if cost_lo is None:
+                            console.print(
+                                f"  [dim]messages ≈[/] {n_msgs}  "
+                                "[dim](pricing table missing a model — cost unknown)[/]"
+                            )
+                        else:
+                            console.print(
+                                f"  [dim]messages ≈[/] {n_msgs}  "
+                                f"[dim]cost ≈[/] ${cost_lo:.2f}–${cost_hi:.2f}  "
+                                "[dim](rough estimate; actual depends on actual tokens)[/]"
+                            )
+                    elif n_msgs == 0:
+                        console.print("  [yellow]0 messages in this period — nothing to analyze.[/]")
+                elif mode == "dump" and not run_on_all:
+                    n_msgs = _count_for_period(period, period_counts)
+                    if n_msgs is not None:
+                        console.print(f"  [dim]messages ≈[/] {n_msgs}  [dim](dump is free — no OpenAI).[/]")
 
                 choice = await _bind_escape(
                     questionary.select(
@@ -410,7 +520,14 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 if choice is BACK:
-                    step = "mark_read"
+                    if mark_read_forced:
+                        step = (
+                            "output"
+                            if not output_forced
+                            else ("period" if not run_on_all else ("preset" if mode == "analyze" else "chat"))
+                        )
+                    else:
+                        step = "mark_read"
                     continue
                 break
 
@@ -424,11 +541,152 @@ async def _collect_answers(
             period=period if period is not None else "unread",
             custom_since=custom_since,
             custom_until=custom_until,
-            console_out=console_out,
-            mark_read=mark_read,
-            output_path=output,
+            console_out=chosen_console_out,
+            mark_read=chosen_mark_read,
+            output_path=chosen_output_path,
             run_on_all_unread=run_on_all,
         )
+
+
+def _next_step_after_mark_read(output_forced: bool, mark_read_forced: bool) -> str:
+    """Pick the next step when skipping period (run-on-all-unread path).
+
+    Both output and mark-read steps can be skipped via CLI flags; this
+    consolidates the branching so the state machine stays readable.
+    """
+    if not output_forced:
+        return "output"
+    if not mark_read_forced:
+        return "mark_read"
+    return "confirm"
+
+
+# -------------------------------------------------- per-period counts + cost
+
+
+def _count_for_period(period: str | None, counts: dict[str, int | None]) -> int | None:
+    """Look up the prefetched count for the currently picked period."""
+    if period is None:
+        return None
+    if period == "custom":
+        return None  # too expensive to prefetch every possible range
+    return counts.get(period)
+
+
+async def _fetch_period_counts(
+    client,
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    unread_hint: int,
+) -> dict[str, int | None]:
+    """Ask Telegram for message counts covering each canonical period.
+
+    Uses `client.get_messages(limit=0, ...).total` — Telethon populates
+    `.total` on the returned (empty) list for free with a single
+    `GetHistory` round trip per period. Failures drop to `None`, which the
+    picker renders as `—`.
+    """
+    now = datetime.now(UTC)
+
+    async def _total(**kwargs) -> int | None:
+        try:
+            msgs = await client.get_messages(chat_id, limit=0, **kwargs)
+            total = int(getattr(msgs, "total", 0) or 0)
+            # Telethon returns 2**31-1 when Telegram's response has no real
+            # `count` (private/basic chats return `messages.Messages`, not
+            # `messages.MessagesSlice`). Treat that as "unknown".
+            if total >= 2_000_000_000:
+                return None
+            return total
+        except Exception as e:
+            log.debug("period_counts.error", chat_id=chat_id, err=str(e)[:200], kw=list(kwargs))
+            return None
+
+    # `reply_to=thread_id` scopes the count to a single forum topic.
+    # Empty dict for non-forum chats so Telethon pulls the whole dialog.
+    thread_kw: dict = {"reply_to": thread_id} if thread_id else {}
+
+    tasks = {
+        "last7": _total(offset_date=now - timedelta(days=7), reverse=True, **thread_kw),
+        "last30": _total(offset_date=now - timedelta(days=30), reverse=True, **thread_kw),
+        "full": _total(**thread_kw),
+    }
+    # For "unread" we already have a hint from the dialog row; skip the
+    # round trip if known.
+    results_list = await _asyncio.gather(*tasks.values(), return_exceptions=False)
+    out: dict[str, int | None] = dict(zip(tasks.keys(), results_list, strict=True))
+    out["unread"] = unread_hint if unread_hint else None
+    # Sanity: unread should never exceed full.
+    if out.get("unread") is not None and out.get("full") is not None and out["unread"] > out["full"]:
+        out["unread"] = out["full"]
+    return out
+
+
+def _estimate_cost(
+    *,
+    n_messages: int,
+    preset: Preset,
+    settings,
+) -> tuple[float | None, float | None]:
+    """Return (lower, upper) cost estimate in USD for the map-reduce pipeline.
+
+    Approximations:
+      - ~60 tokens / formatted message (Cyrillic-heavy middle ground).
+      - Chunk budget mirrors `chunker.build_chunks`: context − system/user
+        overhead − per-chunk output cap − safety margin.
+      - Every chunk re-sends the system prompt (pipeline's actual behaviour).
+      - Reduce input = Σ map-output tokens; reduce output ≤ output_budget_tokens.
+
+    Returns (None, None) if pricing for either model is missing.
+    """
+    from analyzetg.util.tokens import count_tokens as _ct
+
+    total_input_body = max(1, int(n_messages * _AVG_TOKENS_PER_MSG))
+
+    filter_model = preset.filter_model
+    final_model = preset.final_model
+    filter_row = settings.pricing.chat.get(filter_model)
+    final_row = settings.pricing.chat.get(final_model)
+    if filter_row is None or final_row is None:
+        return None, None
+
+    system_tokens = _ct(preset.system, filter_model)
+    user_overhead_tokens = _ct(preset.user_template, filter_model)
+    per_chunk_overhead = system_tokens + user_overhead_tokens
+
+    context = model_context_window(filter_model)
+    safety = int(getattr(settings.analyze, "safety_margin_tokens", 4000))
+    map_out_cap = preset.map_output_tokens
+    budget = max(500, context - per_chunk_overhead - map_out_cap - safety)
+
+    chunks = max(1, math.ceil(total_input_body / budget))
+
+    # Map phase (filter model): every chunk re-sends system + user overhead.
+    map_input_tokens = total_input_body + chunks * per_chunk_overhead
+    # Map completion: cap per chunk; lower bound ≈ 40% of cap.
+    map_out_lo = int(chunks * map_out_cap * 0.4)
+    map_out_hi = int(chunks * map_out_cap)
+
+    # Reduce phase (final model) — only if we built more than one chunk.
+    if chunks > 1 and preset.needs_reduce:
+        # Reduce prompt = aggregated map outputs + small final-prompt overhead.
+        reduce_overhead = _ct(preset.system, final_model) + _ct(preset.user_template, final_model)
+        reduce_out = preset.output_budget_tokens
+        reduce_input_lo = map_out_lo + reduce_overhead
+        reduce_input_hi = map_out_hi + reduce_overhead
+    else:
+        reduce_input_lo = reduce_input_hi = 0
+        reduce_out = 0
+
+    def _cost(prompt: int, completion: int, model: str) -> float:
+        return float(chat_cost(model, prompt, 0, completion, settings=settings) or 0.0)
+
+    lo = _cost(map_input_tokens, map_out_lo, filter_model) + _cost(
+        reduce_input_lo, int(reduce_out * 0.4), final_model
+    )
+    hi = _cost(map_input_tokens, map_out_hi, filter_model) + _cost(reduce_input_hi, reduce_out, final_model)
+    return lo, hi
 
 
 def _fmt_count(n: int) -> str:
@@ -457,8 +715,6 @@ async def _fetch_first_unread_dates(client, dialogs: list) -> dict[int, datetime
     deleted msg-ids). Parallel with a cap of 5 in-flight. Errors are logged
     (run `analyzetg -v ...` to see) and fall back to None.
     """
-    import asyncio as _asyncio
-
     from rich.progress import (
         BarColumn,
         MofNCompleteColumn,
@@ -600,6 +856,7 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
         "kind": d.kind,
         "title": d.title,
         "username": d.username,
+        "unread": d.unread_count,
     }
 
 
@@ -771,6 +1028,58 @@ async def _pick_preset():
     return picked
 
 
+async def _pick_output(*, default_path: Path | None):
+    """Returns (console_out, output_path), BACK, or None (cancel).
+
+    `default_path` seeds the custom-path prompt so the user can edit an
+    already-provided value instead of retyping it.
+    """
+    choices = [
+        questionary.Choice("📁 Save to reports/ (default, auto-named)", value=("file", None)),
+        questionary.Choice("📝 Save to custom path…", value=("custom", None)),
+        questionary.Choice("🖥  Print to terminal (rendered markdown)", value=("console", None)),
+        questionary.Separator(),
+        questionary.Choice("← Back", value=(BACK, None)),
+    ]
+    picked = await _bind_escape(
+        questionary.select(
+            "Where do you want the output?",
+            choices=choices,
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        (BACK, None),
+    ).ask_async()
+    if picked is None:
+        return None
+    action, _ = picked
+    if action is BACK:
+        _replace_last_line("[dim]← Back[/]")
+        return BACK
+    if action == "console":
+        _replace_last_line("[bold cyan]?[/] output: [bold]console[/]")
+        return True, None
+    if action == "file":
+        _replace_last_line("[bold cyan]?[/] output: [bold]reports/[/] [dim](auto-named)[/]")
+        return False, None
+    # Custom path — prompt for the exact path.
+    seed = str(default_path) if default_path else ""
+    raw = await questionary.text(
+        "Custom output path (file or directory; blank = cancel)",
+        default=seed,
+    ).ask_async()
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        # User cleared the field — treat as cancel of this sub-step and
+        # bounce back to the picker.
+        return await _pick_output(default_path=default_path)
+    path = Path(raw).expanduser()
+    _replace_last_line(f"[bold cyan]?[/] output: [bold]{path}[/]")
+    return False, path
+
+
 async def _pick_mark_read(*, default: bool):
     """Yes/No/Back. Returns True, False, BACK, or None (cancel)."""
     choices = [
@@ -798,18 +1107,38 @@ async def _pick_mark_read(*, default: bool):
     return picked
 
 
-async def _pick_period(*, force_explicit: bool):
-    """Returns (period_key, since, until), BACK, or None."""
+async def _pick_period(
+    *,
+    force_explicit: bool,
+    counts: dict[str, int | None] | None = None,
+):
+    """Returns (period_key, since, until), BACK, or None.
+
+    `counts` is an optional per-period message-count hint; if given, each
+    choice is annotated with the count so the user can see how much work
+    they're about to buy.
+    """
+    c = counts or {}
+
+    def _label(base: str, key: str) -> str:
+        n = c.get(key)
+        if n is None:
+            return base
+        return f"{base}  [{n} msgs]"
+
     options: list[Any] = []
     if not force_explicit:
         options.append(
-            questionary.Choice(title="Unread (default) — since Telegram read marker", value="unread")
+            questionary.Choice(
+                title=_label("Unread (default) — since Telegram read marker", "unread"),
+                value="unread",
+            )
         )
     options.extend(
         [
-            questionary.Choice(title="Last 7 days", value="last7"),
-            questionary.Choice(title="Last 30 days", value="last30"),
-            questionary.Choice(title="Full history", value="full"),
+            questionary.Choice(title=_label("Last 7 days", "last7"), value="last7"),
+            questionary.Choice(title=_label("Last 30 days", "last30"), value="last30"),
+            questionary.Choice(title=_label("Full history", "full"), value="full"),
             questionary.Choice(title="Custom date range…", value="custom"),
             questionary.Separator(),
             questionary.Choice(title="← Back", value=BACK),
@@ -836,7 +1165,10 @@ async def _pick_period(*, force_explicit: bool):
         "full": "full history",
         "custom": "custom range",
     }
-    _replace_last_line(f"[bold cyan]?[/] period: [bold]{_period_labels.get(key, key)}[/]")
+    label = _period_labels.get(key, key)
+    n = c.get(key) if isinstance(key, str) else None
+    label_with_count = f"{label} [{n} msgs]" if n is not None else label
+    _replace_last_line(f"[bold cyan]?[/] period: [bold]{label_with_count}[/]")
     if key == "custom":
         since = await questionary.text("From (YYYY-MM-DD, blank for open)", default="").ask_async()
         until = await questionary.text("Until (YYYY-MM-DD, blank for open)", default="").ask_async()
@@ -848,7 +1180,7 @@ async def _pick_period(*, force_explicit: bool):
                     datetime.strptime(val, "%Y-%m-%d")
                 except ValueError:
                     console.print(f"[red]Bad date:[/] {val} (expected YYYY-MM-DD)")
-                    return await _pick_period(force_explicit=force_explicit)
+                    return await _pick_period(force_explicit=force_explicit, counts=counts)
         return key, since or None, until or None
     return key, None, None
 
@@ -859,6 +1191,7 @@ __all__ = [
     "InteractiveAnswers",
     "Path",
     "build_analyze_args",
+    "build_dump_args",
     "run_interactive_analyze",
     "run_interactive_describe",
     "run_interactive_dump",

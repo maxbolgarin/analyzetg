@@ -94,13 +94,31 @@ async def cmd_analyze(
     filter_model: str | None,
     output: Path | None,
     console_out: bool = False,
-    mark_read: bool = False,
+    save_default: bool = False,
+    mark_read: bool | None = None,
     no_cache: bool = False,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
     all_flat: bool = False,
     all_per_topic: bool = False,
+    folder: str | None = None,
 ) -> None:
+    # No ref but --folder → batch-analyze unread chats in that folder; skip wizard.
+    if ref is None and folder:
+        await run_all_unread_analyze(
+            preset=preset,
+            prompt_file=prompt_file,
+            model=model,
+            filter_model=filter_model,
+            output=output,
+            console_out=console_out,
+            mark_read=bool(mark_read),
+            no_cache=no_cache,
+            include_transcripts=include_transcripts,
+            min_msg_chars=min_msg_chars,
+            folder=folder,
+        )
+        return
     # No ref → interactive wizard (pick chat → thread → preset → period → run).
     # Wizard opens its own tg_client; return before this function tries to.
     if ref is None:
@@ -109,9 +127,12 @@ async def cmd_analyze(
         await run_interactive_analyze(
             console_out=console_out,
             output=output,
+            save_default=save_default,
             mark_read=mark_read,
         )
         return
+    # Direct path: treat mark_read=None as False (CLI tri-state default).
+    mark_read_bool = bool(mark_read)
 
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
@@ -164,7 +185,7 @@ async def cmd_analyze(
                 filter_model=filter_model,
                 output=output,
                 console_out=console_out,
-                mark_read=mark_read,
+                mark_read=mark_read_bool,
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
@@ -231,7 +252,7 @@ async def cmd_analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
-            mark_read=mark_read,
+            mark_read=mark_read_bool,
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -578,12 +599,46 @@ async def _run_no_ref(
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
+    folder: str | None = None,
 ) -> None:
-    """No <ref>: list dialogs with unread messages, confirm, analyze each."""
+    """No <ref>: list dialogs with unread messages, confirm, analyze each.
+
+    `folder`, if given, restricts the batch to chats in that Telegram folder
+    (dialog filter) — matched case-insensitively against folder titles."""
     unread = await list_unread_dialogs(client)
     if not unread:
         console.print("[yellow]No dialogs with unread messages.[/]")
         return
+
+    if folder:
+        from analyzetg.tg.folders import list_folders, resolve_folder
+
+        folders = await list_folders(client)
+        matched = resolve_folder(folder, folders)
+        if matched is None:
+            titles = ", ".join(f"'{f.title}'" for f in folders) or "(none)"
+            console.print(f"[red]No folder matching[/] '{folder}'. Available folders: {titles}")
+            raise typer.Exit(2)
+        ids = matched.include_chat_ids
+        if not ids and matched.has_rule_based_inclusion:
+            console.print(
+                f"[yellow]Folder '{matched.title}' uses category rules "
+                "(contacts/groups/bots/etc.) without explicit chats — "
+                "rule expansion isn't supported. Add chats to the folder "
+                "explicitly in Telegram, or drop --folder.[/]"
+            )
+            raise typer.Exit(2)
+        before = len(unread)
+        unread = [d for d in unread if d.chat_id in ids]
+        console.print(
+            f"[dim]→ Folder[/] [bold]{matched.title}[/]"
+            f"{' ' + matched.emoticon if matched.emoticon else ''}"
+            f" [dim]— {len(unread)}/{before} unread chats match[/]"
+        )
+        if not unread:
+            console.print("[yellow]No chats in this folder have unread messages.[/]")
+            return
+
     _print_unread_table(unread)
     total = sum(d.unread_count for d in unread)
     if not typer.confirm(
@@ -771,8 +826,12 @@ async def run_all_unread_analyze(
     no_cache: bool = False,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
+    folder: str | None = None,
 ) -> None:
-    """Public: run the batch-across-all-unread-chats flow (was the old no-ref default)."""
+    """Public: run the batch-across-all-unread-chats flow (was the old no-ref default).
+
+    Pass `folder="Alpha"` (or any case-insensitive substring of a folder title)
+    to restrict the batch to chats in that Telegram folder."""
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _run_no_ref(
@@ -788,6 +847,7 @@ async def run_all_unread_analyze(
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
+            folder=folder,
         )
 
 

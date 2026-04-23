@@ -88,7 +88,8 @@ async def cmd_dump(
     with_transcribe: bool,
     include_transcripts: bool,
     console_out: bool = False,
-    mark_read: bool = False,
+    save_default: bool = False,
+    mark_read: bool | None = None,
     all_flat: bool = False,
     all_per_topic: bool = False,
 ) -> None:
@@ -109,12 +110,16 @@ async def cmd_dump(
         await run_interactive_dump(
             fmt=fmt,
             output=output,
+            save_default=save_default,
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=console_out,
             mark_read=mark_read,
         )
         return
+
+    # Direct path: treat mark_read=None as False (CLI tri-state default).
+    mark_read_bool = bool(mark_read)
 
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
@@ -160,7 +165,7 @@ async def cmd_dump(
                 with_transcribe=with_transcribe,
                 include_transcripts=include_transcripts,
                 console_out=console_out,
-                mark_read=mark_read,
+                mark_read=mark_read_bool,
             )
             return
 
@@ -215,7 +220,7 @@ async def cmd_dump(
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=console_out,
-            mark_read=mark_read,
+            mark_read=mark_read_bool,
         )
 
 
