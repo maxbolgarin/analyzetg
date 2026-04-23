@@ -78,6 +78,33 @@ def _forward_tag(m: Message) -> str:
     return ""
 
 
+def _reactions_tag(m: Message) -> str:
+    """Render reactions as `[reactions: 👍×3 ❤×1 (+2 custom)]`.
+
+    Sorted by count desc so the strongest signal comes first. Custom emoji
+    counts are summed under `+N custom` to avoid dumping opaque ids into the
+    prompt. Skip entirely when every reaction has count 1 AND total ≤ 1 —
+    a single person reacting is noise, not signal.
+    """
+    if not m.reactions:
+        return ""
+    named: list[tuple[str, int]] = []
+    custom_total = 0
+    for key, count in m.reactions.items():
+        if key.startswith("custom:"):
+            custom_total += count
+        else:
+            named.append((key, count))
+    named.sort(key=lambda x: (-x[1], x[0]))
+    total = sum(c for _, c in named) + custom_total
+    if total <= 1:
+        return ""
+    parts = [f"{emoji}×{count}" for emoji, count in named]
+    if custom_total:
+        parts.append(f"+{custom_total} custom")
+    return f" [reactions: {' '.join(parts)}]"
+
+
 def format_messages(
     msgs: list[Message],
     *,
@@ -108,7 +135,8 @@ def format_messages(
         if not body:
             continue
         lines.append(
-            f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}: {reply}{body}{_dup_suffix(m)}"
+            f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}{_reactions_tag(m)}:"
+            f" {reply}{body}{_dup_suffix(m)}"
         )
     return "\n".join(lines)
 

@@ -37,6 +37,21 @@ def test_parse_frontmatter_missing_returns_empty_meta() -> None:
     assert body == "just a body, no frontmatter"
 
 
+def test_all_presets_render_with_standard_kwargs() -> None:
+    """Regression: the pipeline calls `preset.render_user(period, title,
+    msg_count, messages)` for every preset. A preset that accidentally has a
+    stray `{var}` in its user template crashes run_analysis with KeyError.
+    """
+    for name, preset in PRESETS.items():
+        rendered = preset.render_user(
+            period="test-period",
+            title="test-title",
+            msg_count=1,
+            messages="test messages body",
+        )
+        assert "test messages body" in rendered, f"preset {name!r} dropped {{messages}}"
+
+
 def test_parse_frontmatter_skips_comment_lines() -> None:
     text = "---\n# this is a comment\nname: foo\n---\nbody"
     meta, _ = _parse_frontmatter(text)

@@ -61,7 +61,14 @@ async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> lis
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     if media_type == "voice":
-        prepared = src
+        # Telethon saves Telegram voice (Opus in OGG) as `.oga`; OpenAI
+        # whitelists `.ogg` by filename. Same bytes — just rename.
+        if src.suffix.lower() == ".oga":
+            renamed = src.with_suffix(".ogg")
+            src.rename(renamed)
+            prepared = renamed
+        else:
+            prepared = src
     else:
         if not await _ffmpeg_present(ffmpeg):
             raise FfmpegMissing(

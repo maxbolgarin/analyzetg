@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
     media_duration   INTEGER,
     transcript       TEXT,
     transcript_model TEXT,
+    reactions        TEXT,   -- JSON object: {"<emoji|custom_id>": <count>}
     PRIMARY KEY (chat_id, msg_id)
 );
 

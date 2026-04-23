@@ -226,8 +226,9 @@ class Repo:
         await self._conn.executemany(
             """
             INSERT INTO messages(chat_id, msg_id, thread_id, date, sender_id, sender_name,
-                text, reply_to, forward_from, media_type, media_doc_id, media_duration)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                text, reply_to, forward_from, media_type, media_doc_id, media_duration,
+                reactions)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, msg_id) DO UPDATE SET
                 thread_id=excluded.thread_id,
                 date=excluded.date,
@@ -238,7 +239,8 @@ class Repo:
                 forward_from=excluded.forward_from,
                 media_type=COALESCE(excluded.media_type, messages.media_type),
                 media_doc_id=COALESCE(excluded.media_doc_id, messages.media_doc_id),
-                media_duration=COALESCE(excluded.media_duration, messages.media_duration)
+                media_duration=COALESCE(excluded.media_duration, messages.media_duration),
+                reactions=excluded.reactions
             """,
             rows,
         )
@@ -260,6 +262,7 @@ class Repo:
             m.media_type,
             m.media_doc_id,
             m.media_duration,
+            json.dumps(m.reactions, ensure_ascii=False) if m.reactions else None,
         )
 
     async def iter_messages(
@@ -269,6 +272,7 @@ class Repo:
         since: datetime | None = None,
         until: datetime | None = None,
         min_msg_id: int | None = None,
+        max_msg_id: int | None = None,
     ) -> list[Message]:
         sql = "SELECT * FROM messages WHERE chat_id=?"
         args: list[Any] = [chat_id]
@@ -284,6 +288,9 @@ class Repo:
         if min_msg_id is not None:
             sql += " AND msg_id > ?"
             args.append(min_msg_id)
+        if max_msg_id is not None:
+            sql += " AND msg_id <= ?"
+            args.append(max_msg_id)
         sql += " ORDER BY date ASC, msg_id ASC"
         cur = await self._conn.execute(sql, args)
         rows = await cur.fetchall()
@@ -294,6 +301,15 @@ class Repo:
     def _row_to_msg(row: aiosqlite.Row) -> Message:
         date = _from_ts(row["date"])
         assert date is not None
+        reactions_raw = row["reactions"]
+        reactions: dict[str, int] | None = None
+        if reactions_raw:
+            try:
+                parsed = json.loads(reactions_raw)
+                if isinstance(parsed, dict):
+                    reactions = {str(k): int(v) for k, v in parsed.items()}
+            except (ValueError, TypeError):
+                reactions = None
         return Message(
             chat_id=row["chat_id"],
             msg_id=row["msg_id"],
@@ -309,6 +325,7 @@ class Repo:
             media_duration=row["media_duration"],
             transcript=row["transcript"],
             transcript_model=row["transcript_model"],
+            reactions=reactions,
         )
 
     async def get_max_msg_id(
