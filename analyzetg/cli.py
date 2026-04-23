@@ -101,6 +101,12 @@ def describe(
     )
 
 
+@app.command(rich_help_panel=PANEL_MAIN)
+def folders() -> None:
+    """List your Telegram folders (for use with `analyze --folder NAME`)."""
+    _run(_list_folders())
+
+
 # --- Hidden compatibility aliases: the consolidated `describe` absorbs these.
 # Kept callable so existing scripts don't break.
 
@@ -188,6 +194,44 @@ def chats_list(enabled_only: bool = typer.Option(False, "--enabled-only")) -> No
     from analyzetg.tg.commands import cmd_chats_list
 
     _run(cmd_chats_list(enabled_only=enabled_only))
+
+
+async def _list_folders() -> None:
+    from rich.table import Table
+
+    from analyzetg.tg.client import tg_client
+    from analyzetg.tg.folders import list_folders
+
+    settings = get_settings()
+    async with tg_client(settings) as client:
+        folders = await list_folders(client)
+
+    if not folders:
+        console.print("[yellow]No folders defined in this Telegram account.[/]")
+        return
+    t = Table(title="Telegram folders")
+    t.add_column("id", justify="right")
+    t.add_column("title")
+    t.add_column("icon")
+    t.add_column("chats", justify="right")
+    t.add_column("kind")
+    for f in folders:
+        kind = (
+            "chatlist"
+            if f.is_chatlist
+            else ("rule-based" if f.has_rule_based_inclusion and not f.include_chat_ids else "explicit")
+        )
+        t.add_row(
+            str(f.id),
+            f.title,
+            f.emoticon or "",
+            str(len(f.include_chat_ids)),
+            kind,
+        )
+    console.print(t)
+    console.print(
+        '[dim]Use with:[/] [cyan]atg analyze --folder "Alpha"[/] — batch-analyze unread chats in that folder.'
+    )
 
 
 @chats_app.command("enable")
@@ -329,10 +373,16 @@ def analyze(
         "-c",
         help="Render the result in the terminal (pretty-printed markdown) instead of saving a file.",
     ),
-    mark_read: bool = typer.Option(
+    save: bool = typer.Option(
         False,
-        "--mark-read",
-        help="After analysis, advance Telegram's read marker to cover every processed message.",
+        "--save",
+        "-s",
+        help="Save to the default reports/ path (skips the interactive output picker).",
+    ),
+    mark_read: bool | None = typer.Option(
+        None,
+        "--mark-read/--no-mark-read",
+        help="Tri-state: --mark-read advances Telegram's marker; --no-mark-read explicitly keeps unread and skips the prompt; no flag → ask interactively.",
     ),
     all_flat: bool = typer.Option(
         False,
@@ -347,12 +397,24 @@ def analyze(
     no_cache: bool = typer.Option(False, "--no-cache"),
     include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
     min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
+    folder: str | None = typer.Option(
+        None,
+        "--folder",
+        help=(
+            "Batch-analyze all unread chats inside this Telegram folder "
+            "(dialog filter). Case-insensitive match on folder title. "
+            "Only meaningful without <ref>."
+        ),
+    ),
 ) -> None:
     """Analyze a chat. Default window = messages since your Telegram read marker.
 
     For forum chats: `--thread N` targets one topic, `--all-flat` treats
     the forum as one chat (needs --last-days / --full-history),
     `--all-per-topic` runs one analysis per topic.
+
+    Without `<ref>` and with `--folder NAME`: batch-analyzes every chat in
+    that Telegram folder that has unread messages (skips the wizard).
     """
     from analyzetg.analyzer.commands import cmd_analyze
 
@@ -371,12 +433,14 @@ def analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
+            save_default=save,
             mark_read=mark_read,
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
             all_flat=all_flat,
             all_per_topic=all_per_topic,
+            folder=folder,
         )
     )
 
@@ -730,10 +794,16 @@ def dump(
         "-c",
         help="Print the dump to the terminal (pretty markdown) instead of saving a file.",
     ),
-    mark_read: bool = typer.Option(
+    save: bool = typer.Option(
         False,
-        "--mark-read",
-        help="After dumping, advance Telegram's read marker to cover every processed message.",
+        "--save",
+        "-s",
+        help="Save to the default reports/ path (skips the interactive output picker).",
+    ),
+    mark_read: bool | None = typer.Option(
+        None,
+        "--mark-read/--no-mark-read",
+        help="Tri-state: --mark-read advances Telegram's marker; --no-mark-read keeps unread and skips the prompt; no flag → ask interactively.",
     ),
     all_flat: bool = typer.Option(
         False,
@@ -769,6 +839,7 @@ def dump(
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=console_out,
+            save_default=save,
             mark_read=mark_read,
             all_flat=all_flat,
             all_per_topic=all_per_topic,

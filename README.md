@@ -1,5 +1,10 @@
 # analyzetg
 
+[![CI](https://github.com/maxbolgarin/analyzetg/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/analyzetg/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A local Python CLI that pulls your Telegram chats (DMs, groups, forum
 topics, channels, channel comments), transcribes voice messages, video
 notes and videos via OpenAI, and analyzes the result with GPT. By default

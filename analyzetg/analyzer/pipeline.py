@@ -26,6 +26,32 @@ from analyzetg.util.logging import get_logger
 log = get_logger(__name__)
 
 
+def _pipeline_console():
+    """Shared Rich Console for progress displays in this module."""
+    from rich.console import Console
+
+    return Console()
+
+
+async def _progress_single(*, label: str, coro):
+    """Run a single awaitable under a transient Rich spinner.
+
+    Gives the user something to look at while an OpenAI call is pending,
+    instead of dead silence for 5–20 seconds.
+    """
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"[dim]{label}[/]"),
+        TimeElapsedColumn(),
+        transient=True,
+        console=_pipeline_console(),
+    ) as p:
+        p.add_task("call", total=None)
+        return await coro
+
+
 @dataclass(slots=True)
 class AnalysisResult:
     preset: str
@@ -229,23 +255,26 @@ async def run_analysis(
         bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload)
         batch_hashes.append(bhash)
         dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
-        text, cost, hit, truncated = await _call_cached(
-            repo=repo,
-            oai=oai,
-            preset=preset,
-            model=final_model,
-            bhash=bhash,
-            system=preset.system,
-            static_ctx=static_ctx,
-            dynamic=preset.render_user(
-                period=_fmt_period(period),
-                title=title or "—",
-                msg_count=len(msgs),
-                messages=dynamic,
+        text, cost, hit, truncated = await _progress_single(
+            label=f"Analyzing ({len(msgs)} msgs, {preset.name}/{final_model})",
+            coro=_call_cached(
+                repo=repo,
+                oai=oai,
+                preset=preset,
+                model=final_model,
+                bhash=bhash,
+                system=preset.system,
+                static_ctx=static_ctx,
+                dynamic=preset.render_user(
+                    period=_fmt_period(period),
+                    title=title or "—",
+                    msg_count=len(msgs),
+                    messages=dynamic,
+                ),
+                max_tokens=preset.output_budget_tokens,
+                run_context=run_ctx,
+                use_cache=opts.use_cache,
             ),
-            max_tokens=preset.output_budget_tokens,
-            run_context=run_ctx,
-            use_cache=opts.use_cache,
         )
         total_cost += cost
         cache_hits += int(hit)
@@ -280,34 +309,57 @@ async def run_analysis(
         )
 
     # --- Map-reduce branch
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
     map_sem = asyncio.Semaphore(settings.analyze.map_concurrency)
 
-    async def _map(chunk) -> tuple[str, str, float, bool, bool]:
-        bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
-        dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
-        user = preset.render_user(
-            period=_fmt_period(period),
-            title=title or "—",
-            msg_count=len(chunk.messages),
-            messages=dynamic,
-        )
-        async with map_sem:
-            t, c, hit, tr = await _call_cached(
-                repo=repo,
-                oai=oai,
-                preset=preset,
-                model=filter_model,
-                bhash=bh,
-                system=preset.system,
-                static_ctx=static_ctx,
-                dynamic=user,
-                max_tokens=min(preset.output_budget_tokens, preset.map_output_tokens),
-                run_context={**run_ctx, "phase": "map"},
-                use_cache=opts.use_cache,
-            )
-        return bh, t, c, hit, tr
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]Analyzing chunks ({task.fields[model]})[/]"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        transient=True,
+        console=_pipeline_console(),
+    ) as _map_progress:
+        _map_task = _map_progress.add_task("map", total=len(chunks), model=filter_model)
 
-    map_results = await asyncio.gather(*[_map(c) for c in chunks])
+        async def _map(chunk) -> tuple[str, str, float, bool, bool]:
+            bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
+            dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
+            user = preset.render_user(
+                period=_fmt_period(period),
+                title=title or "—",
+                msg_count=len(chunk.messages),
+                messages=dynamic,
+            )
+            try:
+                async with map_sem:
+                    t, c, hit, tr = await _call_cached(
+                        repo=repo,
+                        oai=oai,
+                        preset=preset,
+                        model=filter_model,
+                        bhash=bh,
+                        system=preset.system,
+                        static_ctx=static_ctx,
+                        dynamic=user,
+                        max_tokens=min(preset.output_budget_tokens, preset.map_output_tokens),
+                        run_context={**run_ctx, "phase": "map"},
+                        use_cache=opts.use_cache,
+                    )
+                return bh, t, c, hit, tr
+            finally:
+                _map_progress.advance(_map_task)
+
+        map_results = await asyncio.gather(*[_map(c) for c in chunks])
     map_hashes = [mh for mh, _, _, _, _ in map_results]
     batch_hashes.extend(map_hashes)
     for _, _, cost, hit, tr in map_results:
@@ -328,18 +380,21 @@ async def run_analysis(
         f"Число фрагментов: {len(map_results)}\n\n"
         f"{joined}"
     )
-    text, cost, hit, truncated = await _call_cached(
-        repo=repo,
-        oai=oai,
-        preset=preset,
-        model=final_model,
-        bhash=reduce_bh,
-        system=preset.system,
-        static_ctx=static_ctx,
-        dynamic=reduce_user,
-        max_tokens=preset.output_budget_tokens,
-        run_context={**run_ctx, "phase": "reduce"},
-        use_cache=opts.use_cache,
+    text, cost, hit, truncated = await _progress_single(
+        label=f"Merging {len(map_results)} fragments ({final_model})",
+        coro=_call_cached(
+            repo=repo,
+            oai=oai,
+            preset=preset,
+            model=final_model,
+            bhash=reduce_bh,
+            system=preset.system,
+            static_ctx=static_ctx,
+            dynamic=reduce_user,
+            max_tokens=preset.output_budget_tokens,
+            run_context={**run_ctx, "phase": "reduce"},
+            use_cache=opts.use_cache,
+        ),
     )
     total_cost += cost
     cache_hits += int(hit)
