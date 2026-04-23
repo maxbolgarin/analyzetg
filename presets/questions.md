@@ -4,7 +4,8 @@ prompt_version: v1
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1400
+output_budget_tokens: 2500
+map_output_tokens: 1500
 ---
 Ты находишь открытые вопросы в переписке: то, что кто-то спросил, но
 адекватного ответа не получил, или ответ был, но консенсуса не вышло.

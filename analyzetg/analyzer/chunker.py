@@ -6,7 +6,10 @@ from datetime import timedelta
 
 from analyzetg.analyzer.formatter import format_messages
 from analyzetg.models import Chunk, Message
+from analyzetg.util.logging import get_logger
 from analyzetg.util.tokens import count_tokens
+
+log = get_logger(__name__)
 
 # Context window estimates. Real limits can differ per model; we err conservatively.
 MODEL_CONTEXT: dict[str, int] = {
@@ -20,9 +23,21 @@ MODEL_CONTEXT: dict[str, int] = {
     "gpt-5.4-nano": 400_000,
 }
 
+_UNKNOWN_MODEL_WARNED: set[str] = set()
+
 
 def model_context_window(model: str) -> int:
-    return MODEL_CONTEXT.get(model, 128_000)
+    if model in MODEL_CONTEXT:
+        return MODEL_CONTEXT[model]
+    if model not in _UNKNOWN_MODEL_WARNED:
+        _UNKNOWN_MODEL_WARNED.add(model)
+        log.warning(
+            "chunker.unknown_model",
+            model=model,
+            fallback=128_000,
+            hint="add the model to analyzetg/analyzer/chunker.py::MODEL_CONTEXT",
+        )
+    return 128_000
 
 
 def _fmt_line(m: Message) -> str:

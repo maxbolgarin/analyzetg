@@ -367,13 +367,14 @@ async def _run_forum_per_topic(
         out_dir = None
     else:
         chat_slug = _slugify(chat_title or str(chat_id))
+        # Layout: {output_root}/{chat-slug}/analyze/{topic-slug}-{preset}-{stamp}.md
         if output is not None and output.exists() and output.is_dir():
-            out_dir = output / chat_slug
+            out_dir = output / chat_slug / "analyze"
         elif output is not None and output.suffix:
             console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
             raise typer.Exit(2)
         else:
-            out_dir = (output or Path("reports")) / chat_slug
+            out_dir = (output or Path("reports")) / chat_slug / "analyze"
         out_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -631,9 +632,11 @@ async def _run_no_ref(
                 chat_username=u.username,
                 chat_internal_id=_derive_internal_id(u.chat_id),
             )
-            per_file = (
-                out_dir / f"{_slugify(u.title or str(u.chat_id))}-{preset}-{stamp}.md" if out_dir else None
-            )
+            per_file = None
+            if out_dir:
+                chat_out = out_dir / _slugify(u.title or str(u.chat_id)) / "analyze"
+                chat_out.mkdir(parents=True, exist_ok=True)
+                per_file = chat_out / f"{preset}-{stamp}.md"
             _print_and_write(result, output=per_file, title=u.title, console_out=console_out)
             if mark_read and result.msg_count > 0:
                 latest = await repo.get_max_msg_id(u.chat_id)
@@ -697,30 +700,53 @@ def _print_and_write(
         f"chunks={result.chunk_count} cache_hits={result.cache_hits}/"
         f"{result.cache_hits + result.cache_misses} cost=${result.total_cost_usd:.4f}"
     )
+    body = _with_truncation_banner(result)
+
+    if result.truncated:
+        console.print(
+            "[bold red]⚠ Output truncated[/] — the model hit "
+            "[cyan]output_budget_tokens[/]. Edit the preset file "
+            f"([cyan]presets/{result.preset}.md[/]) to raise it, or re-run with "
+            "[cyan]--no-cache[/] if a stale cache is in the way."
+        )
+
     if console_out:
         from rich.markdown import Markdown
         from rich.rule import Rule
 
         console.print(Rule(title or "result", style="cyan"))
-        console.print(Markdown(result.final_result))
+        console.print(Markdown(body))
         console.print(Rule(style="cyan"))
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(result.final_result, encoding="utf-8")
+            output.write_text(body, encoding="utf-8")
             console.print(f"[green]Also saved:[/] {output}")
         return
 
     if output is None:
         output = _default_output_path(title, result.preset)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(result.final_result, encoding="utf-8")
+    output.write_text(body, encoding="utf-8")
     console.print(f"[green]Written:[/] {output}")
+
+
+def _with_truncation_banner(result) -> str:
+    if not getattr(result, "truncated", False):
+        return result.final_result
+    banner = (
+        "> ⚠️ **Output was truncated.** The model hit "
+        "`output_budget_tokens` and stopped mid-response.\n"
+        f"> Raise the cap in `presets/{result.preset}.md` "
+        "(e.g. `output_budget_tokens: 4000`) and re-run with `--no-cache`.\n\n"
+    )
+    return banner + result.final_result
 
 
 def _default_output_path(title: str | None, preset: str) -> Path:
     slug = _slugify(title or "chat")
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    return Path("reports") / f"{slug}-{preset}-{stamp}.md"
+    # reports/{chat-slug}/analyze/{preset}-{stamp}.md
+    return Path("reports") / slug / "analyze" / f"{preset}-{stamp}.md"
 
 
 def _compute_window(

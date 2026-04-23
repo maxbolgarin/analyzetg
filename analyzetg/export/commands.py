@@ -346,13 +346,14 @@ async def _dump_forum_per_topic(
         out_dir = None
     else:
         chat_slug = _slugify(chat_title or str(chat_id))
+        # Layout: {output_root}/{chat-slug}/dump/{topic-slug}-{stamp}.{ext}
         if output is not None and output.exists() and output.is_dir():
-            out_dir = output / chat_slug
+            out_dir = output / chat_slug / "dump"
         elif output is not None and output.suffix:
             console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
             raise typer.Exit(2)
         else:
-            out_dir = (output or Path("reports")) / chat_slug
+            out_dir = (output or Path("reports")) / chat_slug / "dump"
         out_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -647,7 +648,9 @@ async def _dump_no_ref(
             if out_dir is None:
                 _print_console(msgs, title=u.title, fmt=fmt, count=len(msgs))
             else:
-                path = out_dir / f"{_slugify(u.title or str(u.chat_id))}-{stamp}.{ext}"
+                chat_out = out_dir / _slugify(u.title or str(u.chat_id)) / "dump"
+                chat_out.mkdir(parents=True, exist_ok=True)
+                path = chat_out / f"dump-{stamp}.{ext}"
                 _write(msgs, fmt=fmt, output=path, title=u.title)
                 console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {path}")
             if mark_read and msgs:
@@ -704,7 +707,8 @@ def _default_output_path(title: str | None, fmt: str) -> Path:
     slug = _slugify(title or "chat")
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
-    return Path("reports") / f"{slug}-dump-{stamp}.{ext}"
+    # reports/{chat-slug}/dump/dump-{stamp}.{ext}
+    return Path("reports") / slug / "dump" / f"dump-{stamp}.{ext}"
 
 
 def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: int) -> None:

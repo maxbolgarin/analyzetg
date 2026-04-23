@@ -30,6 +30,11 @@ class Preset:
     filter_model: str = "gpt-5.4-nano"
     final_model: str = "gpt-5.4"
     output_budget_tokens: int = 1500
+    # Per-chunk output cap in the map phase. Kept separate from
+    # `output_budget_tokens` (which governs the final reduce output) so
+    # individual chunks can produce richer mini-summaries without inflating
+    # the final answer budget.
+    map_output_tokens: int = 1500
     options_keys: list[str] = field(default_factory=list)
 
     def render_user(self, **kw: object) -> str:
@@ -84,6 +89,7 @@ def _load_preset_file(path: Path) -> Preset:
         filter_model=meta.get("filter_model", "gpt-5.4-nano"),
         final_model=meta.get("final_model", "gpt-5.4"),
         output_budget_tokens=int(meta.get("output_budget_tokens", "1500")),
+        map_output_tokens=int(meta.get("map_output_tokens", "1500")),
     )
 
 
@@ -159,4 +165,5 @@ def load_custom_preset(prompt_file: Path) -> Preset:
         filter_model=meta.get("filter_model", "gpt-5.4-nano"),
         final_model=meta.get("final_model", "gpt-5.4"),
         output_budget_tokens=int(meta.get("output_budget_tokens", "1500")),
+        map_output_tokens=int(meta.get("map_output_tokens", "1500")),
     )

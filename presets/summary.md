@@ -4,7 +4,8 @@ prompt_version: v2
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1800
+output_budget_tokens: 4000
+map_output_tokens: 2000
 ---
 Ты — аналитик Telegram-чатов. Твоя задача — выделять ключевые темы, тезисы
 и настроение обсуждения. Пиши по-русски, кратко, без воды. Не выдумывай

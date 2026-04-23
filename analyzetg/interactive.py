@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import questionary
+from prompt_toolkit.keys import Keys
 from rich.console import Console
 
 from analyzetg.analyzer.prompts import PRESETS
@@ -51,6 +52,20 @@ BACK = object()
 
 # Sentinel returned by _pick_chat when the user picks "Run on all N unread".
 ALL_UNREAD = object()
+
+
+def _bind_escape(question, value):
+    """Make ESC exit the questionary prompt with `value`.
+
+    Use `BACK` on steps that have a back action; use `None` on the first step
+    (same semantics as Ctrl-C there). `eager=True` so we win over any default
+    ESC behaviour (e.g. clearing the search filter)."""
+
+    @question.application.key_bindings.add(Keys.Escape, eager=True)
+    def _(event):
+        event.app.exit(result=value)
+
+    return question
 
 
 def _replace_last_line(summary: str) -> None:
@@ -147,7 +162,7 @@ async def run_interactive_analyze(
             preset=answers.preset,
             output=output,
             console_out=console_out,
-            mark_read=mark_read,
+            mark_read=answers.mark_read,
         )
         return
 
@@ -184,7 +199,7 @@ async def run_interactive_dump(
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=console_out,
-            mark_read=mark_read,
+            mark_read=answers.mark_read,
         )
         return
 
@@ -219,7 +234,7 @@ async def run_interactive_dump(
         with_transcribe=with_transcribe,
         include_transcripts=include_transcripts,
         console_out=console_out,
-        mark_read=mark_read,
+        mark_read=answers.mark_read,
         all_flat=answers.forum_all_flat,
         all_per_topic=answers.forum_all_per_topic,
     )
@@ -230,7 +245,9 @@ async def run_interactive_describe() -> None:
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path):
         console.print("[bold cyan]analyzetg[/] — pick a chat to describe")
-        console.print("[dim]Tips: ↑/↓ to navigate, type to filter, Enter to select, Ctrl-C to cancel.[/]\n")
+        console.print(
+            "[dim]Tips: ↑/↓ to navigate, type to filter, Enter to select, ESC or Ctrl-C to cancel.[/]\n"
+        )
         chat = await _pick_chat(client, offer_all_unread=False)
         if chat is None or chat is ALL_UNREAD:
             console.print("[dim]Cancelled.[/]")
@@ -276,7 +293,7 @@ async def _collect_answers(
             )
         console.print(
             "[dim]Tips: ↑/↓ to navigate, type to filter, Enter to select, "
-            "pick '← Back' to go up a step, Ctrl-C to cancel.[/]\n"
+            "ESC to go back (Ctrl-C to cancel).[/]\n"
         )
 
         chat: dict | None = None
@@ -327,7 +344,7 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 preset = result
-                step = "confirm" if run_on_all else "period"
+                step = "mark_read" if run_on_all else "period"
 
             elif step == "period":
                 result = await _pick_period(force_explicit=forum_all_flat)
@@ -341,6 +358,17 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 period, custom_since, custom_until = result
+                step = "mark_read"
+
+            elif step == "mark_read":
+                result = await _pick_mark_read(default=mark_read)
+                if result is BACK:
+                    step = ("preset" if mode == "analyze" else "chat") if run_on_all else "period"
+                    continue
+                if result is None:
+                    console.print("[dim]Cancelled.[/]")
+                    return None
+                mark_read = bool(result)
                 step = "confirm"
 
             elif step == "confirm":
@@ -366,25 +394,23 @@ async def _collect_answers(
                     summary_bits.append("mark-read")
                 console.print("[bold]Plan:[/] " + " / ".join(summary_bits))
 
-                choice = await questionary.select(
-                    "Run it?",
-                    choices=[
-                        questionary.Choice("Run", value="run"),
-                        questionary.Choice("← Back", value=BACK),
-                        questionary.Choice("Cancel", value="cancel"),
-                    ],
-                    style=LIST_STYLE,
+                choice = await _bind_escape(
+                    questionary.select(
+                        "Run it?",
+                        choices=[
+                            questionary.Choice("Run", value="run"),
+                            questionary.Choice("← Back", value=BACK),
+                            questionary.Choice("Cancel", value="cancel"),
+                        ],
+                        style=LIST_STYLE,
+                    ),
+                    BACK,
                 ).ask_async()
                 if choice is None or choice == "cancel":
                     console.print("[dim]Cancelled.[/]")
                     return None
                 if choice is BACK:
-                    if run_on_all and mode == "analyze":
-                        step = "preset"
-                    elif run_on_all:
-                        step = "chat"
-                    else:
-                        step = "period"
+                    step = "mark_read"
                     continue
                 break
 
@@ -545,12 +571,15 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
     # No "Back" on the first step — there's nowhere to go back to.
     # Ctrl-C cancels the whole wizard.
 
-    result = await questionary.select(
-        f"Pick a chat — {len(unread)} with unread, sorted by count (type to filter, ↑/↓ to move)",
-        choices=choices,
-        use_search_filter=True,
-        use_jk_keys=False,
-        style=LIST_STYLE,
+    result = await _bind_escape(
+        questionary.select(
+            f"Pick a chat — {len(unread)} with unread, sorted by count (type to filter, ↑/↓ to move)",
+            choices=choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        None,
     ).ask_async()
 
     if result is None:
@@ -605,12 +634,15 @@ async def _pick_from_all(client) -> dict | None:
         for r in rows
     ]
 
-    picked = await questionary.select(
-        f"Pick a chat from {len(rows)} dialogs (type to filter, ↑/↓ to move)",
-        choices=choices,
-        use_search_filter=True,
-        use_jk_keys=False,
-        style=LIST_STYLE,
+    picked = await _bind_escape(
+        questionary.select(
+            f"Pick a chat from {len(rows)} dialogs (type to filter, ↑/↓ to move)",
+            choices=choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        None,
     ).ask_async()
     if picked is not None:
         _replace_last_line(
@@ -656,12 +688,15 @@ async def _pick_thread(client, chat_id: int):
     choices.append(questionary.Separator())
     choices.append(questionary.Choice(title="← Back", value=("back", None)))
 
-    result = await questionary.select(
-        f"{len(topics)} topic(s) in this forum",
-        choices=choices,
-        use_search_filter=True,
-        use_jk_keys=False,
-        style=LIST_STYLE,
+    result = await _bind_escape(
+        questionary.select(
+            f"{len(topics)} topic(s) in this forum",
+            choices=choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        ("back", None),
     ).ask_async()
 
     if result is None:
@@ -717,12 +752,15 @@ async def _pick_preset():
     choices.append(questionary.Separator())
     choices.append(questionary.Choice(title="← Back", value=BACK))
 
-    picked = await questionary.select(
-        "Pick a preset",
-        choices=choices,
-        use_search_filter=True,
-        use_jk_keys=False,
-        style=LIST_STYLE,
+    picked = await _bind_escape(
+        questionary.select(
+            "Pick a preset",
+            choices=choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        BACK,
     ).ask_async()
     if picked is None:
         return None
@@ -730,6 +768,33 @@ async def _pick_preset():
         _replace_last_line("[dim]← Back[/]")
         return BACK
     _replace_last_line(f"[bold cyan]?[/] preset: [bold]{picked}[/]")
+    return picked
+
+
+async def _pick_mark_read(*, default: bool):
+    """Yes/No/Back. Returns True, False, BACK, or None (cancel)."""
+    choices = [
+        questionary.Choice("No — keep messages unread in Telegram", value=False),
+        questionary.Choice("Yes — advance Telegram's read marker after analysis", value=True),
+        questionary.Separator(),
+        questionary.Choice("← Back", value=BACK),
+    ]
+    picked = await _bind_escape(
+        questionary.select(
+            "Mark the processed messages as read?",
+            choices=choices,
+            default=bool(default),
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        BACK,
+    ).ask_async()
+    if picked is None:
+        return None
+    if picked is BACK:
+        _replace_last_line("[dim]← Back[/]")
+        return BACK
+    _replace_last_line(f"[bold cyan]?[/] mark-read: [bold]{'yes' if picked else 'no'}[/]")
     return picked
 
 
@@ -750,11 +815,14 @@ async def _pick_period(*, force_explicit: bool):
             questionary.Choice(title="← Back", value=BACK),
         ]
     )
-    key = await questionary.select(
-        "Pick a period",
-        choices=options,
-        use_jk_keys=False,
-        style=LIST_STYLE,
+    key = await _bind_escape(
+        questionary.select(
+            "Pick a period",
+            choices=options,
+            use_jk_keys=False,
+            style=LIST_STYLE,
+        ),
+        BACK,
     ).ask_async()
     if key is None:
         return None

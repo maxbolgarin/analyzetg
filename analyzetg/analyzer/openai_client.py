@@ -23,6 +23,7 @@ class ChatResult:
     cached_tokens: int
     completion_tokens: int
     cost_usd: float | None
+    truncated: bool = False  # True iff finish_reason == "length"
 
 
 def make_client() -> AsyncOpenAI:
@@ -52,19 +53,28 @@ async def _completion(
     )
 
 
-async def chat_complete(
+# Absolute ceiling for the retry-on-truncation budget. Most current models
+# cap a single completion at ~16k tokens; raise carefully if you move to
+# a reasoning model with higher caps.
+_MAX_RETRY_TOKENS = 16_000
+
+
+async def _one_call(
     oai: AsyncOpenAI,
     *,
     repo: Repo,
     model: str,
     messages: list[dict[str, str]],
     max_tokens: int,
-    context: dict[str, Any] | None = None,
+    temperature: float,
+    context: dict[str, Any] | None,
 ) -> ChatResult:
-    settings = get_settings()
-    resp = await _completion(oai, model, messages, max_tokens, settings.openai.temperature)
+    """Single OpenAI call with usage logging. Does NOT retry on truncation."""
+    resp = await _completion(oai, model, messages, max_tokens, temperature)
     choice = resp.choices[0]
     text = choice.message.content or ""
+    finish = getattr(choice, "finish_reason", None)
+    truncated = finish == "length"
     usage = getattr(resp, "usage", None)
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -80,7 +90,7 @@ async def chat_complete(
         cached_tokens=cached,
         completion_tokens=completion,
         cost_usd=cost,
-        context=context or {},
+        context={**(context or {}), "finish_reason": finish} if finish else (context or {}),
     )
     log.info(
         "openai.chat",
@@ -89,6 +99,7 @@ async def chat_complete(
         cached=cached,
         completion=completion,
         cost=cost,
+        finish=finish,
     )
     return ChatResult(
         text=text,
@@ -96,4 +107,62 @@ async def chat_complete(
         cached_tokens=cached,
         completion_tokens=completion,
         cost_usd=cost,
+        truncated=truncated,
     )
+
+
+async def chat_complete(
+    oai: AsyncOpenAI,
+    *,
+    repo: Repo,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    context: dict[str, Any] | None = None,
+) -> ChatResult:
+    """Chat completion with automatic retry when the response is truncated.
+
+    If `finish_reason == "length"` on the first call, retry once with
+    `max_tokens` doubled (capped at `_MAX_RETRY_TOKENS`). The retry replaces
+    the result — you don't get both. Cost is logged for both calls.
+    """
+    settings = get_settings()
+    result = await _one_call(
+        oai,
+        repo=repo,
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=settings.openai.temperature,
+        context=context,
+    )
+    if result.truncated and max_tokens < _MAX_RETRY_TOKENS:
+        bumped = min(max_tokens * 2, _MAX_RETRY_TOKENS)
+        log.warning(
+            "openai.chat.truncated_retry",
+            model=model,
+            old_max=max_tokens,
+            new_max=bumped,
+            completion=result.completion_tokens,
+        )
+        result = await _one_call(
+            oai,
+            repo=repo,
+            model=model,
+            messages=messages,
+            max_tokens=bumped,
+            temperature=settings.openai.temperature,
+            context={**(context or {}), "retry_of_truncated": True},
+        )
+        if result.truncated:
+            log.warning(
+                "openai.chat.truncated_after_retry",
+                model=model,
+                max_tokens=bumped,
+                completion=result.completion_tokens,
+                hint=(
+                    "bump output_budget_tokens in the preset file "
+                    f"(current budget hit max retry cap {_MAX_RETRY_TOKENS})"
+                ),
+            )
+    return result

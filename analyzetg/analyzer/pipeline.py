@@ -40,6 +40,7 @@ class AnalysisResult:
     cache_hits: int
     cache_misses: int
     run_id: int | None = None
+    truncated: bool = False  # any stage hit max_completion_tokens
 
 
 @dataclass(slots=True)
@@ -70,6 +71,7 @@ class AnalysisOptions:
             "language": s.openai.audio_language,
             "temperature": s.openai.temperature,
             "output_budget": preset.output_budget_tokens,
+            "map_output": preset.map_output_tokens,
         }
 
 
@@ -97,13 +99,16 @@ async def _call_cached(
     max_tokens: int,
     run_context: dict[str, Any],
     use_cache: bool,
-) -> tuple[str, float, bool]:
-    """Return (text, cost, was_cache_hit). Writes cache and usage log on miss."""
+) -> tuple[str, float, bool, bool]:
+    """Return (text, cost, was_cache_hit, truncated). Writes cache and usage log on miss.
+
+    `truncated` is only reliable for cache misses — cached rows predate the
+    flag and are assumed not-truncated (re-run with --no-cache if in doubt)."""
     if use_cache:
         hit = await repo.cache_get(bhash)
         if hit:
             log.debug("cache.hit", batch=bhash[:10])
-            return hit["result"], 0.0, True
+            return hit["result"], 0.0, True, False
     messages = build_messages(system, static_ctx, dynamic)
     res = await chat_complete(
         oai,
@@ -113,7 +118,9 @@ async def _call_cached(
         max_tokens=max_tokens,
         context={**run_context, "batch_hash": bhash},
     )
-    if use_cache:
+    if use_cache and not res.truncated:
+        # Don't cache truncated results — caching a partial summary would
+        # silently poison every future run of the same query.
         await repo.cache_put(
             bhash,
             preset.name,
@@ -125,7 +132,7 @@ async def _call_cached(
             res.completion_tokens,
             res.cost_usd,
         )
-    return res.text, float(res.cost_usd or 0.0), False
+    return res.text, float(res.cost_usd or 0.0), False, res.truncated
 
 
 async def run_analysis(
@@ -214,6 +221,7 @@ async def run_analysis(
     cache_hits = 0
     cache_misses = 0
     batch_hashes: list[str] = []
+    any_truncated = False
 
     # --- Single pass: one chunk OR preset disables reduce
     if len(chunks) <= 1 or not preset.needs_reduce:
@@ -221,7 +229,7 @@ async def run_analysis(
         bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload)
         batch_hashes.append(bhash)
         dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
-        text, cost, hit = await _call_cached(
+        text, cost, hit, truncated = await _call_cached(
             repo=repo,
             oai=oai,
             preset=preset,
@@ -242,6 +250,7 @@ async def run_analysis(
         total_cost += cost
         cache_hits += int(hit)
         cache_misses += int(not hit)
+        any_truncated = any_truncated or truncated
         run_id = await _record_run(
             repo,
             chat_id,
@@ -267,12 +276,13 @@ async def run_analysis(
             cache_hits=cache_hits,
             cache_misses=cache_misses,
             run_id=run_id,
+            truncated=any_truncated,
         )
 
     # --- Map-reduce branch
     map_sem = asyncio.Semaphore(settings.analyze.map_concurrency)
 
-    async def _map(chunk) -> tuple[str, str, float, bool]:
+    async def _map(chunk) -> tuple[str, str, float, bool, bool]:
         bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
         dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
         user = preset.render_user(
@@ -282,7 +292,7 @@ async def run_analysis(
             messages=dynamic,
         )
         async with map_sem:
-            t, c, hit = await _call_cached(
+            t, c, hit, tr = await _call_cached(
                 repo=repo,
                 oai=oai,
                 preset=preset,
@@ -291,19 +301,20 @@ async def run_analysis(
                 system=preset.system,
                 static_ctx=static_ctx,
                 dynamic=user,
-                max_tokens=min(preset.output_budget_tokens, 900),
+                max_tokens=min(preset.output_budget_tokens, preset.map_output_tokens),
                 run_context={**run_ctx, "phase": "map"},
                 use_cache=opts.use_cache,
             )
-        return bh, t, c, hit
+        return bh, t, c, hit, tr
 
     map_results = await asyncio.gather(*[_map(c) for c in chunks])
-    map_hashes = [mh for mh, _, _, _ in map_results]
+    map_hashes = [mh for mh, _, _, _, _ in map_results]
     batch_hashes.extend(map_hashes)
-    for _, _, cost, hit in map_results:
+    for _, _, cost, hit, tr in map_results:
         total_cost += cost
         cache_hits += int(hit)
         cache_misses += int(not hit)
+        any_truncated = any_truncated or tr
 
     reduce_bh = reduce_hash(preset.name, preset.prompt_version, final_model, map_hashes, options_payload)
     batch_hashes.append(reduce_bh)
@@ -317,7 +328,7 @@ async def run_analysis(
         f"Число фрагментов: {len(map_results)}\n\n"
         f"{joined}"
     )
-    text, cost, hit = await _call_cached(
+    text, cost, hit, truncated = await _call_cached(
         repo=repo,
         oai=oai,
         preset=preset,
@@ -333,6 +344,7 @@ async def run_analysis(
     total_cost += cost
     cache_hits += int(hit)
     cache_misses += int(not hit)
+    any_truncated = any_truncated or truncated
 
     run_id = await _record_run(
         repo,
@@ -359,6 +371,7 @@ async def run_analysis(
         cache_hits=cache_hits,
         cache_misses=cache_misses,
         run_id=run_id,
+        truncated=any_truncated,
     )
 
 

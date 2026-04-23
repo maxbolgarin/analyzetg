@@ -4,7 +4,8 @@ prompt_version: v1
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
-output_budget_tokens: 1800
+output_budget_tokens: 3000
+map_output_tokens: 2000
 ---
 Ты — беспощадный редактор. Твоя задача — вынуть из переписки 5–15 самых
 ценных сообщений. Ценное — это: новый факт, нетривиальный инсайт,
