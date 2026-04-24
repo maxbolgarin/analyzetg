@@ -9,6 +9,7 @@ and hashing see the enriched body.
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext as _null_ctx
 from typing import TYPE_CHECKING
 
 from analyzetg.config import get_settings
@@ -68,22 +69,41 @@ async def enrich_messages(
     caps = _caps(opts)
     counted: dict[str, int] = {"image": 0, "link": 0}
 
+    # Per-doc_id locks prevent two concurrent handlers from independently
+    # downloading/transcribing the same media when the same doc_id appears
+    # in multiple messages (common when a voice note is forwarded across
+    # several chats in a single batch). Without this, both handlers miss
+    # the cache on first look, both call the Whisper API, and
+    # `put_media_enrichment` lets the second write overwrite the first —
+    # wasting one API call.
+    doc_locks: dict[int, asyncio.Lock] = {}
+
+    def _lock_for(doc_id: int) -> asyncio.Lock:
+        lock = doc_locks.get(doc_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            doc_locks[doc_id] = lock
+        return lock
+
     async def handle(msg: Message) -> None:
         # Voice / videonote — via audio enricher.
         mt = msg.media_type
+        # Serialize per-doc_id to prevent duplicate downloads/API calls
+        # when the same media appears under multiple msg_ids in a batch.
+        lock = _lock_for(int(msg.media_doc_id)) if msg.media_doc_id else None
         try:
             if mt == "voice" and opts.voice:
-                async with sem:
+                async with sem, lock or _null_ctx():
                     res = await enrich_audio(msg, client=client, repo=repo, model=opts.audio_model)
                 if res:
                     stats.record("voice", res)
             elif mt == "videonote" and opts.videonote:
-                async with sem:
+                async with sem, lock or _null_ctx():
                     res = await enrich_audio(msg, client=client, repo=repo, model=opts.audio_model)
                 if res:
                     stats.record("videonote", res)
             elif mt == "video" and opts.video:
-                async with sem:
+                async with sem, lock or _null_ctx():
                     res = await enrich_video(msg, client=client, repo=repo, model=opts.audio_model)
                 if res:
                     stats.record("video", res)
@@ -92,12 +112,12 @@ async def enrich_messages(
                     stats.record_skip("image")
                 else:
                     counted["image"] += 1
-                    async with sem:
+                    async with sem, lock or _null_ctx():
                         res = await enrich_image(msg, client=client, repo=repo, model=opts.vision_model)
                     if res:
                         stats.record("image", res)
             elif mt == "doc" and opts.doc:
-                async with sem:
+                async with sem, lock or _null_ctx():
                     res = await enrich_document(msg, client=client, repo=repo)
                 if res:
                     stats.record("doc", res)

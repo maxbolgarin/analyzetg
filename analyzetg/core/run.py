@@ -17,9 +17,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from telethon import TelegramClient
+
+    from analyzetg.config import Settings
+    from analyzetg.db.repo import Repo
     from analyzetg.enrich.base import EnrichStats
     from analyzetg.models import Message
 
@@ -61,10 +65,10 @@ class PreparedRun:
     mark_read_fn: Callable[[], Awaitable[int]] | None
 
     # --- Shared handles ---
-    # Kept on the run object so consumers that need OpenAI, backfill,
-    # config don't have to thread them separately. Typed as Any because
-    # Telethon/Repo/Settings form a fat interface we don't want to pin
-    # into a stub test double.
-    client: Any
-    repo: Any
-    settings: Any
+    # Pinned to the real types via TYPE_CHECKING imports so consumers
+    # get IDE / mypy help; the imports are fenced to typecheck time so
+    # PreparedRun stays importable without pulling Telethon into every
+    # module that references it.
+    client: TelegramClient
+    repo: Repo
+    settings: Settings

@@ -646,6 +646,10 @@ uv run ruff check .           # lint
 uv run ruff format .          # format
 ```
 
+Contributor guide — invariants, caching layers, preset format, and editing
+hazards — lives in [`CLAUDE.md`](CLAUDE.md). Read it before changing the
+pipeline, DB layer, or preset prompts.
+
 Full spec: [`docs/analyzetg-spec.md`](docs/analyzetg-spec.md) (if present).
 
 ---

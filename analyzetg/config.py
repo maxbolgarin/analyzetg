@@ -7,18 +7,29 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class TelegramCfg(BaseModel):
+class _StrictCfg(BaseModel):
+    """Base for every nested config block.
+
+    `extra="forbid"` surfaces typos — `chat_modle_default = "..."` used to
+    be silently dropped. Reason for inheritance over per-class repetition:
+    one place to flip the knob if we ever need `extra="allow"` again.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class TelegramCfg(_StrictCfg):
     api_id: int = 0
     api_hash: str = ""
     session_path: Path = Path("storage/session.sqlite")
     max_msgs_per_minute: int = 3000
 
 
-class OpenAICfg(BaseModel):
+class OpenAICfg(_StrictCfg):
     api_key: str = ""
     chat_model_default: str = "gpt-5.4"
     filter_model_default: str = "gpt-5.4-nano"
@@ -29,13 +40,13 @@ class OpenAICfg(BaseModel):
     temperature: float = 0.2
 
 
-class SyncCfg(BaseModel):
+class SyncCfg(_StrictCfg):
     default_lookback_days: int = 7
     batch_size: int = 500
     concurrency: int = 3
 
 
-class MediaCfg(BaseModel):
+class MediaCfg(_StrictCfg):
     transcribe_voice: bool = True
     transcribe_videonote: bool = True
     transcribe_video: bool = False
@@ -46,7 +57,7 @@ class MediaCfg(BaseModel):
     ffmpeg_path: str = "ffmpeg"
 
 
-class AnalyzeCfg(BaseModel):
+class AnalyzeCfg(_StrictCfg):
     min_msg_chars: int = 3
     output_budget_tokens: int = 1500
     safety_margin_tokens: int = 4000
@@ -55,7 +66,7 @@ class AnalyzeCfg(BaseModel):
     map_concurrency: int = 4
 
 
-class EnrichCfg(BaseModel):
+class EnrichCfg(_StrictCfg):
     """Per-media-type enrichment toggles and model choices.
 
     Defaults preserve today's behavior (voice/videonote transcription ON) while
@@ -87,23 +98,23 @@ class EnrichCfg(BaseModel):
     concurrency: int = 3
 
 
-class RetentionCfg(BaseModel):
+class RetentionCfg(_StrictCfg):
     message_retention_days: int = 0
     keep_transcripts_forever: bool = True
     keep_analysis_cache_forever: bool = True
 
 
-class StorageCfg(BaseModel):
+class StorageCfg(_StrictCfg):
     data_path: Path = Path("storage/data.sqlite")
 
 
-class ChatPricing(BaseModel):
+class ChatPricing(_StrictCfg):
     input: float
     cached_input: float
     output: float
 
 
-class PricingCfg(BaseModel):
+class PricingCfg(_StrictCfg):
     chat: dict[str, ChatPricing] = Field(default_factory=dict)
     audio: dict[str, float] = Field(default_factory=dict)
 
@@ -112,7 +123,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore",
+        extra="forbid",
     )
 
     telegram: TelegramCfg = Field(default_factory=TelegramCfg)
@@ -131,8 +142,15 @@ class Settings(BaseSettings):
 def _read_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    with path.open("rb") as f:
-        return tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        # Surface the path + underlying position so the user can find the
+        # typo in seconds instead of guessing from a bare stack trace.
+        raise ValueError(
+            f"{path}: TOML parse error — {e}. Check for unclosed quotes/brackets and missing commas."
+        ) from e
 
 
 def _load_dotenv(path: Path) -> None:
@@ -143,7 +161,11 @@ def _load_dotenv(path: Path) -> None:
     """
     if not path.exists():
         return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig transparently strips a UTF-8 BOM if present (common on
+    # Windows editors) — without this, the first line parses as
+    # "\ufeffTELEGRAM_API_ID" and Telegram login fails with "no API id"
+    # with no hint as to why.
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
