@@ -7,14 +7,23 @@ download-media) never wakes up to find a field it depended on removed.
 from __future__ import annotations
 
 from dataclasses import fields
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from analyzetg.config import get_settings, reset_settings
+from analyzetg.core.run import PreparedRun
+from analyzetg.db.repo import Repo
+from analyzetg.enrich.base import EnrichOpts
+from analyzetg.models import Message
 
 
 def test_prepared_run_carries_all_consumer_contracts():
     # Every field a consumer might read. Adding a new field is fine —
     # removing or renaming one needs both this test and the consumers
     # to change in the same commit.
-    from analyzetg.core.run import PreparedRun
-
     expected = {
         "chat_id",
         "thread_id",
@@ -40,8 +49,6 @@ def test_prepared_run_carries_all_consumer_contracts():
 def test_prepared_run_slots_enforced():
     # Accidentally adding an attribute outside the declared set should
     # fail fast — slotted dataclass is how we get that guarantee.
-    from analyzetg.core.run import PreparedRun
-
     p = PreparedRun(
         chat_id=1,
         thread_id=None,
@@ -66,3 +73,86 @@ def test_prepared_run_slots_enforced():
     except AttributeError:
         return
     raise AssertionError("PreparedRun should be slotted (no dynamic attrs)")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings(monkeypatch, tmp_path):
+    reset_settings()
+    monkeypatch.chdir(tmp_path)
+    yield
+    reset_settings()
+
+
+@pytest.fixture
+async def repo(tmp_path: Path):
+    r = await Repo.open(tmp_path / "t.sqlite")
+    try:
+        yield r
+    finally:
+        await r.close()
+
+
+async def test_prepare_chat_run_returns_full_shape(repo, monkeypatch):
+    """End-to-end smoke test: canned DB + stubbed Telethon client →
+    prepare_chat_run returns a PreparedRun with every field populated
+    as expected. Catches regressions where a consumer-required field
+    stops being set during prep."""
+    from analyzetg.core.pipeline import prepare_chat_run
+
+    await repo.upsert_messages(
+        [
+            Message(
+                chat_id=-100,
+                msg_id=10,
+                date=datetime(2026, 4, 24, 12, 0),
+                thread_id=None,
+                sender_name="Alice",
+                text="hello there",
+            ),
+            Message(
+                chat_id=-100,
+                msg_id=11,
+                date=datetime(2026, 4, 24, 12, 1),
+                thread_id=None,
+                sender_name="Bob",
+                text="good morning",
+            ),
+        ]
+    )
+
+    # Short-circuit the network: patch backfill to a no-op.
+    async def _no_backfill(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+
+    client = MagicMock()
+    client.get_messages = AsyncMock()
+    settings = get_settings()
+
+    prepared = await prepare_chat_run(
+        client=client,
+        repo=repo,
+        settings=settings,
+        chat_id=-100,
+        thread_id=None,
+        chat_title="Test Chat",
+        since_dt=datetime(2026, 4, 24),
+        until_dt=datetime(2026, 4, 25),
+        enrich_opts=EnrichOpts(),
+        mark_read=False,
+    )
+
+    assert prepared.chat_id == -100
+    assert prepared.chat_title == "Test Chat"
+    assert prepared.thread_id is None
+    assert len(prepared.messages) == 2
+    assert prepared.raw_msg_count == 2
+    assert prepared.period == (datetime(2026, 4, 24), datetime(2026, 4, 25))
+    assert prepared.topic_titles is None
+    assert prepared.topic_markers is None
+    assert prepared.enrich_stats is None
+    assert prepared.mark_read_fn is None
+    assert prepared.client is client
+    assert prepared.repo is repo
+    assert prepared.settings is settings
