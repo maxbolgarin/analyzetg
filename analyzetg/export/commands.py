@@ -8,14 +8,17 @@ starting point is the dialog's unread marker.
 from __future__ import annotations
 
 import asyncio
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from analyzetg.config import get_settings
+from analyzetg.core.paths import compute_window as _compute_window
+from analyzetg.core.paths import has_explicit_period as _has_explicit_period
+from analyzetg.core.paths import parse_ymd as _parse_ymd
+from analyzetg.core.paths import slugify as _slugify
 from analyzetg.db.repo import Repo, open_repo
 from analyzetg.export.markdown import export_csv, export_jsonl, export_md
 from analyzetg.models import Message
@@ -32,12 +35,6 @@ from analyzetg.util.logging import get_logger
 
 console = Console()
 log = get_logger(__name__)
-
-
-def _parse_ymd(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    return datetime.strptime(s, "%Y-%m-%d")
 
 
 def _parse_from_msg(value: str | None) -> int | None:
@@ -280,15 +277,6 @@ async def cmd_dump(
             save_media=save_media,
             save_media_types=save_media_kinds,
         )
-
-
-def _has_explicit_period(
-    since_dt: datetime | None,
-    until_dt: datetime | None,
-    from_msg_id: int | None,
-    full_history: bool,
-) -> bool:
-    return bool(since_dt or until_dt or from_msg_id is not None or full_history)
 
 
 async def _dump_single(
@@ -720,16 +708,8 @@ def _resolve_output_dir(output: Path | None, n_chats: int) -> Path | None:
     return output
 
 
-_SLUG_RE = re.compile(r"[^A-Za-z0-9_\-]+")
-
-
-def _slugify(text: str) -> str:
-    slug = _SLUG_RE.sub("-", text).strip("-").lower()
-    return slug[:40] or "chat"
-
-
 def _default_output_path(title: str | None, fmt: str) -> Path:
-    slug = _slugify(title or "chat")
+    slug = _slugify(title or "") or "chat"
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
     # reports/{chat-slug}/dump/dump-{stamp}.{ext}
@@ -780,16 +760,6 @@ def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: i
         console.print(buf.getvalue(), highlight=False)
     console.print(Rule(style="cyan"))
     console.print(f"[dim]{count} message(s)[/]")
-
-
-def _compute_window(
-    since: str | None, until: str | None, last_days: int | None
-) -> tuple[datetime | None, datetime | None]:
-    if last_days:
-        until_dt = datetime.now()
-        since_dt = until_dt - timedelta(days=last_days)
-        return since_dt, until_dt
-    return _parse_ymd(since), _parse_ymd(until)
 
 
 def _transcribable(m: Message, settings) -> bool:

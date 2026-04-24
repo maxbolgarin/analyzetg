@@ -12,9 +12,8 @@ prompts for choice.
 
 from __future__ import annotations
 
-import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -24,6 +23,14 @@ from rich.table import Table
 from analyzetg.analyzer.pipeline import AnalysisOptions, AnalysisResult, run_analysis
 from analyzetg.analyzer.prompts import PRESETS, Preset, load_custom_preset
 from analyzetg.config import get_settings
+from analyzetg.core.paths import chat_slug as _chat_slug
+from analyzetg.core.paths import compute_window as _compute_window
+from analyzetg.core.paths import derive_internal_id as _derive_internal_id
+from analyzetg.core.paths import has_explicit_period as _has_explicit_period
+from analyzetg.core.paths import parse_ymd as _parse_ymd
+from analyzetg.core.paths import slugify as _slugify  # noqa: F401  re-export for tests
+from analyzetg.core.paths import topic_slug as _topic_slug
+from analyzetg.core.paths import unique_path as _unique_path
 from analyzetg.db.repo import Repo, open_repo
 from analyzetg.enrich.base import EnrichOpts
 from analyzetg.tg.client import tg_client
@@ -33,12 +40,6 @@ from analyzetg.util.logging import get_logger
 
 console = Console()
 log = get_logger(__name__)
-
-
-def _parse_ymd(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    return datetime.strptime(s, "%Y-%m-%d")
 
 
 _ENRICH_KINDS = ("voice", "videonote", "video", "image", "doc", "link")
@@ -134,20 +135,6 @@ def build_enrich_opts(
     )
 
 
-def _derive_internal_id(chat_id: int) -> int | None:
-    """Strip the `-100` prefix Telethon uses for channels/supergroups.
-
-    Returns None for regular users / small groups where the id isn't
-    suitable for a t.me/c/ link.
-    """
-    if chat_id >= 0:
-        return None
-    abs_id = abs(chat_id)
-    if abs_id > 1_000_000_000_000:
-        return abs_id - 1_000_000_000_000
-    return None
-
-
 def _parse_from_msg(value: str | None) -> int | None:
     if not value:
         return None
@@ -156,15 +143,6 @@ def _parse_from_msg(value: str | None) -> int | None:
     from analyzetg.tg.links import parse
 
     return parse(value).msg_id
-
-
-def _has_explicit_period(
-    since_dt: datetime | None,
-    until_dt: datetime | None,
-    from_msg_id: int | None,
-    full_history: bool,
-) -> bool:
-    return bool(since_dt or until_dt or from_msg_id is not None or full_history)
 
 
 async def cmd_analyze(
@@ -941,69 +919,6 @@ def _resolve_output_dir(output: Path | None, n_chats: int) -> Path | None:
     return output
 
 
-# `\w` in Python 3 is Unicode-aware by default (matches Cyrillic, CJK, etc.),
-# which is why titles like "ОБЩИЙ ЧАТ" now slug to "общий-чат" instead of
-# collapsing to "" and falling back to `topic-<id>`. Modern file systems
-# (APFS, ext4, NTFS) and every shell we care about handle UTF-8 filenames
-# fine, so there's no reason to transliterate to ASCII.
-_SLUG_RE = re.compile(r"[^\w\-]+", re.UNICODE)
-
-
-def _slugify(text: str) -> str:
-    """Lowercase, punctuation-stripped, 40-char-capped directory slug.
-
-    Preserves Unicode letters (Cyrillic, CJK, Arabic, …). Empty /
-    all-punctuation input returns `""` — callers must provide a
-    fallback (see `_chat_slug`/`_topic_slug`).
-    """
-    slug = _SLUG_RE.sub("-", text).strip("-").lower()
-    return slug[:40]
-
-
-def _unique_path(base: Path) -> Path:
-    """Return `base` or the first numbered sibling that doesn't exist yet.
-
-    Two runs inside the same second (same preset + same chat) would otherwise
-    overwrite each other. We append `-2`, `-3`, ... to the filename stem
-    until we find a free slot, capping at 100 to surface any genuine
-    pathological case (e.g. an infinite loop in a calling script).
-    """
-    if not base.exists():
-        return base
-    stem = base.stem
-    suffix = base.suffix
-    parent = base.parent
-    for i in range(2, 100):
-        cand = parent / f"{stem}-{i}{suffix}"
-        if not cand.exists():
-            return cand
-    raise RuntimeError(f"100 collisions at {base} — check the caller for a runaway loop")
-
-
-def _chat_slug(title: str | None, chat_id: int) -> str:
-    """Directory-safe identifier for a chat.
-
-    Falls back to `chat-<abs chat_id>` when the title is empty or slugs
-    down to nothing (e.g. emoji-only Telegram titles). The `abs()` drops
-    Telethon's `-100` channel prefix so the directory name stays tidy;
-    chat_id is still recoverable from `atg describe`.
-    """
-    if title and (slug := _slugify(title)):
-        return slug
-    return f"chat-{abs(chat_id)}"
-
-
-def _topic_slug(title: str | None, thread_id: int) -> str:
-    """Directory-safe identifier for a forum topic. Falls back to
-    `topic-<id>` when the title isn't known at write time — keeps the
-    directory structure deterministic even when the caller only has
-    the numeric id (e.g. direct `--thread N` without topic lookup).
-    """
-    if title and (slug := _slugify(title)):
-        return slug
-    return f"topic-{thread_id}"
-
-
 def _fmt_cost_precise(value: float) -> str:
     """Cost string with enough decimals to be non-zero for tiny runs.
 
@@ -1196,16 +1111,6 @@ def _default_output_path(
         parts.append(_topic_slug(thread_title, thread_id))
     parts.extend(["analyze", f"{preset}-{stamp}.md"])
     return Path(*parts)
-
-
-def _compute_window(
-    since: str | None, until: str | None, last_days: int | None
-) -> tuple[datetime | None, datetime | None]:
-    if last_days:
-        until_dt = datetime.now()
-        since_dt = until_dt - timedelta(days=last_days)
-        return since_dt, until_dt
-    return _parse_ymd(since), _parse_ymd(until)
 
 
 async def run_all_unread_analyze(
