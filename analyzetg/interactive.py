@@ -99,7 +99,8 @@ class InteractiveAnswers:
     forum_all_flat: bool
     forum_all_per_topic: bool
     preset: str
-    period: str  # "unread" | "last7" | "last30" | "full" | "custom"
+    # Period keys: "unread" | "last7" | "last30" | "full" | "custom" | "from_msg"
+    period: str
     custom_since: str | None
     custom_until: str | None
     console_out: bool
@@ -110,6 +111,10 @@ class InteractiveAnswers:
     # non-empty list = "enable exactly these kinds" (unioned with preset.enrich_kinds
     # by cmd_analyze via --enrich=<csv>).
     enrich_kinds: list[str] | None = None
+    # Set only when period == "from_msg": a Telegram message link OR bare
+    # msg_id string. Passed through to cmd_analyze's --from-msg unchanged
+    # (cmd_analyze does the link parsing).
+    custom_from_msg: str | None = None
 
 
 def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
@@ -118,6 +123,7 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
     full_history = False
     since: str | None = None
     until: str | None = None
+    from_msg: str | None = None
     if answers.period == "last7":
         last_days = 7
     elif answers.period == "last30":
@@ -127,6 +133,8 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
     elif answers.period == "custom":
         since = answers.custom_since
         until = answers.custom_until
+    elif answers.period == "from_msg":
+        from_msg = answers.custom_from_msg
 
     # Enrichment flags: None (wizard was skipped / defaults) vs empty list
     # (user explicitly disabled all) vs populated list (explicit set).
@@ -141,7 +149,7 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
     return {
         "ref": answers.chat_ref,
         "thread": answers.thread_id,
-        "from_msg": None,
+        "from_msg": from_msg,
         "full_history": full_history,
         "since": since,
         "until": until,
@@ -160,6 +168,12 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
         "enrich": enrich_csv,
         "enrich_all": False,
         "no_enrich": no_enrich,
+        # The wizard already asked "Run it?" at the confirm step via
+        # questionary. Passing yes=True here prevents cmd_analyze from
+        # double-confirming via typer.confirm — that second prompt is
+        # what causes "Enter doesn't work" after a prompt-toolkit session
+        # in some terminals (Cursor, VS Code integrated, etc.).
+        "yes": True,
         "all_flat": answers.forum_all_flat,
         "all_per_topic": answers.forum_all_per_topic,
     }
@@ -231,6 +245,7 @@ async def run_interactive_analyze(
             output=answers.output_path,
             console_out=answers.console_out,
             mark_read=answers.mark_read,
+            yes=True,  # wizard already confirmed the plan, no second prompt
         )
         return
 
@@ -353,6 +368,7 @@ async def _collect_answers(
         period: str | None = None
         custom_since: str | None = None
         custom_until: str | None = None
+        custom_from_msg: str | None = None
         # Local, step-level state for output + mark_read — start from CLI
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
@@ -446,7 +462,7 @@ async def _collect_answers(
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
                     return None
-                period, custom_since, custom_until = result
+                period, custom_since, custom_until, custom_from_msg = result
                 # Output step is next unless the user already set it via CLI.
                 step = "mark_read" if output_forced else "output"
 
@@ -492,10 +508,21 @@ async def _collect_answers(
                     summary_bits.append("per-topic")
                 if mode == "analyze":
                     summary_bits.append(f"preset={preset}")
+                    # Show the enrichment choice explicitly so the user can
+                    # sanity-check it before spending — the step happens early
+                    # in the wizard and is easy to forget by the time we hit
+                    # confirm.
+                    if enrich_kinds is not None:
+                        if enrich_kinds:
+                            summary_bits.append(f"enrich={','.join(enrich_kinds)}")
+                        else:
+                            summary_bits.append("enrich=none")
                 if not run_on_all:
                     summary_bits.append(f"period={period}")
                     if period == "custom":
                         summary_bits.append(f"({custom_since or ''}..{custom_until or ''})")
+                    elif period == "from_msg" and custom_from_msg:
+                        summary_bits.append(f"(from {custom_from_msg})")
                 summary_bits.append(
                     "console"
                     if chosen_console_out
@@ -524,8 +551,21 @@ async def _collect_answers(
                         else:
                             console.print(
                                 f"  [dim]messages ≈[/] {n_msgs}  "
-                                f"[dim]cost ≈[/] ${cost_lo:.2f}–${cost_hi:.2f}  "
-                                "[dim](rough estimate; actual depends on actual tokens)[/]"
+                                f"[dim]cost ≈[/] {_fmt_cost_range(cost_lo, cost_hi)}  "
+                                "[dim](analysis only; rough estimate)[/]"
+                            )
+                        # The analysis estimate doesn't include enrichment
+                        # costs — we don't know per-message media counts at
+                        # wizard time. Call it out so the user doesn't get
+                        # surprised when `atg stats` shows extra spend.
+                        extra_kinds = _extra_enrich_kinds(enrich_kinds)
+                        if extra_kinds:
+                            console.print(
+                                "  [dim yellow]+ enrichment on:[/] "
+                                f"[yellow]{', '.join(extra_kinds)}[/] "
+                                "[dim](adds ~$0.003/min of audio, "
+                                "~$0.0002/photo, ~$0.0001/link; actual cost per run visible in [/]"
+                                "[cyan]atg stats[/][dim])[/]"
                             )
                     elif n_msgs == 0:
                         console.print("  [yellow]0 messages in this period — nothing to analyze.[/]")
@@ -576,6 +616,7 @@ async def _collect_answers(
             output_path=chosen_output_path,
             run_on_all_unread=run_on_all,
             enrich_kinds=enrich_kinds,
+            custom_from_msg=custom_from_msg,
         )
 
 
@@ -723,6 +764,49 @@ def _estimate_cost(
 def _fmt_count(n: int) -> str:
     """Right-align a count in a 6-char field; '     —' if zero."""
     return f"{n:>6}" if n else "     —"
+
+
+def _fmt_cost(value: float | None) -> str:
+    """Cost-aware formatter: keep sub-cent values visible.
+
+    `${v:.2f}` rounds anything under half a cent to "$0.00" — useless
+    for small chats where a summary is genuinely $0.003. Scale precision
+    to the magnitude instead.
+    """
+    if value is None:
+        return "—"
+    if value <= 0:
+        return "$0"
+    if value < 0.001:
+        return "< $0.001"
+    if value < 0.01:
+        return f"${value:.4f}"  # $0.0045
+    if value < 1.0:
+        return f"${value:.3f}"  # $0.023
+    return f"${value:.2f}"
+
+
+def _extra_enrich_kinds(kinds: list[str] | None) -> list[str]:
+    """Return enrichment kinds that cost extra beyond the defaults.
+
+    voice + videonote are on by default in config.toml and produce
+    small, predictable audio cost — the user knows about those. The
+    point of this notice is the spendier additions: video, image, doc,
+    link. `None` means "wizard wasn't used / defaults" → no notice.
+    """
+    if kinds is None:
+        return []
+    extras = [k for k in kinds if k not in ("voice", "videonote")]
+    return extras
+
+
+def _fmt_cost_range(lo: float | None, hi: float | None) -> str:
+    """Render a (lo, hi) cost range; collapse to one number if they're close."""
+    if lo is None and hi is None:
+        return "—"
+    if lo is None or hi is None or abs((hi or 0) - (lo or 0)) < 1e-4:
+        return _fmt_cost(lo if lo is not None else hi)
+    return f"{_fmt_cost(lo)}–{_fmt_cost(hi)}"
 
 
 def _fmt_date(dt: datetime | None) -> str:
@@ -1009,6 +1093,7 @@ async def _pick_preset():
     """Returns preset name (str), BACK, or None."""
     preferred = [
         "summary",
+        "broad",
         "digest",
         "highlights",
         "action_items",
@@ -1021,7 +1106,8 @@ async def _pick_preset():
     names += [n for n in sorted(PRESETS.keys()) if n not in preferred]
 
     descriptions = {
-        "summary": "Топ-3 темы + тезисы + ключевые сообщения (дефолт)",
+        "summary": "Главное + идеи/решения + что посмотреть — концентрат без пересказа (дефолт)",
+        "broad": "Полный обзор: Топ-3 темы + тезисы + настроение + ключевые сообщения",
         "digest": "Короткий дайджест 5–10 тем",
         "action_items": "Задачи из чата — таблица кто/что/срок/статус",
         "decisions": "Принятые решения — таблица решение/кто/когда",
@@ -1149,6 +1235,48 @@ async def _pick_enrich() -> list[str] | None | object:
     return picked
 
 
+async def _prompt_msg_ref() -> str | None:
+    """Collect a Telegram message reference (link or numeric id).
+
+    Returns the raw string (cmd_analyze's `_parse_from_msg` does the actual
+    parsing — we only pre-flight validate so the user catches typos in the
+    wizard instead of after a 10-minute backfill). Returns None if the user
+    cancels via ESC/Ctrl-C or leaves the field blank.
+    """
+    from analyzetg.tg.links import parse as _parse_link
+
+    while True:
+        raw = await questionary.text(
+            "Message link or msg_id "
+            "(e.g. https://t.me/c/1234567/890, https://t.me/somegroup/890, or bare 890 — "
+            "blank to cancel)",
+            default="",
+        ).ask_async()
+        if raw is None:
+            return None  # Ctrl-C
+        raw = raw.strip()
+        if not raw:
+            return None  # user cleared the field
+        # Shortcut: bare numeric id (with optional leading -). cmd_analyze
+        # would accept this too, but validating here saves a round trip.
+        if raw.lstrip("-").isdigit():
+            return raw
+        # Otherwise treat as a Telegram link and confirm it carries a msg_id.
+        try:
+            parsed = _parse_link(raw)
+        except Exception as e:
+            console.print(f"[red]Can't parse '{raw}':[/] {e}")
+            continue
+        if parsed.msg_id is None:
+            console.print(
+                f"[red]No msg_id in '{raw}'.[/] "
+                "Expected a message link like https://t.me/c/<chat>/<msg> "
+                "(optionally with a topic in between), or a bare integer id."
+            )
+            continue
+        return raw
+
+
 async def _pick_mark_read(*, default: bool):
     """Yes/No/Back. Returns True, False, BACK, or None (cancel)."""
     choices = [
@@ -1181,11 +1309,12 @@ async def _pick_period(
     force_explicit: bool,
     counts: dict[str, int | None] | None = None,
 ):
-    """Returns (period_key, since, until), BACK, or None.
+    """Returns (period_key, since, until, from_msg), BACK, or None.
 
     `counts` is an optional per-period message-count hint; if given, each
     choice is annotated with the count so the user can see how much work
-    they're about to buy.
+    they're about to buy. `from_msg` is populated only when the user picks
+    "From message" — otherwise it's None.
     """
     c = counts or {}
 
@@ -1208,6 +1337,7 @@ async def _pick_period(
             questionary.Choice(title=_label("Last 7 days", "last7"), value="last7"),
             questionary.Choice(title=_label("Last 30 days", "last30"), value="last30"),
             questionary.Choice(title=_label("Full history", "full"), value="full"),
+            questionary.Choice(title="From a specific message (link or id)…", value="from_msg"),
             questionary.Choice(title="Custom date range…", value="custom"),
             questionary.Separator(),
             questionary.Choice(title="← Back", value=BACK),
@@ -1233,11 +1363,22 @@ async def _pick_period(
         "last30": "last 30 days",
         "full": "full history",
         "custom": "custom range",
+        "from_msg": "from a specific message",
     }
     label = _period_labels.get(key, key)
     n = c.get(key) if isinstance(key, str) else None
     label_with_count = f"{label} [{n} msgs]" if n is not None else label
     _replace_last_line(f"[bold cyan]?[/] period: [bold]{label_with_count}[/]")
+    if key == "from_msg":
+        ref = await _prompt_msg_ref()
+        if ref is None:
+            # Cancelled the sub-prompt → bounce back to the period picker
+            # rather than the whole wizard. Gives the user a way out of
+            # "I meant to pick last-7" without losing their chat / preset
+            # choice so far.
+            return await _pick_period(force_explicit=force_explicit, counts=counts)
+        _replace_last_line(f"[bold cyan]?[/] period: [bold]from {ref}[/]")
+        return key, None, None, ref
     if key == "custom":
         since = await questionary.text("From (YYYY-MM-DD, blank for open)", default="").ask_async()
         until = await questionary.text("Until (YYYY-MM-DD, blank for open)", default="").ask_async()
@@ -1250,8 +1391,8 @@ async def _pick_period(
                 except ValueError:
                     console.print(f"[red]Bad date:[/] {val} (expected YYYY-MM-DD)")
                     return await _pick_period(force_explicit=force_explicit, counts=counts)
-        return key, since or None, until or None
-    return key, None, None
+        return key, since or None, until or None, None
+    return key, None, None, None
 
 
 __all__ = [

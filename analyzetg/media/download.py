@@ -23,6 +23,16 @@ class FfmpegMissing(RuntimeError):
     """Raised when the configured ffmpeg binary isn't on PATH."""
 
 
+class NoAudioStream(RuntimeError):
+    """Raised when transcoding a video whose container has no audio track.
+
+    Distinct from generic transcode failures so the enrichment pipeline can
+    treat these as "skipped, nothing to do" rather than errors worth logging
+    at ERROR level. A silent screen-recording or a GIF-uploaded-as-video is
+    not a fault of the user or of the tool.
+    """
+
+
 async def _run(cmd: list[str]) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -31,10 +41,29 @@ async def _run(cmd: list[str]) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, stdout, stderr
 
 
+# ffmpeg emits this wording when `-vn` strips the only stream (so the output
+# ends up with zero streams). Match is case-insensitive and substring-based
+# because ffmpeg's phrasing varies slightly across builds.
+_NO_STREAM_NEEDLES = (
+    "does not contain any stream",
+    "output file does not contain any stream",
+)
+
+
+def _is_no_audio_stream(stderr: bytes) -> bool:
+    blob = stderr.decode(errors="ignore").lower()
+    return any(n in blob for n in _NO_STREAM_NEEDLES)
+
+
 def _ffmpeg_fail(cmd: list[str], stderr: bytes, stage: str) -> RuntimeError:
     """Build a RuntimeError that keeps the *tail* of stderr (where the real
     error is) rather than the banner, plus the failing command for repro.
+
+    Videos with no audio track are surfaced as `NoAudioStream` so callers
+    can skip them cleanly instead of treating a silent video as a bug.
     """
+    if _is_no_audio_stream(stderr):
+        return NoAudioStream("video has no audio track")
     tail = stderr.decode(errors="ignore").strip().splitlines()[-4:]
     tail_str = " | ".join(line.strip() for line in tail) or "<no stderr>"
     return RuntimeError(f"ffmpeg {stage} failed. cmd={' '.join(cmd)} tail={tail_str}")

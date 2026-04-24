@@ -21,6 +21,7 @@ from analyzetg.db.repo import Repo
 from analyzetg.enrich.base import EnrichResult
 from analyzetg.media.download import (
     FfmpegMissing,
+    NoAudioStream,
     download_message,
     sha1_of_file,
     transcode_for_openai,
@@ -106,6 +107,17 @@ async def enrich_audio(
             parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir)
         except FfmpegMissing as e:
             log.warning("enrich.audio.skipped_ffmpeg", err=str(e))
+            return None
+        except NoAudioStream:
+            # Silent video or screen recording — nothing to transcribe. Not
+            # an error, just a skip. Don't surface at WARNING level; a forum
+            # may have hundreds of these.
+            log.info(
+                "enrich.audio.no_audio_track",
+                chat_id=msg.chat_id,
+                msg_id=msg.msg_id,
+                media_type=msg.media_type,
+            )
             return None
         produced.extend(p for p in parts if p != downloaded)
 

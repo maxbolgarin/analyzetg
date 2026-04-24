@@ -110,7 +110,30 @@ That puts two commands on your PATH: **`atg`** (short) and `analyzetg`
 > run `uv sync --extra dev` once, and prefix every command with
 > `uv run` — e.g. `uv run atg analyze @somegroup`.
 
-### 6. First-time login
+### 6. Upgrading (read this before it bites you)
+
+```bash
+git pull
+uv tool install --editable . --reinstall
+```
+
+`--editable` picks up source changes automatically, but newly added
+Python dependencies (`beautifulsoup4`, `pypdf`, `python-docx` — used by
+the opt-in enrichments for links, PDFs, and docx) only land in the
+tool's venv when you pass `--reinstall`.
+
+**Missing the reinstall is not fatal anymore** — enrichers whose
+libraries aren't installed now skip themselves with a one-line warning
+like `enrich.link.lib_missing lib='beautifulsoup4' hint='run uv tool
+install --editable . --reinstall'` and the rest of the analysis
+continues. But to use those enrichments you still need the libraries,
+so run the reinstall after any `git pull`.
+
+If you see `ModuleNotFoundError` at **startup** (not mid-run), you're on
+an old build that eager-imported the optional libs. Pull + reinstall
+and it goes away.
+
+### 7. First-time login
 
 ```bash
 atg init
@@ -133,7 +156,7 @@ Run `atg` from the repo directory (the one containing your `.env` and
 ./config.toml                   ← models, pricing, tuning (step 4)
 ./storage/session.sqlite        ← Telegram session (created by atg init)
 ./storage/data.sqlite           ← chats, messages, analysis cache
-./reports/{chat}/analyze/…md    ← analysis reports (default output)
+./reports/{chat}[/{topic}]/analyze/{preset}-{stamp}.md   ← default report path
 ```
 
 If you `cd` somewhere else and run `atg`, it will look for `.env` and
@@ -281,8 +304,8 @@ vision_model = "gpt-4o-mini"
 # doc_model / link_model default to the preset's filter_model when null.
 max_images_per_run = 50
 max_link_fetches_per_run = 50
-max_doc_bytes = 5000000
-max_doc_chars = 20000
+max_doc_bytes = 25000000     # 25 MB — covers most real PDFs/DOCX
+max_doc_chars = 20000        # hard cap on extracted text per document
 link_fetch_timeout_sec = 10
 # skip_link_domains = ["twitter.com", "x.com"]
 concurrency = 3
@@ -319,7 +342,8 @@ What kind of analysis do you want? Pick a preset with `--preset`:
 
 | Preset | What it produces |
 |---|---|
-| `summary` (default) | Top-3 themes + 5–10 bullet points + tone + key messages |
+| `summary` (default) | Concentrated signal — key insights, concrete ideas/decisions, 3–5 pointer messages. No recap prose. |
+| `broad` | Full overview: Top-3 themes + 5–10 bullet points + tone + key messages (what the old `summary` produced) |
 | `digest` | Short numbered list of topics, 1–2 lines each |
 | `action_items` | Markdown table: *Who / What / Deadline / Status / Link* |
 | `decisions` | Markdown table: *Decision / Who / When / Rationale / Link* |
@@ -328,6 +352,12 @@ What kind of analysis do you want? Pick a preset with `--preset`:
 | `quotes` | Verbatim memorable quotes with author and link |
 | `links` | External URLs from the chat, grouped by topic |
 | `custom --prompt-file path.md` | Your own one-off prompt, no file in `presets/` needed |
+
+> **Why the split?** The old `summary` was a structured re-telling of the
+> chat — useful, but easy to replicate by scrolling. The new default
+> tries to answer "what's *new* or *non-obvious* here?" and skips the
+> recap. If you genuinely want the structured overview, pick
+> `--preset broad`.
 
 Prompts live in [`presets/*.md`](presets/) — edit them, add your own,
 commit them to your fork. Bump `prompt_version` inside the preset file

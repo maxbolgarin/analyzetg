@@ -201,6 +201,7 @@ async def cmd_analyze(
     all_flat: bool = False,
     all_per_topic: bool = False,
     folder: str | None = None,
+    yes: bool = False,
 ) -> None:
     # Default preset — overridden later for single-msg mode.
     effective_preset = preset or "summary"
@@ -226,6 +227,7 @@ async def cmd_analyze(
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
             enrich_opts=enrich_opts,
+            yes=yes,
             folder=folder,
         )
         return
@@ -348,6 +350,7 @@ async def cmd_analyze(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 enrich_opts=enrich_opts,
+                yes=yes,
             )
             return
 
@@ -366,31 +369,33 @@ async def cmd_analyze(
 
         # --- Single topic in a forum + unread-default: resolve the topic's
         # own read marker so the unread-default path has a usable anchor.
-        if (
-            is_forum
-            and thread_id
-            and thread_id > 0
-            and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
-        ):
+        # Also captures the topic title so the default report path lands in
+        # reports/{chat}/{topic-title}/analyze/ instead of /topic-{id}/.
+        thread_title: str | None = None
+        if is_forum and thread_id and thread_id > 0:
             from analyzetg.tg.topics import list_forum_topics
 
-            console.print("[dim]→ Looking up topic's unread marker...[/]")
+            unread_default = not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
+            if unread_default:
+                console.print("[dim]→ Looking up topic's unread marker...[/]")
             topics = await list_forum_topics(client, chat_id)
             matched = next((t for t in topics if t.topic_id == thread_id), None)
             if matched is None:
                 console.print(f"[red]Topic {thread_id} not found in this forum.[/]")
                 raise typer.Exit(2)
-            if matched.unread_count == 0:
+            thread_title = matched.title
+            if unread_default:
+                if matched.unread_count == 0:
+                    console.print(
+                        f"[yellow]No unread messages in topic '{matched.title}'.[/] "
+                        "Pass --last-days / --full-history to analyze anyway."
+                    )
+                    raise typer.Exit(0)
+                from_msg_id = matched.read_inbox_max_id + 1
                 console.print(
-                    f"[yellow]No unread messages in topic '{matched.title}'.[/] "
-                    "Pass --last-days / --full-history to analyze anyway."
+                    f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
+                    f"after msg_id={matched.read_inbox_max_id}[/]"
                 )
-                raise typer.Exit(0)
-            from_msg_id = matched.read_inbox_max_id + 1
-            console.print(
-                f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
-                f"after msg_id={matched.read_inbox_max_id}[/]"
-            )
 
         # --- Single-chat / single-topic / flat-forum path
         await _run_single(
@@ -399,6 +404,7 @@ async def cmd_analyze(
             chat_id=chat_id,
             thread_id=thread_id,
             title=title,
+            thread_title=thread_title,
             chat_username=resolved.username,
             chat_internal_id=_derive_internal_id(chat_id),
             since_dt=since_dt,
@@ -558,6 +564,7 @@ async def _run_single(
     include_transcripts: bool,
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
+    thread_title: str | None = None,
 ) -> None:
     """Analyze one chat or one thread. Shared by ref-mode and per-topic loop."""
     start_msg_id = await _determine_start(
@@ -613,7 +620,13 @@ async def _run_single(
             if ok:
                 console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
 
-    _print_and_write(result, output=output, title=title, console_out=console_out)
+    _print_and_write(
+        result,
+        output=output,
+        title=title,
+        thread_title=thread_title,
+        console_out=console_out,
+    )
 
 
 async def _run_forum_per_topic(
@@ -639,8 +652,15 @@ async def _run_forum_per_topic(
     include_transcripts: bool,
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
+    yes: bool = False,
 ) -> None:
-    """One analysis per topic; reports land in reports/{chat-slug}/."""
+    """One analysis per topic; reports land in reports/{chat-slug}/{topic-slug}/analyze/.
+
+    `yes=True` skips the interactive topic-count confirmation. Set by the
+    wizard (which already confirmed the plan via questionary) and by
+    `--yes` on the CLI. Without it, a `typer.confirm` asks the user before
+    firing N OpenAI calls — important safety net in direct-mode usage.
+    """
     console.print("[dim]→ Listing forum topics...[/]")
     topics = await list_forum_topics(client, chat_id)
     explicit_period = _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
@@ -654,7 +674,7 @@ async def _run_forum_per_topic(
 
     _print_topics_table(targets, with_unread=True)
     total_unread = sum(t.unread_count for t in targets)
-    if not typer.confirm(
+    if not yes and not typer.confirm(
         f"Analyze {len(targets)} topic(s)"
         + (f" with {total_unread} unread" if not explicit_period else "")
         + "?",
@@ -663,23 +683,27 @@ async def _run_forum_per_topic(
         console.print("[dim]Aborted.[/]")
         return
 
+    # Per-topic layout: {output_root}/{chat-slug}/{topic-slug}/analyze/{preset}-{stamp}.md
+    # Previously: {output_root}/{chat-slug}/analyze/{topic-slug}-{preset}-{stamp}.md
+    # Nesting topics under their chat makes ls-ing a forum's reports tractable
+    # and matches how users think about forums (chat → topics, not a flat list
+    # of files named after both).
     if console_out:
-        out_dir = None
+        base_dir: Path | None = None
     else:
-        chat_slug = _slugify(chat_title or str(chat_id))
-        # Layout: {output_root}/{chat-slug}/analyze/{topic-slug}-{preset}-{stamp}.md
         if output is not None and output.exists() and output.is_dir():
-            out_dir = output / chat_slug / "analyze"
+            base_dir = output
         elif output is not None and output.suffix:
             console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
             raise typer.Exit(2)
         else:
-            out_dir = (output or Path("reports")) / chat_slug / "analyze"
-        out_dir.mkdir(parents=True, exist_ok=True)
+            base_dir = output or Path("reports")
+        base_dir.mkdir(parents=True, exist_ok=True)
+    chat_slug = _chat_slug(chat_title, chat_id)
 
-    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     for t in targets:
-        topic_title = f"{chat_title or chat_id} / {t.title}"
+        topic_title_display = f"{chat_title or chat_id} / {t.title}"
         console.print(
             f"\n[bold cyan]>>[/] {t.title} "
             f"(topic_id={t.topic_id}" + (f", {t.unread_count} unread" if not explicit_period else "") + ")"
@@ -696,15 +720,16 @@ async def _run_forum_per_topic(
                 if topic_from_msg is None:
                     topic_full = True
 
-            per_file = (
-                out_dir / f"{_slugify(t.title or str(t.topic_id))}-{preset}-{stamp}.md" if out_dir else None
-            )
+            per_file: Path | None = None
+            if base_dir is not None:
+                topic_slug = _topic_slug(t.title, t.topic_id)
+                per_file = base_dir / chat_slug / topic_slug / "analyze" / f"{preset}-{stamp}.md"
             await _run_single(
                 client=client,
                 repo=repo,
                 chat_id=chat_id,
                 thread_id=t.topic_id,
-                title=topic_title,
+                title=topic_title_display,
                 chat_username=chat_username,
                 chat_internal_id=chat_internal_id,
                 since_dt=since_dt,
@@ -722,6 +747,7 @@ async def _run_forum_per_topic(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 enrich_opts=enrich_opts,
+                thread_title=t.title,
             )
         except typer.Exit:
             raise
@@ -881,11 +907,14 @@ async def _run_no_ref(
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
     folder: str | None = None,
+    yes: bool = False,
 ) -> None:
     """No <ref>: list dialogs with unread messages, confirm, analyze each.
 
     `folder`, if given, restricts the batch to chats in that Telegram folder
-    (dialog filter) — matched case-insensitively against folder titles."""
+    (dialog filter) — matched case-insensitively against folder titles.
+    `yes=True` skips the interactive "Analyze N chats?" prompt — set by the
+    wizard (already confirmed via questionary) or by `--yes` on the CLI."""
     unread = await list_unread_dialogs(client)
     if not unread:
         console.print("[yellow]No dialogs with unread messages.[/]")
@@ -922,7 +951,7 @@ async def _run_no_ref(
 
     _print_unread_table(unread)
     total = sum(d.unread_count for d in unread)
-    if not typer.confirm(
+    if not yes and not typer.confirm(
         f"Analyze {len(unread)} chat(s) with {total} total unread message(s)?",
         default=False,
     ):
@@ -936,7 +965,7 @@ async def _run_no_ref(
         if out_dir is None:
             out_dir = Path("reports")
             out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     for u in unread:
         console.print(f"\n[bold cyan]>>[/] {u.title or u.chat_id} ({u.unread_count} unread)")
         try:
@@ -972,7 +1001,7 @@ async def _run_no_ref(
             )
             per_file = None
             if out_dir:
-                chat_out = out_dir / _slugify(u.title or str(u.chat_id)) / "analyze"
+                chat_out = out_dir / _chat_slug(u.title, u.chat_id) / "analyze"
                 chat_out.mkdir(parents=True, exist_ok=True)
                 per_file = chat_out / f"{preset}-{stamp}.md"
             _print_and_write(result, output=per_file, title=u.title, console_out=console_out)
@@ -1018,12 +1047,161 @@ def _resolve_output_dir(output: Path | None, n_chats: int) -> Path | None:
     return output
 
 
-_SLUG_RE = re.compile(r"[^A-Za-z0-9_\-]+")
+# `\w` in Python 3 is Unicode-aware by default (matches Cyrillic, CJK, etc.),
+# which is why titles like "ОБЩИЙ ЧАТ" now slug to "общий-чат" instead of
+# collapsing to "" and falling back to `topic-<id>`. Modern file systems
+# (APFS, ext4, NTFS) and every shell we care about handle UTF-8 filenames
+# fine, so there's no reason to transliterate to ASCII.
+_SLUG_RE = re.compile(r"[^\w\-]+", re.UNICODE)
 
 
 def _slugify(text: str) -> str:
+    """Lowercase, punctuation-stripped, 40-char-capped directory slug.
+
+    Preserves Unicode letters (Cyrillic, CJK, Arabic, …). Empty /
+    all-punctuation input returns `""` — callers must provide a
+    fallback (see `_chat_slug`/`_topic_slug`).
+    """
     slug = _SLUG_RE.sub("-", text).strip("-").lower()
-    return slug[:40] or "chat"
+    return slug[:40]
+
+
+def _unique_path(base: Path) -> Path:
+    """Return `base` or the first numbered sibling that doesn't exist yet.
+
+    Two runs inside the same second (same preset + same chat) would otherwise
+    overwrite each other. We append `-2`, `-3`, ... to the filename stem
+    until we find a free slot, capping at 100 to surface any genuine
+    pathological case (e.g. an infinite loop in a calling script).
+    """
+    if not base.exists():
+        return base
+    stem = base.stem
+    suffix = base.suffix
+    parent = base.parent
+    for i in range(2, 100):
+        cand = parent / f"{stem}-{i}{suffix}"
+        if not cand.exists():
+            return cand
+    raise RuntimeError(f"100 collisions at {base} — check the caller for a runaway loop")
+
+
+def _chat_slug(title: str | None, chat_id: int) -> str:
+    """Directory-safe identifier for a chat.
+
+    Falls back to `chat-<abs chat_id>` when the title is empty or slugs
+    down to nothing (e.g. emoji-only Telegram titles). The `abs()` drops
+    Telethon's `-100` channel prefix so the directory name stays tidy;
+    chat_id is still recoverable from `atg describe`.
+    """
+    if title and (slug := _slugify(title)):
+        return slug
+    return f"chat-{abs(chat_id)}"
+
+
+def _topic_slug(title: str | None, thread_id: int) -> str:
+    """Directory-safe identifier for a forum topic. Falls back to
+    `topic-<id>` when the title isn't known at write time — keeps the
+    directory structure deterministic even when the caller only has
+    the numeric id (e.g. direct `--thread N` without topic lookup).
+    """
+    if title and (slug := _slugify(title)):
+        return slug
+    return f"topic-{thread_id}"
+
+
+def _fmt_cost_precise(value: float) -> str:
+    """Cost string with enough decimals to be non-zero for tiny runs.
+
+    Report header needs precision the terminal summary can skip — a $0.003
+    summary hiding behind `$0.00` is what triggered this refactor.
+    """
+    if value <= 0:
+        return "$0"
+    if value < 0.001:
+        return "< $0.001"
+    if value < 0.01:
+        return f"${value:.4f}"
+    if value < 1.0:
+        return f"${value:.3f}"
+    return f"${value:.2f}"
+
+
+def _fmt_period_header(period: tuple[datetime | None, datetime | None] | None) -> str:
+    """Human-readable period for the report header.
+
+    (None, None) → "unread / full history (no date filter)" since both
+    cases collapse to the same thing in the DB query. Concrete datetimes
+    render as YYYY-MM-DD HH:MM, leaving ambiguity off the page.
+    """
+    if period is None or (period[0] is None and period[1] is None):
+        return "unread / full history (no date filter)"
+    a = period[0].strftime("%Y-%m-%d %H:%M") if period[0] else "…"
+    b = period[1].strftime("%Y-%m-%d %H:%M") if period[1] else "…"
+    return f"{a} → {b}"
+
+
+def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
+    """Build the fixed-format metadata block prepended to every saved report.
+
+    Lets users (and future-you) answer "what chat, what period, what model,
+    what did this cost?" in 3 seconds instead of grepping git history. Order
+    of fields is chosen so the most load-bearing facts (chat, period, count)
+    are at the top and the diagnostic details follow.
+    """
+    lines: list[str] = ["---"]
+    lines.append(f"**Chat:** {title or result.chat_id}")
+    if result.thread_id:
+        lines.append(f"**Thread:** {result.thread_id}")
+    lines.append(f"**Period:** {_fmt_period_header(result.period)}")
+
+    msg_line = f"**Messages analyzed:** {result.msg_count}"
+    if result.raw_msg_count and result.raw_msg_count != result.msg_count:
+        dropped = result.raw_msg_count - result.msg_count
+        msg_line += f" (from {result.raw_msg_count} raw, −{dropped} after filter/dedupe)"
+    lines.append(msg_line)
+
+    preset_line = f"**Preset:** `{result.preset}`"
+    if result.prompt_version:
+        preset_line += f" (v={result.prompt_version})"
+    lines.append(preset_line)
+
+    model_line = f"**Model:** `{result.model}`"
+    if result.chunk_count > 1 and result.filter_model and result.filter_model != result.model:
+        model_line += f" (+ `{result.filter_model}` for map phase)"
+    lines.append(model_line)
+
+    if result.chunk_count:
+        lines.append(f"**Chunks:** {result.chunk_count}")
+
+    total_calls = result.cache_hits + result.cache_misses
+    if total_calls:
+        lines.append(f"**Cache:** {result.cache_hits}/{total_calls} hits")
+
+    if result.enrich_kinds:
+        lines.append(f"**Enrichment:** {', '.join(result.enrich_kinds)}")
+    if result.enrich_summary:
+        lines.append(f"**Enrichment detail:** {result.enrich_summary}")
+
+    analysis_cost = result.total_cost_usd
+    if result.enrich_cost_usd:
+        # Analysis cost already excludes enrichment (enrichment logs separately
+        # into usage_log under kind='audio'/'chat' phase labels). Show both so
+        # the user can audit where the spend went.
+        total = analysis_cost + result.enrich_cost_usd
+        lines.append(
+            f"**Cost:** {_fmt_cost_precise(total)} "
+            f"(analysis {_fmt_cost_precise(analysis_cost)} + "
+            f"enrichment {_fmt_cost_precise(result.enrich_cost_usd)})"
+        )
+    else:
+        lines.append(f"**Cost:** {_fmt_cost_precise(analysis_cost)}")
+
+    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    lines.append("---")
+    lines.append("")  # blank line before the LLM body
+    return "\n".join(lines)
 
 
 def _print_and_write(
@@ -1031,14 +1209,22 @@ def _print_and_write(
     *,
     output: Path | None,
     title: str | None,
+    thread_title: str | None = None,
     console_out: bool = False,
 ) -> None:
+    """Write the report to disk (and/or stdout) and log the summary line.
+
+    `thread_title` is used only for the default output path when `output`
+    is None and the run targeted a forum topic; callers that already
+    computed an explicit `output=` path (batch mode, per-topic loop)
+    don't need to pass it.
+    """
     console.print(
         f"[bold cyan]Run[/] preset={result.preset} msgs={result.msg_count} "
         f"chunks={result.chunk_count} cache_hits={result.cache_hits}/"
         f"{result.cache_hits + result.cache_misses} cost=${result.total_cost_usd:.4f}"
     )
-    body = _with_truncation_banner(result)
+    body = _render_report_header(result, title=title) + _with_truncation_banner(result)
 
     if result.truncated:
         console.print(
@@ -1057,13 +1243,23 @@ def _print_and_write(
         console.print(Rule(style="cyan"))
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
+            output = _unique_path(output)
             output.write_text(body, encoding="utf-8")
             console.print(f"[green]Also saved:[/] {output}")
         return
 
     if output is None:
-        output = _default_output_path(title, result.preset)
+        output = _default_output_path(
+            chat_title=title,
+            chat_id=result.chat_id,
+            thread_id=result.thread_id or 0,
+            thread_title=thread_title,
+            preset=result.preset,
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Even with seconds-precision stamps, two parallel invocations can still
+    # land in the same second — _unique_path appends -2/-3 to avoid overwrite.
+    output = _unique_path(output)
     output.write_text(body, encoding="utf-8")
     console.print(f"[green]Written:[/] {output}")
 
@@ -1080,11 +1276,32 @@ def _with_truncation_banner(result) -> str:
     return banner + result.final_result
 
 
-def _default_output_path(title: str | None, preset: str) -> Path:
-    slug = _slugify(title or "chat")
-    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    # reports/{chat-slug}/analyze/{preset}-{stamp}.md
-    return Path("reports") / slug / "analyze" / f"{preset}-{stamp}.md"
+def _default_output_path(
+    *,
+    chat_title: str | None,
+    chat_id: int,
+    thread_id: int = 0,
+    thread_title: str | None = None,
+    preset: str,
+) -> Path:
+    """Pick a default report location.
+
+    Layout:
+      - Non-forum: `reports/{chat-slug}/analyze/{preset}-{stamp}.md`
+      - Forum topic: `reports/{chat-slug}/{topic-slug}/analyze/{preset}-{stamp}.md`
+
+    Topic nesting keeps per-topic analyses from piling up in a single
+    directory (which was the old layout's actual failure mode — running
+    `summary` on three topics of the same forum produced three files
+    named `summary-<date>.md` in `reports/<forum>/analyze/`, with no
+    way to tell which topic each belongs to).
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    parts: list[str] = ["reports", _chat_slug(chat_title, chat_id)]
+    if thread_id:
+        parts.append(_topic_slug(thread_title, thread_id))
+    parts.extend(["analyze", f"{preset}-{stamp}.md"])
+    return Path(*parts)
 
 
 def _compute_window(
@@ -1111,11 +1328,14 @@ async def run_all_unread_analyze(
     min_msg_chars: int | None = None,
     enrich_opts: EnrichOpts | None = None,
     folder: str | None = None,
+    yes: bool = False,
 ) -> None:
     """Public: run the batch-across-all-unread-chats flow (was the old no-ref default).
 
     Pass `folder="Alpha"` (or any case-insensitive substring of a folder title)
-    to restrict the batch to chats in that Telegram folder."""
+    to restrict the batch to chats in that Telegram folder.
+    `yes=True` skips the interactive confirmation — the wizard sets this so
+    the user isn't asked twice after already approving the plan."""
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _run_no_ref(
@@ -1132,6 +1352,7 @@ async def run_all_unread_analyze(
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
             enrich_opts=enrich_opts,
+            yes=yes,
             folder=folder,
         )
 

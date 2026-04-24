@@ -67,6 +67,47 @@ def test_forum_per_topic_flag() -> None:
     assert kw["all_flat"] is False
 
 
+def test_wizard_always_sets_yes_true() -> None:
+    # The wizard already asks "Run it?" via questionary. Every invocation
+    # of cmd_analyze that comes through the wizard must pass yes=True so
+    # downstream _run_forum_per_topic / _run_no_ref skip their own
+    # typer.confirm prompts. A stuck terminal on that second prompt was
+    # the originating bug.
+    kw = build_analyze_args(_answers())
+    assert kw["yes"] is True
+
+    kw2 = build_analyze_args(_answers(forum_all_per_topic=True, chat_kind="forum"))
+    assert kw2["yes"] is True
+
+
+def test_from_msg_period_passes_raw_ref_string() -> None:
+    # User picks "From a specific message" and enters a bare msg_id. The
+    # string flows through unchanged — cmd_analyze re-parses it (same code
+    # path as --from-msg on the CLI).
+    kw = build_analyze_args(_answers(period="from_msg", custom_from_msg="12345"))
+    assert kw["from_msg"] == "12345"
+    # Shouldn't mix with any other period flag.
+    assert kw["last_days"] is None
+    assert kw["full_history"] is False
+    assert kw["since"] is None and kw["until"] is None
+
+
+def test_from_msg_period_passes_link_through() -> None:
+    # Telegram message link — cmd_analyze's _parse_from_msg handles this
+    # via tg.links.parse. The wizard's job is just to collect + forward.
+    link = "https://t.me/c/1234567890/890"
+    kw = build_analyze_args(_answers(period="from_msg", custom_from_msg=link))
+    assert kw["from_msg"] == link
+
+
+def test_non_from_msg_periods_leave_from_msg_none() -> None:
+    # Regression guard: any other period key must keep from_msg=None so
+    # cmd_analyze's precedence rules fire correctly.
+    for period in ("unread", "last7", "last30", "full", "custom"):
+        kw = build_analyze_args(_answers(period=period, custom_from_msg="stale-value"))
+        assert kw["from_msg"] is None, f"period={period!r} leaked from_msg"
+
+
 def test_forum_flat_flag_with_last_days() -> None:
     kw = build_analyze_args(_answers(forum_all_flat=True, chat_kind="forum", period="last7"))
     assert kw["all_flat"] is True

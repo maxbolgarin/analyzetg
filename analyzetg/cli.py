@@ -399,6 +399,12 @@ def analyze(
         "--no-enrich",
         help="Disable all enrichments for this run, even those that would default on.",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip interactive confirmations (per-topic Y/n, batch-of-N-chats Y/n). Useful for scripting or when the prompt-toolkit → typer.confirm handoff acts up in your terminal.",
+    ),
     folder: str | None = typer.Option(
         None,
         "--folder",
@@ -444,6 +450,7 @@ def analyze(
             enrich=enrich,
             enrich_all=enrich_all,
             no_enrich=no_enrich,
+            yes=yes,
             all_flat=all_flat,
             all_per_topic=all_per_topic,
             folder=folder,
