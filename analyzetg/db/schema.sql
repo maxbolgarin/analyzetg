@@ -1,5 +1,11 @@
--- analyzetg schema. Mirrors the tables described in docs/analyzetg-spec.md §4.
--- Applied through migrations/001_initial.sql; re-read here for reference.
+-- analyzetg schema — single source of truth.
+--
+-- Applied directly by `Repo.open()` via `_apply_schema()` on every connect.
+-- Every statement uses `IF NOT EXISTS`, so re-applying against an existing DB
+-- is a no-op. There are no migrations; when the schema changes, edit this
+-- file and either (a) rely on SQLite's idempotency if the change is
+-- additive-only, or (b) document a manual "delete storage/data.sqlite and
+-- re-sync" step for destructive changes.
 
 CREATE TABLE IF NOT EXISTS chats (
     id             INTEGER PRIMARY KEY,
@@ -68,8 +74,8 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 
 -- Generalized enrichment cache: transcripts, image descriptions, doc extracts,
--- etc. all share this table keyed by (doc_id, kind). `media_transcripts` is
--- kept as a view for compat — see migrations/002_media_enrichments.sql.
+-- etc. all share this table keyed by (doc_id, kind). A `media_transcripts`
+-- view below preserves the pre-unification read API for ad-hoc SQL.
 CREATE TABLE IF NOT EXISTS media_enrichments (
     doc_id       INTEGER NOT NULL,
     kind         TEXT NOT NULL,
@@ -86,6 +92,14 @@ CREATE TABLE IF NOT EXISTS media_enrichments (
 
 CREATE INDEX IF NOT EXISTS idx_media_enrich_kind
     ON media_enrichments(kind);
+
+-- Compat view so ad-hoc SQL / external scripts reading `media_transcripts`
+-- keep working. All writes go through `Repo.put_media_enrichment`.
+CREATE VIEW IF NOT EXISTS media_transcripts AS
+    SELECT doc_id, file_sha1, duration_sec, content AS transcript,
+           model, language, cost_usd, created_at
+    FROM media_enrichments
+    WHERE kind = 'transcript';
 
 CREATE TABLE IF NOT EXISTS link_enrichments (
     url_hash    TEXT PRIMARY KEY,

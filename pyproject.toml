@@ -46,7 +46,7 @@ packages = ["analyzetg"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "analyzetg/db/schema.sql" = "analyzetg/db/schema.sql"
-"analyzetg/db/migrations" = "analyzetg/db/migrations"
+"presets" = "presets"
 
 [tool.ruff]
 line-length = 110

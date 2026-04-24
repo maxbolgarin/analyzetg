@@ -552,6 +552,9 @@ async def _cache_purge(
 ) -> None:
     settings = get_settings()
     days = _parse_duration_days(older_than)
+    if days <= 0:
+        console.print("[yellow]Skipped[/] cache purge: --older-than must be greater than 0 days.")
+        return
     async with open_repo(settings.storage.data_path) as repo:
         removed = await repo.cache_purge(older_than_days=days, preset=preset, model=model)
         console.print(f"[green]Purged[/] {removed} analysis_cache rows older than {days} days.")

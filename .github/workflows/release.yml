@@ -28,10 +28,10 @@ jobs:
       - name: Install semantic-release
         run: |
           npm install -g semantic-release
+          npm install -g @semantic-release/commit-analyzer
+          npm install -g @semantic-release/release-notes-generator
           npm install -g @semantic-release/github
-          npm install -g @semantic-release/npm
           npm install -g conventional-changelog-conventionalcommits
-          npm install -g @semantic-release/exec
 
       - name: Release
         id: semantic

@@ -25,11 +25,8 @@ from analyzetg.models import Message
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import (
     UnreadDialog,
-    list_unread_dialogs,
-    mark_as_read,
 )
 from analyzetg.tg.resolver import resolve
-from analyzetg.tg.sync import backfill
 from analyzetg.tg.topics import ForumTopic, list_forum_topics
 from analyzetg.util.logging import get_logger
 
@@ -137,6 +134,11 @@ async def cmd_dump(
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
+    if all_flat and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
+        raise typer.BadParameter(
+            "--all-flat requires an explicit period: pass --last-days, --since/--until, "
+            "--from-msg, or --full-history."
+        )
 
     # Parse save_media_types CSV once; None → all kinds.
     save_media_kinds: set[str] | None = None
@@ -582,6 +584,10 @@ async def run_all_unread_dump(
     include_transcripts: bool = True,
     console_out: bool = False,
     mark_read: bool = False,
+    enrich: str | None = None,
+    enrich_all: bool = False,
+    no_enrich: bool = False,
+    yes: bool = False,
 ) -> None:
     """Public: dump every unread chat in one batch (was the old no-ref default)."""
     settings = get_settings()
@@ -595,6 +601,10 @@ async def run_all_unread_dump(
             include_transcripts=include_transcripts,
             console_out=console_out,
             mark_read=mark_read,
+            enrich=enrich,
+            enrich_all=enrich_all,
+            no_enrich=no_enrich,
+            yes=yes,
         )
 
 
@@ -608,71 +618,63 @@ async def _dump_no_ref(
     include_transcripts: bool,
     console_out: bool,
     mark_read: bool,
+    enrich: str | None,
+    enrich_all: bool,
+    no_enrich: bool,
+    yes: bool,
 ) -> None:
-    unread = await list_unread_dialogs(client)
-    if not unread:
-        console.print("[yellow]No dialogs with unread messages.[/]")
-        return
-    _print_unread_table(unread)
-    total = sum(d.unread_count for d in unread)
-    if not typer.confirm(
-        f"Dump {len(unread)} chat(s) with {total} total unread message(s)?",
-        default=False,
-    ):
-        console.print("[dim]Aborted.[/]")
-        return
+    from analyzetg.core.pipeline import prepare_all_unread_runs
+    from analyzetg.enrich.base import EnrichOpts
 
     if console_out:
         out_dir = None
     else:
-        out_dir = _resolve_output_dir(output, len(unread))
+        out_dir = _resolve_output_dir(output, 2) if output is not None else Path("reports")
         if out_dir is None:
             out_dir = Path("reports")
-            out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     settings = get_settings()
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
-    for u in unread:
-        console.print(f"\n[bold cyan]>>[/] {u.title or u.chat_id} ({u.unread_count} unread)")
+    from analyzetg.analyzer.commands import build_enrich_opts
+
+    enrich_opts = build_enrich_opts(
+        cli_enrich=enrich,
+        cli_enrich_all=enrich_all,
+        cli_no_enrich=no_enrich,
+        preset=None,
+    )
+    if with_transcribe and not enrich_opts.any_enabled():
+        enrich_opts = EnrichOpts(voice=True, videonote=True, video=True)
+
+    async for prepared in prepare_all_unread_runs(
+        client=client,
+        repo=repo,
+        settings=settings,
+        enrich_opts=enrich_opts,
+        include_transcripts=include_transcripts,
+        mark_read=mark_read,
+        yes=yes,
+    ):
+        msgs = prepared.messages
+        title = prepared.chat_title
         try:
-            local_max = await repo.get_max_msg_id(u.chat_id, min_msg_id=u.read_inbox_max_id)
-            floor = max(u.read_inbox_max_id, local_max or 0)
-            await backfill(
-                client,
-                repo,
-                chat_id=u.chat_id,
-                from_msg_id=floor + 1,
-                direction="forward",
-            )
-            if with_transcribe:
-                await _transcribe_pending(
-                    client=client,
-                    repo=repo,
-                    settings=settings,
-                    chat_id=u.chat_id,
-                    since_dt=None,
-                    until_dt=None,
-                )
-            msgs = await repo.iter_messages(u.chat_id, min_msg_id=u.read_inbox_max_id)
-            if not include_transcripts:
-                for m in msgs:
-                    if m.transcript and not m.text:
-                        m.transcript = None
             if out_dir is None:
-                _print_console(msgs, title=u.title, fmt=fmt, count=len(msgs))
+                _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
             else:
-                chat_out = out_dir / _slugify(u.title or str(u.chat_id)) / "dump"
+                chat_out = out_dir / _slugify(title or str(prepared.chat_id)) / "dump"
                 chat_out.mkdir(parents=True, exist_ok=True)
                 path = chat_out / f"dump-{stamp}.{ext}"
-                _write(msgs, fmt=fmt, output=path, title=u.title)
+                _write(msgs, fmt=fmt, output=path, title=title)
                 console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {path}")
-            if mark_read and msgs:
-                latest = max(m.msg_id for m in msgs)
-                ok = await mark_as_read(client, u.chat_id, latest)
-                if ok:
-                    console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+            if prepared.mark_read_fn and msgs:
+                await prepared.mark_read_fn()
         except Exception as e:
-            log.error("dump.no_ref.chat_error", chat_id=u.chat_id, err=str(e)[:200])
+            log.error(
+                "dump.no_ref.chat_error",
+                chat_id=prepared.chat_id,
+                err=str(e)[:200],
+            )
             console.print(f"[red]Failed:[/] {e}")
 
 

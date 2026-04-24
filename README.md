@@ -331,7 +331,16 @@ enrichment caches.
 The orchestrator logs a one-line summary after every run:
 
 ```
-enrich: voice: 12 (5 cached); image: 3; link: 7 (2 cached) — $0.13
+analyze.enrich summary='Enriched: voice: 12 (5 cached); image: 3; link: 7 (2 cached)'
+```
+
+Each individual enrichment call is also logged with its kind, so you can tell at a glance whether a burst of `openai.chat` calls is analysis, link summaries, or image descriptions:
+
+```
+openai.chat phase=enrich_link url_hash=abc123… prompt=181 completion=59 cost=0.00011
+openai.chat phase=enrich_image doc_id=5245… prompt=1250 completion=60 cost=0.00025
+openai.audio phase=enrich_voice doc_id=8917… seconds=42 cost=0.00252
+openai.chat phase=map batch_hash=deadbeef… prompt=7740 completion=349 cost=0.00198
 ```
 
 ---
@@ -508,8 +517,9 @@ atg stats --by day            # or by day
 ### Analysis cache (local, biggest win)
 
 Every analysis result is hashed by *preset + prompt version + model +
-message ids + options* and stored in the local SQLite
-`analysis_cache` table. Re-run the same command → zero-cost hit.
+message ids + options + rendered prompt hashes* and stored in the local
+SQLite `analysis_cache` table. Re-run the same command with the same
+message text, enrichments, prompt context, and settings → zero-cost hit.
 
 ```bash
 atg cache stats               # rows, disk size, saved $, breakdown
@@ -555,6 +565,9 @@ atg cache purge --older-than 30d --vacuum
 # Per-chat retention
 atg cleanup --retention 30d --chat 1234567890
 ```
+
+`--older-than` must be greater than zero. `0d` is treated as a no-op so
+it cannot accidentally wipe the whole analysis cache.
 
 `cleanup` preserves row metadata (ids, dates, authors, transcripts) — it
 only NULLs the raw `text` column, so you keep the ability to re-analyze
@@ -612,10 +625,12 @@ Two SQLite files under `storage/`:
 
 - `session.sqlite` — Telethon session.
 - `data.sqlite` — chats, messages, enrichments, link summaries,
-  analysis cache, token usage log. A read-only `media_transcripts`
-  view of `media_enrichments(kind='transcript')` is preserved for
-  backward compatibility with external tooling that queried the old
-  table directly.
+  analysis cache, token usage log. `schema.sql` is applied on every
+  open, with small additive compatibility checks for older local DBs.
+  A read-only `media_transcripts` view of
+  `media_enrichments(kind='transcript')` is preserved for backward
+  compatibility with external tooling that queried the old table
+  directly.
 
 Reports land in `reports/` (gitignored by default).
 
@@ -641,7 +656,7 @@ the command exits without hitting the network at all.
 ## Development
 
 ```bash
-uv run pytest                 # unit tests (9+ test files)
+uv run pytest                 # unit tests
 uv run ruff check .           # lint
 uv run ruff format .          # format
 ```
@@ -650,7 +665,7 @@ Contributor guide — invariants, caching layers, preset format, and editing
 hazards — lives in [`CLAUDE.md`](CLAUDE.md). Read it before changing the
 pipeline, DB layer, or preset prompts.
 
-Full spec: [`docs/analyzetg-spec.md`](docs/analyzetg-spec.md) (if present).
+Design notes and implementation plans live under [`docs/`](docs/).
 
 ---
 

@@ -79,6 +79,7 @@ async def _pull_history(
     start_msg_id: int | None,
     since_dt: datetime | None,
     full_history: bool = False,
+    force_from_start: bool = False,
 ) -> None:
     """Fetch new messages from Telegram, skipping what's already in the DB.
 
@@ -94,8 +95,10 @@ async def _pull_history(
     thread_param = thread_id if thread_id else None
     if start_msg_id is not None or (since_dt is None):
         floor = start_msg_id if start_msg_id is not None else 0
-        local_max = await repo.get_max_msg_id(chat_id, thread_param, min_msg_id=floor)
-        effective = max(floor, local_max or 0)
+        local_max = (
+            None if force_from_start else await repo.get_max_msg_id(chat_id, thread_param, min_msg_id=floor)
+        )
+        effective = floor if force_from_start else max(floor, local_max or 0)
         if local_max and local_max > floor:
             console.print(f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]")
         await backfill(
@@ -144,6 +147,7 @@ def _build_mark_read_fn(
     chat_id: int,
     thread_id: int | None,
     topic_titles: dict[int, str] | None,
+    messages: list[Any],
     enabled: bool,
 ) -> Callable[[], Awaitable[int]] | None:
     """Return a coroutine that advances the right Telegram read marker.
@@ -166,13 +170,18 @@ def _build_mark_read_fn(
     from analyzetg.util.logging import get_logger
 
     log = get_logger(__name__)
+    latest_msg_id = max((int(m.msg_id) for m in messages), default=0)
+    latest_by_topic: dict[int, int] = {}
+    for m in messages:
+        if m.thread_id is not None:
+            latest_by_topic[int(m.thread_id)] = max(latest_by_topic.get(int(m.thread_id), 0), int(m.msg_id))
 
     async def _mark_flat_forum() -> int:
         marked = 0
         if not topic_titles:
             return 0
         for tid, tname in topic_titles.items():
-            latest = await repo.get_max_msg_id(chat_id, thread_id=tid)
+            latest = latest_by_topic.get(tid, 0)
             if not latest:
                 continue
             if await mark_as_read(client, chat_id, latest, thread_id=tid):
@@ -188,7 +197,7 @@ def _build_mark_read_fn(
         return marked
 
     async def _mark_single() -> int:
-        latest = await repo.get_max_msg_id(chat_id, thread_id if thread_id else None)
+        latest = latest_msg_id
         if not latest:
             return 0
         ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
@@ -260,6 +269,7 @@ async def prepare_chat_run(
         start_msg_id=start_msg_id,
         since_dt=since_dt,
         full_history=full_history,
+        force_from_start=bool(topic_markers),
     )
 
     msgs = await repo.iter_messages(
@@ -309,6 +319,7 @@ async def prepare_chat_run(
         chat_id=chat_id,
         thread_id=thread_id,
         topic_titles=topic_titles,
+        messages=msgs,
         enabled=mark_read,
     )
 
@@ -396,9 +407,8 @@ async def prepare_chat_runs_per_topic(
         if not explicit_period:
             # Per-topic unread anchor: Telegram's topic-level marker is
             # "last read msg_id". Add 1 to get first-unread.
-            topic_from_msg = t.read_inbox_max_id + 1 if t.read_inbox_max_id else None
-            if topic_from_msg is None:
-                topic_full = True
+            topic_from_msg = t.read_inbox_max_id + 1
+            topic_full = False
 
         try:
             prepared = await prepare_chat_run(
@@ -509,11 +519,46 @@ async def prepare_all_unread_runs(
                 if abs_id > 1_000_000_000_000:
                     internal_id = abs_id - 1_000_000_000_000
 
+            # Forums carry unread state per topic. A single dialog marker can
+            # miss topic-local unread ranges, so flatten with topic markers.
+            if u.kind == "forum":
+                from analyzetg.tg.topics import list_forum_topics
+
+                topics = await list_forum_topics(client, u.chat_id)
+                unread_topics = [t for t in topics if t.unread_count > 0]
+                if not unread_topics:
+                    console.print("[yellow]No unread forum topics after refresh.[/]")
+                    continue
+                topic_titles = {t.topic_id: t.title for t in topics}
+                topic_markers = {t.topic_id: t.read_inbox_max_id for t in topics}
+                min_unread_marker = min(t.read_inbox_max_id for t in unread_topics)
+                prepared = await prepare_chat_run(
+                    client=client,
+                    repo=repo,
+                    settings=settings,
+                    chat_id=u.chat_id,
+                    thread_id=None,
+                    chat_title=u.title,
+                    thread_title=None,
+                    chat_username=u.username,
+                    chat_internal_id=internal_id,
+                    from_msg_id=min_unread_marker + 1,
+                    full_history=False,
+                    enrich_opts=enrich_opts,
+                    include_transcripts=include_transcripts,
+                    min_msg_chars=min_msg_chars,
+                    topic_titles=topic_titles,
+                    topic_markers=topic_markers,
+                    mark_read=mark_read,
+                )
+                yield prepared
+                continue
+
             # Dialog read_inbox_max_id is "last read msg_id"; +1 gets us
             # to first-unread. prepare_chat_run subtracts one inside
             # _determine_start, so the net is iter_messages with
             # min_msg_id = read_inbox_max_id (exclusive) = correct.
-            from_msg = u.read_inbox_max_id + 1 if u.read_inbox_max_id else None
+            from_msg = u.read_inbox_max_id + 1
 
             prepared = await prepare_chat_run(
                 client=client,
@@ -526,7 +571,7 @@ async def prepare_all_unread_runs(
                 chat_username=u.username,
                 chat_internal_id=internal_id,
                 from_msg_id=from_msg,
-                full_history=from_msg is None,
+                full_history=False,
                 enrich_opts=enrich_opts,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,

@@ -9,6 +9,7 @@ Covers regressions in:
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 from analyzetg.analyzer.prompts import (
     DEFAULT_USER_TAIL,
     PRESETS,
+    PRESETS_DIR,
     USER_MARKER,
     Preset,
     _parse_frontmatter,
@@ -70,6 +72,16 @@ def test_all_builtin_presets_load() -> None:
         # Pipeline expects these four placeholders in the user template.
         for key in ("{period}", "{title}", "{msg_count}", "{messages}"):
             assert key in p.user_template, f"preset {name!r} missing placeholder {key}"
+
+
+def test_builtin_presets_are_included_in_wheel() -> None:
+    # Non-editable installs do not have the repository checkout next to the
+    # package, so the wheel must carry the builtin preset markdown tree.
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    force_include = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force_include.get("presets") == "presets"
+    assert (PRESETS_DIR / "summary.md").is_file()
 
 
 def test_summary_preset_has_adequate_budget() -> None:
