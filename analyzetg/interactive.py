@@ -77,6 +77,59 @@ def _bind_escape(question, value):
     return question
 
 
+def _bind_arrow_checkbox(question):
+    """Extend questionary.checkbox with directional arrow-key selection.
+
+    Default questionary bindings: Space toggles. That's fine but requires
+    reaching for the spacebar per row. Users expect `→` to check the
+    current row and `←` to uncheck it — matching how many TUI checkbox
+    lists behave. We reach into the prompt's internal `InquirerControl`
+    via `layout.walk()` (the same control questionary's Space handler
+    uses) and mutate `selected_options` directly. prompt_toolkit
+    re-renders on every keystroke, so no explicit invalidate needed.
+
+    Silently no-ops if we can't find the control (defensive against
+    future questionary internal changes) — the user still has Space
+    available as a fallback.
+    """
+    try:
+        from questionary.prompts.common import InquirerControl  # type: ignore[import-not-found]
+    except ImportError:
+        return question
+
+    ic = None
+    try:
+        for container in question.application.layout.walk():
+            content = getattr(container, "content", None)
+            if isinstance(content, InquirerControl):
+                ic = content
+                break
+    except Exception:
+        return question
+    if ic is None:
+        return question
+
+    bindings = question.application.key_bindings
+
+    @bindings.add(Keys.Right, eager=True)
+    def _select(event):
+        choice = ic.get_pointed_at()
+        if choice is None:
+            return
+        if choice.value not in ic.selected_options:
+            ic.selected_options.append(choice.value)
+
+    @bindings.add(Keys.Left, eager=True)
+    def _deselect(event):
+        choice = ic.get_pointed_at()
+        if choice is None:
+            return
+        if choice.value in ic.selected_options:
+            ic.selected_options.remove(choice.value)
+
+    return question
+
+
 def _replace_last_line(summary: str) -> None:
     """Erase the line questionary just rendered and write a clean summary.
 
@@ -355,8 +408,9 @@ async def _collect_answers(
         if mark_read_forced:
             console.print(f"  [dim]mark read (from CLI):[/] [bold]{'yes' if mark_read else 'no'}[/]")
         console.print(
-            "[dim]Tips: ↑/↓ to navigate, type to filter, Enter to select, "
-            "ESC to go back (Ctrl-C to cancel).[/]\n"
+            "[dim]Tips:[/] "
+            "[bold]type letters to filter[/] ([dim]e.g. [cyan]uni[/] → UNION[/]), "
+            "[dim]↑/↓ navigate, Enter select, ESC back, Ctrl-C cancel.[/]\n"
         )
 
         chat: dict | None = None
@@ -373,7 +427,11 @@ async def _collect_answers(
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
         chosen_output_path: Path | None = output
-        chosen_mark_read: bool = bool(mark_read)
+        # Default mark-read to True in the wizard: if the user ran analyze
+        # on unread messages they've effectively "seen" them now, so
+        # advancing Telegram's read marker matches intent. CLI
+        # `--no-mark-read` can still override.
+        chosen_mark_read: bool = bool(mark_read) if mark_read is not None else True
         # Per-period message counts for the current chat (filled once we
         # know the chat and, for forums, the thread). Used by `_pick_period`
         # to decorate choices and by the confirm step to estimate cost.
@@ -449,10 +507,7 @@ async def _collect_answers(
                         thread_id=thread_id,
                         unread_hint=unread_hint,
                     )
-                result = await _pick_period(
-                    force_explicit=forum_all_flat,
-                    counts=period_counts,
-                )
+                result = await _pick_period(counts=period_counts)
                 if result is BACK:
                     if mode == "analyze":
                         step = "enrich"
@@ -463,6 +518,18 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 period, custom_since, custom_until, custom_from_msg = result
+                # For a custom date range, estimate the message count on
+                # demand so the confirm step can show "messages ≈ N" and
+                # the cost estimate (analyze mode) has a number to work
+                # with. Cheap: 2 get_messages(limit=1) calls.
+                if period == "custom" and chat is not None and (custom_since or custom_until):
+                    period_counts["custom"] = await _count_custom_range(
+                        client,
+                        chat_id=int(chat["chat_id"]),
+                        thread_id=thread_id,
+                        since=datetime.strptime(custom_since, "%Y-%m-%d") if custom_since else None,
+                        until=datetime.strptime(custom_until, "%Y-%m-%d") if custom_until else None,
+                    )
                 # Output step is next unless the user already set it via CLI.
                 step = "mark_read" if output_forced else "output"
 
@@ -520,7 +587,11 @@ async def _collect_answers(
                 if not run_on_all:
                     summary_bits.append(f"period={period}")
                     if period == "custom":
-                        summary_bits.append(f"({custom_since or ''}..{custom_until or ''})")
+                        # Include the estimated count next to the date
+                        # range so the user sees the scope at confirm time.
+                        n = period_counts.get("custom") if period_counts else None
+                        range_str = f"{custom_since or ''}..{custom_until or ''}"
+                        summary_bits.append(f"({range_str}, {n} msgs)" if n is not None else f"({range_str})")
                     elif period == "from_msg" and custom_from_msg:
                         summary_bits.append(f"(from {custom_from_msg})")
                 summary_bits.append(
@@ -637,11 +708,15 @@ def _next_step_after_mark_read(output_forced: bool, mark_read_forced: bool) -> s
 
 
 def _count_for_period(period: str | None, counts: dict[str, int | None]) -> int | None:
-    """Look up the prefetched count for the currently picked period."""
+    """Look up the prefetched count for the currently picked period.
+
+    `custom` is populated on-demand by `_collect_answers` after the user
+    submits their date range (via `_count_custom_range`); if that
+    computation failed or the user hasn't provided dates yet, the entry
+    is absent and we return None.
+    """
     if period is None:
         return None
-    if period == "custom":
-        return None  # too expensive to prefetch every possible range
     return counts.get(period)
 
 
@@ -652,47 +727,144 @@ async def _fetch_period_counts(
     thread_id: int | None,
     unread_hint: int,
 ) -> dict[str, int | None]:
-    """Ask Telegram for message counts covering each canonical period.
+    """Estimate message counts covering each canonical period.
 
-    Uses `client.get_messages(limit=0, ...).total` — Telethon populates
-    `.total` on the returned (empty) list for free with a single
-    `GetHistory` round trip per period. Failures drop to `None`, which the
-    picker renders as `—`.
+    **Approximation by msg_id difference.** We tried two RPCs — `GetHistory`
+    and `SearchRequest` — and both returned the chat-wide total
+    regardless of `offset_date` / `min_date` for this kind of peer on
+    this Telethon/server combo. The reliable workaround is:
+
+      `count_in_period ≈ latest_msg.id − first_msg_after_period_start.id + 1`
+
+    Telegram assigns `msg_id` sequentially per chat, so the id difference
+    is close to the real count. It over-estimates slightly when deletions
+    or service messages left gaps, under-estimates if Telegram has
+    renumbered (rare). For the picker's "let me see how much work I'm
+    signing up for" purpose, order-of-magnitude is what matters.
+
+    Two lightweight `get_messages(limit=1, ...)` calls per period:
+      - one to find the oldest msg at/after the period start,
+      - one (shared across periods) to find the latest msg.
+    Errors drop to None; the picker renders that as "—".
     """
     now = datetime.now(UTC)
 
-    async def _total(**kwargs) -> int | None:
-        try:
-            msgs = await client.get_messages(chat_id, limit=0, **kwargs)
-            total = int(getattr(msgs, "total", 0) or 0)
-            # Telethon returns 2**31-1 when Telegram's response has no real
-            # `count` (private/basic chats return `messages.Messages`, not
-            # `messages.MessagesSlice`). Treat that as "unknown".
-            if total >= 2_000_000_000:
-                return None
-            return total
-        except Exception as e:
-            log.debug("period_counts.error", chat_id=chat_id, err=str(e)[:200], kw=list(kwargs))
-            return None
-
-    # `reply_to=thread_id` scopes the count to a single forum topic.
-    # Empty dict for non-forum chats so Telethon pulls the whole dialog.
     thread_kw: dict = {"reply_to": thread_id} if thread_id else {}
 
-    tasks = {
-        "last7": _total(offset_date=now - timedelta(days=7), reverse=True, **thread_kw),
-        "last30": _total(offset_date=now - timedelta(days=30), reverse=True, **thread_kw),
-        "full": _total(**thread_kw),
+    async def _latest_msg_id() -> int | None:
+        try:
+            msgs = await client.get_messages(chat_id, limit=1, **thread_kw)
+            if not msgs:
+                return None
+            return int(msgs[0].id)
+        except Exception as e:
+            log.debug("period_counts.latest_fail", chat_id=chat_id, err=str(e)[:200])
+            return None
+
+    async def _first_id_after(since: datetime | None) -> int | None:
+        """First msg_id at/after `since`. None means 'find the first msg
+        in the chat at all' → used for full history."""
+        try:
+            if since is None:
+                # Oldest message in the chat/topic: reverse=True + no
+                # offset_date returns messages in ascending order starting
+                # from the first one.
+                msgs = await client.get_messages(chat_id, limit=1, reverse=True, **thread_kw)
+            else:
+                # First message at or after `since`: reverse=True says
+                # "ascending order", offset_date excludes messages older
+                # than `since`.
+                msgs = await client.get_messages(
+                    chat_id, limit=1, offset_date=since, reverse=True, **thread_kw
+                )
+            if not msgs:
+                return None
+            return int(msgs[0].id)
+        except Exception as e:
+            log.debug("period_counts.first_fail", chat_id=chat_id, since=str(since), err=str(e)[:200])
+            return None
+
+    latest_task = _latest_msg_id()
+    last7_start_task = _first_id_after(now - timedelta(days=7))
+    last30_start_task = _first_id_after(now - timedelta(days=30))
+    full_start_task = _first_id_after(None)
+
+    latest, last7_start, last30_start, full_start = await _asyncio.gather(
+        latest_task, last7_start_task, last30_start_task, full_start_task
+    )
+
+    def _count(start: int | None) -> int | None:
+        if latest is None or start is None:
+            return None
+        return max(0, latest - start + 1)
+
+    out: dict[str, int | None] = {
+        "last7": _count(last7_start),
+        "last30": _count(last30_start),
+        "full": _count(full_start),
+        # For "unread" we already have a hint from the dialog row.
+        "unread": unread_hint if unread_hint else None,
     }
-    # For "unread" we already have a hint from the dialog row; skip the
-    # round trip if known.
-    results_list = await _asyncio.gather(*tasks.values(), return_exceptions=False)
-    out: dict[str, int | None] = dict(zip(tasks.keys(), results_list, strict=True))
-    out["unread"] = unread_hint if unread_hint else None
-    # Sanity: unread should never exceed full.
+    # Sanity clamps. Periods can't exceed full; unread can't exceed the
+    # period it falls inside (best-effort — unread_hint is server-authoritative
+    # and trumps our approximation, so we only clamp the other direction).
+    if out.get("full") is not None:
+        for key in ("last7", "last30"):
+            if out[key] is not None and out[key] > out["full"]:
+                out[key] = out["full"]
     if out.get("unread") is not None and out.get("full") is not None and out["unread"] > out["full"]:
         out["unread"] = out["full"]
     return out
+
+
+async def _count_custom_range(
+    client,
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> int | None:
+    """Estimate messages in [since, until] via msg_id difference.
+
+    Same technique as `_fetch_period_counts`, specialized for a
+    user-picked date range at the wizard's custom step. Two
+    `get_messages(limit=1, ...)` calls:
+      - newest at/before `until` (or latest if until is None);
+      - oldest at/after `since` (or very oldest if since is None).
+    Returns None on failure so the caller falls back to rendering "—".
+    """
+    thread_kw: dict = {"reply_to": thread_id} if thread_id else {}
+
+    try:
+        # Upper bound: latest msg_id whose date is ≤ until.
+        if until is None:
+            upper = await client.get_messages(chat_id, limit=1, **thread_kw)
+        else:
+            upper = await client.get_messages(chat_id, limit=1, offset_date=until, **thread_kw)
+        if not upper:
+            return 0
+        upper_id = int(upper[0].id)
+
+        # Lower bound: earliest msg_id whose date is ≥ since.
+        if since is None:
+            lower = await client.get_messages(chat_id, limit=1, reverse=True, **thread_kw)
+        else:
+            lower = await client.get_messages(chat_id, limit=1, offset_date=since, reverse=True, **thread_kw)
+        if not lower:
+            return 0
+        lower_id = int(lower[0].id)
+
+        return max(0, upper_id - lower_id + 1)
+    except Exception as e:
+        log.debug(
+            "custom_count.error",
+            chat_id=chat_id,
+            since=str(since),
+            until=str(until),
+            err=str(e)[:200],
+        )
+        return None
 
 
 def _estimate_cost(
@@ -762,8 +934,8 @@ def _estimate_cost(
 
 
 def _fmt_count(n: int) -> str:
-    """Right-align a count in a 6-char field; '     —' if zero."""
-    return f"{n:>6}" if n else "     —"
+    """Right-align a count in `_COL_UNREAD`-char field; dim em-dash if zero."""
+    return f"{n:>{_COL_UNREAD}}" if n else f"{'—':>{_COL_UNREAD}}"
 
 
 def _fmt_cost(value: float | None) -> str:
@@ -810,89 +982,83 @@ def _fmt_cost_range(lo: float | None, hi: float | None) -> str:
 
 
 def _fmt_date(dt: datetime | None) -> str:
-    """Compact date for picker rows. 12-char fixed width for column alignment."""
+    """Compact date for picker rows.
+
+    Returns a short string (no padding) — the caller right-pads to the
+    column width. Rules:
+      - today → `HH:MM` (5 chars)
+      - this year → `MMM DD HH:MM` (12 chars, e.g. `Apr 23 09:14`)
+      - older → `YYYY-MM-DD` (10 chars)
+      - missing → `—` (1 char, caller pads)
+
+    Telethon datetimes are tz-aware UTC; we convert to system local before
+    display so "last msg" matches what the Telegram app shows the user.
+    Naive datetimes pass through unchanged (assumed already local).
+    """
     if dt is None:
-        return "—           "
-    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return "—"
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()  # → system local
+        now = datetime.now().astimezone()
+    else:
+        now = datetime.now()
     delta_s = (now - dt).total_seconds()
     if -60 < delta_s < 24 * 3600:
-        return dt.strftime("       %H:%M")  # within last 24h → HH:MM only
+        return dt.strftime("%H:%M")
     if dt.year == now.year:
-        return dt.strftime("%b %d %H:%M")  # this year → "Apr 23 09:14"
-    return dt.strftime("%Y-%m-%d  ")  # older → full date
+        return dt.strftime("%b %d %H:%M")
+    return dt.strftime("%Y-%m-%d")
 
 
-async def _fetch_first_unread_dates(client, dialogs: list) -> dict[int, datetime | None]:
-    """For each dialog, the date of the oldest unread message.
+# Canonical short label for each Telegram kind — keeps the `kind` column
+# narrow without losing meaning. Basic groups and supergroups are the
+# same thing from the user's perspective in this picker, so both map to
+# "group"; the underlying value on the dialog stays unchanged so callers
+# that actually care (forum routing) still get the precise kind.
+_KIND_SHORT = {
+    "supergroup": "group",
+    "group": "group",
+    "channel": "channel",
+    "forum": "forum",
+    "user": "user",
+}
 
-    Uses `get_messages(chat, limit=1, min_id=marker, reverse=True)` to grab
-    the oldest real message above the per-dialog read marker (skipping
-    deleted msg-ids). Parallel with a cap of 5 in-flight. Errors are logged
-    (run `analyzetg -v ...` to see) and fall back to None.
+
+def _short_kind(kind: str) -> str:
+    return _KIND_SHORT.get(kind, kind)
+
+
+# Column widths — chosen empirically so the most common values fit
+# without padding waste. Titles trail the fixed columns so their
+# variable width doesn't misalign anything.
+_COL_UNREAD = 6  # up to 999999 unread — plenty
+_COL_KIND = 7  # "channel" is the longest after shortening
+_COL_DATE = 12  # "Apr 23 09:14" is the longest short form
+
+
+def _chat_row(
+    *,
+    unread: int,
+    kind: str,
+    last_msg_date: datetime | None,
+    title: str | int | None,
+) -> str:
+    """One formatted row in the chat-picker table.
+
+    Two spaces between columns (not `·`) — the aligned whitespace reads
+    as columns on its own, and dots just add visual noise at typical
+    terminal widths. Title is unpadded (trails everything).
     """
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
+    return (
+        f"{_fmt_count(unread)}  "
+        f"{_short_kind(kind):<{_COL_KIND}}  "
+        f"{_fmt_date(last_msg_date):<{_COL_DATE}}  "
+        f"{title or ''}"
     )
 
-    sem = _asyncio.Semaphore(5)
-    resolved = 0
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[dim]Fetching first-unread dates[/]"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        transient=True,
-        console=console,
-    ) as progress:
-        task = progress.add_task("fetch", total=len(dialogs))
 
-        async def one(d) -> tuple[int, datetime | None]:
-            nonlocal resolved
-            if not d.read_inbox_max_id:
-                log.debug("first_unread.no_marker", chat_id=d.chat_id, kind=d.kind)
-                progress.advance(task)
-                return d.chat_id, None
-            try:
-                async with sem:
-                    msgs = await client.get_messages(
-                        d.chat_id,
-                        limit=1,
-                        min_id=d.read_inbox_max_id,
-                        reverse=True,
-                    )
-                if msgs:
-                    resolved += 1
-                    return d.chat_id, getattr(msgs[0], "date", None)
-                log.debug(
-                    "first_unread.empty_result",
-                    chat_id=d.chat_id,
-                    marker=d.read_inbox_max_id,
-                )
-                return d.chat_id, None
-            except Exception as e:
-                log.warning(
-                    "first_unread.error",
-                    chat_id=d.chat_id,
-                    marker=d.read_inbox_max_id,
-                    err=str(e)[:200],
-                )
-                return d.chat_id, None
-            finally:
-                progress.advance(task)
-
-        results = await _asyncio.gather(*[one(d) for d in dialogs])
-    if resolved < len(dialogs):
-        console.print(
-            f"[dim]→ First-unread dates resolved for {resolved}/{len(dialogs)} "
-            "chats (remaining shown as —; run with -v to see errors).[/]"
-        )
-    return dict(results)
+def _chat_header_row() -> str:
+    return f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'last msg':<{_COL_DATE}}  title"
 
 
 async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None | object:
@@ -909,10 +1075,7 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
         console.print("[yellow]No chats with unread messages. Showing all dialogs.[/]")
         return await _pick_from_all(client)
 
-    first_dates = await _fetch_first_unread_dates(client, unread)
-
     # Column header as a non-selectable separator at the top.
-    header = f"{'unread':>6}  · {'kind':<11} · {'first unread':<12} · {'last msg':<12} · title"
     choices: list[Any] = []
     if offer_all_unread:
         total = sum(d.unread_count for d in unread)
@@ -923,16 +1086,15 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
             )
         )
         choices.append(questionary.Separator())
-    choices.append(questionary.Separator(header))
+    choices.append(questionary.Separator(_chat_header_row()))
     for d in unread:
         choices.append(
             questionary.Choice(
-                title=(
-                    f"{_fmt_count(d.unread_count)}  · "
-                    f"{d.kind:<11} · "
-                    f"{_fmt_date(first_dates.get(d.chat_id)):<12} · "
-                    f"{_fmt_date(d.last_msg_date):<12} · "
-                    f"{d.title or d.chat_id}"
+                title=_chat_row(
+                    unread=d.unread_count,
+                    kind=d.kind,
+                    last_msg_date=d.last_msg_date,
+                    title=d.title or d.chat_id,
                 ),
                 value=("pick", d),
             )
@@ -998,13 +1160,22 @@ async def _pick_from_all(client) -> dict | None:
     # Sort: unread desc, then alpha title.
     rows.sort(key=lambda r: (-r["unread"], (r["title"] or "").lower()))
 
-    choices = [
+    # Mirror the shape of _pick_chat's table so navigation between the two
+    # pickers isn't visually jarring. Last-msg-date isn't available from
+    # iter_dialogs here without extra fetches — leave it blank.
+    header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  title"
+    choices: list[Any] = [questionary.Separator(header_line)]
+    choices.extend(
         questionary.Choice(
-            title=f"{_fmt_count(r['unread'])}  · {r['kind']:<11} · {r['title'] or r['chat_id']}",
+            title=(
+                f"{_fmt_count(r['unread'])}  "
+                f"{_short_kind(r['kind']):<{_COL_KIND}}  "
+                f"{r['title'] or r['chat_id']}"
+            ),
             value=r,
         )
         for r in rows
-    ]
+    )
 
     picked = await _bind_escape(
         questionary.select(
@@ -1062,7 +1233,7 @@ async def _pick_thread(client, chat_id: int):
 
     result = await _bind_escape(
         questionary.select(
-            f"{len(topics)} topic(s) in this forum",
+            f"{len(topics)} topic(s) in this forum (type to filter)",
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
@@ -1128,7 +1299,7 @@ async def _pick_preset():
 
     picked = await _bind_escape(
         questionary.select(
-            "Pick a preset",
+            "Pick a preset (type to filter)",
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
@@ -1206,22 +1377,29 @@ async def _pick_enrich() -> list[str] | None | object:
     """
     settings = get_settings()
     cfg = settings.enrich
+    # Order reflects default-on status: voice + videonote + link first
+    # (the three kinds that default to True in config), then the opt-in
+    # media enrichments. Keeping default-on items at the top means hitting
+    # Enter through the wizard mostly picks the pre-checked defaults and
+    # the user sees what's on without scrolling.
     all_kinds = [
         ("voice", "Voice messages — transcribe", cfg.voice),
         ("videonote", "Video notes (round videos) — transcribe", cfg.videonote),
+        ("link", "External URLs — fetch and summarize", cfg.link),
         ("video", "Videos — transcribe audio track", cfg.video),
         ("image", "Photos — describe via vision model (spendy)", cfg.image),
         ("doc", "Documents (PDF / DOCX / text) — extract text", cfg.doc),
-        ("link", "External URLs — fetch and summarize (spendy)", cfg.link),
     ]
     choices = [
         questionary.Choice(title=label, value=key, checked=default_on) for key, label, default_on in all_kinds
     ]
     picked = await _bind_escape(
-        questionary.checkbox(
-            "Enrich media? (space to toggle, Enter to accept — defaults from config)",
-            choices=choices,
-            style=LIST_STYLE,
+        _bind_arrow_checkbox(
+            questionary.checkbox(
+                "Enrich media? (→ check, ← uncheck, space to toggle, Enter to accept)",
+                choices=choices,
+                style=LIST_STYLE,
+            )
         ),
         BACK,
     ).ask_async()
@@ -1278,10 +1456,15 @@ async def _prompt_msg_ref() -> str | None:
 
 
 async def _pick_mark_read(*, default: bool):
-    """Yes/No/Back. Returns True, False, BACK, or None (cancel)."""
+    """Yes/No/Back. Returns True, False, BACK, or None (cancel).
+
+    Yes is listed first since it's the wizard default: after analyzing
+    unread messages the user has effectively seen them, so advancing
+    Telegram's read marker matches intent.
+    """
     choices = [
-        questionary.Choice("No — keep messages unread in Telegram", value=False),
         questionary.Choice("Yes — advance Telegram's read marker after analysis", value=True),
+        questionary.Choice("No — keep messages unread in Telegram", value=False),
         questionary.Separator(),
         questionary.Choice("← Back", value=BACK),
     ]
@@ -1306,7 +1489,6 @@ async def _pick_mark_read(*, default: bool):
 
 async def _pick_period(
     *,
-    force_explicit: bool,
     counts: dict[str, int | None] | None = None,
 ):
     """Returns (period_key, since, until, from_msg), BACK, or None.
@@ -1315,6 +1497,11 @@ async def _pick_period(
     choice is annotated with the count so the user can see how much work
     they're about to buy. `from_msg` is populated only when the user picks
     "From message" — otherwise it's None.
+
+    "Unread" is always available — including for all-flat forum mode, where
+    it resolves to "since the forum's dialog-level read marker" (the same
+    marker Telegram uses for the unread badge). If the user needs per-topic
+    unread, --all-per-topic is the right mode instead.
     """
     c = counts or {}
 
@@ -1324,14 +1511,12 @@ async def _pick_period(
             return base
         return f"{base}  [{n} msgs]"
 
-    options: list[Any] = []
-    if not force_explicit:
-        options.append(
-            questionary.Choice(
-                title=_label("Unread (default) — since Telegram read marker", "unread"),
-                value="unread",
-            )
-        )
+    options: list[Any] = [
+        questionary.Choice(
+            title=_label("Unread (default) — since Telegram read marker", "unread"),
+            value="unread",
+        ),
+    ]
     options.extend(
         [
             questionary.Choice(title=_label("Last 7 days", "last7"), value="last7"),
@@ -1376,7 +1561,7 @@ async def _pick_period(
             # rather than the whole wizard. Gives the user a way out of
             # "I meant to pick last-7" without losing their chat / preset
             # choice so far.
-            return await _pick_period(force_explicit=force_explicit, counts=counts)
+            return await _pick_period(counts=counts)
         _replace_last_line(f"[bold cyan]?[/] period: [bold]from {ref}[/]")
         return key, None, None, ref
     if key == "custom":
@@ -1390,7 +1575,7 @@ async def _pick_period(
                     datetime.strptime(val, "%Y-%m-%d")
                 except ValueError:
                     console.print(f"[red]Bad date:[/] {val} (expected YYYY-MM-DD)")
-                    return await _pick_period(force_explicit=force_explicit, counts=counts)
+                    return await _pick_period(counts=counts)
         return key, since or None, until or None, None
     return key, None, None, None
 

@@ -161,6 +161,16 @@ async def enrich_image(
                 "msg_id": msg.msg_id,
             },
         )
+        log.info(
+            "openai.chat",
+            phase="enrich_image",
+            model=used_model,
+            prompt=prompt_tokens,
+            cached=cached_tokens,
+            completion=completion_tokens,
+            cost=float(cost),
+            doc_id=msg.media_doc_id,
+        )
         msg.image_description = description
         return EnrichResult(
             kind="image_description",

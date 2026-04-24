@@ -153,6 +153,14 @@ async def enrich_audio(
             cost_usd=cost,
             context={"doc_id": msg.media_doc_id, "chat_id": msg.chat_id, "msg_id": msg.msg_id},
         )
+        log.info(
+            "openai.audio",
+            phase=f"enrich_{msg.media_type}",
+            model=used_model,
+            seconds=duration,
+            cost=float(cost or 0.0),
+            doc_id=msg.media_doc_id,
+        )
         return EnrichResult(
             kind="transcript",
             content=transcript,

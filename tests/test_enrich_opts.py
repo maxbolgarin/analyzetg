@@ -60,17 +60,30 @@ def test_enrich_csv_unions_with_preset():
 
 
 def test_default_uses_config_plus_preset():
-    # No CLI flags, default config: voice=true, videonote=true, rest false.
-    # Preset asks for 'link' too.
+    # No CLI flags, default config: voice=true, videonote=true, link=true,
+    # video/image/doc=false. Preset asking for 'link' is a no-op on top
+    # of the default since link is already on.
     opts = build_enrich_opts(
         cli_enrich=None,
         cli_enrich_all=False,
         cli_no_enrich=False,
         preset=_preset(enrich_kinds=["link"]),
     )
-    assert opts.voice and opts.videonote
-    assert opts.link
-    assert not opts.image and not opts.doc
+    assert opts.voice and opts.videonote and opts.link
+    assert not opts.image and not opts.doc and not opts.video
+
+
+def test_default_link_is_enabled_without_preset_request():
+    # Regression guard for the default flip: flat config defaults must
+    # include link=True now. A preset that doesn't mention link still
+    # gets link enrichment because of the config default.
+    opts = build_enrich_opts(
+        cli_enrich=None,
+        cli_enrich_all=False,
+        cli_no_enrich=False,
+        preset=_preset(),  # empty enrich_kinds
+    )
+    assert opts.link, "link was set to default-on; don't quietly flip back"
 
 
 def test_enrich_csv_rejects_unknown():

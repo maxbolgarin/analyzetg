@@ -261,13 +261,13 @@ into something the LLM can read:
 | **text** | Used as-is | always on |
 | **voice** (🎤) | Transcribed via OpenAI Audio (`gpt-4o-mini-transcribe`) | **on** |
 | **videonote** (round) | Audio extracted by ffmpeg → transcribed | **on** |
+| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | **on** |
 | **video** | Audio extracted by ffmpeg → transcribed | off |
 | **photo** | Described via vision model (`gpt-4o-mini` by default) — short caption + OCR of any on-image text | off |
 | **doc** (PDF / DOCX / txt / md / code) | Text extracted locally (`pypdf` / `python-docx` / plain read); truncated to `max_doc_chars` | off |
-| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | off |
 
-Everything except voice/videonote is **opt-in** — extra enrichments cost
-extra API calls. Three ways to turn them on:
+Everything except voice / videonote / link is **opt-in** — extra
+enrichments cost extra API calls. Three ways to turn them on:
 
 ```bash
 # Per-run, explicit set
@@ -296,10 +296,10 @@ without you remembering a flag.
 [enrich]
 voice = true
 videonote = true
+link = true
 video = false
 image = false
 doc = false
-link = false
 vision_model = "gpt-4o-mini"
 # doc_model / link_model default to the preset's filter_model when null.
 max_images_per_run = 50
@@ -408,6 +408,42 @@ wizard: a table of topics with unread counts + a *"one topic"* /
 
 `atg describe @forumchat` prints the topic list with unread counts and
 how many messages are already in your local DB.
+
+---
+
+## Download raw media
+
+Separate from enrichment (which turns media into text for the LLM),
+`atg download-media` saves the actual bytes — photos, voice notes,
+video, videonotes, documents — so you can keep an archive.
+
+```bash
+# Everything from the last week
+atg download-media @somegroup --last-days 7
+
+# Just photos and PDFs from a forum topic, capped at 100 files
+atg download-media @forumchat --thread 42 --types photo,doc --limit 100
+
+# Preview what would be downloaded without writing
+atg download-media @somegroup --last-days 7 --dry-run
+
+# Overwrite previously-downloaded files
+atg download-media @somegroup --overwrite
+
+# Custom output root (default is reports/)
+atg download-media @somegroup -o ~/archive/tg
+```
+
+Files land in `reports/<chat-slug>/media/` (or
+`reports/<chat-slug>/<topic-slug>/media/` for a forum topic). Names are
+`{msg_id}.{ext}` for photos/voice/video, and `{msg_id}_{original-name}`
+for documents (preserves the real PDF/zip filename). Runs work off
+messages already in the local DB — run `atg sync` or `atg analyze`
+first if you need the latest.
+
+No OpenAI calls, no cost beyond Telegram download bandwidth. Re-runs
+are idempotent: existing files are skipped unless you pass
+`--overwrite`.
 
 ---
 
