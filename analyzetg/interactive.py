@@ -250,6 +250,17 @@ def build_dump_args(
         since = answers.custom_since
         until = answers.custom_until
 
+    # Enrichment: same tri-state as build_analyze_args. None (wizard
+    # skipped) → config defaults; [] → explicit "off"; populated list
+    # → explicit "on set".
+    enrich_csv: str | None = None
+    no_enrich = False
+    if answers.enrich_kinds is not None:
+        if not answers.enrich_kinds:
+            no_enrich = True
+        else:
+            enrich_csv = ",".join(answers.enrich_kinds)
+
     return {
         "ref": answers.chat_ref,
         "output": answers.output_path,
@@ -268,6 +279,9 @@ def build_dump_args(
         "mark_read": answers.mark_read,
         "all_flat": answers.forum_all_flat,
         "all_per_topic": answers.forum_all_per_topic,
+        "enrich": enrich_csv,
+        "enrich_all": False,
+        "no_enrich": no_enrich,
     }
 
 
@@ -457,7 +471,14 @@ async def _collect_answers(
                     )
                     continue
                 chat = result
-                step = "thread" if chat["kind"] == "forum" else ("preset" if mode == "analyze" else "period")
+                if chat["kind"] == "forum":
+                    step = "thread"
+                elif mode == "analyze":
+                    step = "preset"
+                else:
+                    # Dump: skip preset (no preset for dump), go straight
+                    # to enrich since media enrichment applies here too.
+                    step = "enrich"
 
             elif step == "thread":
                 result = await _pick_thread(client, chat["chat_id"])
@@ -468,7 +489,7 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 thread_id, forum_all_flat, forum_all_per_topic = result
-                step = "preset" if mode == "analyze" else "period"
+                step = "preset" if mode == "analyze" else "enrich"
 
             elif step == "preset":
                 # Only runs for analyze mode.
@@ -485,10 +506,19 @@ async def _collect_answers(
                 step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "enrich"
 
             elif step == "enrich":
-                # Only runs for analyze mode (single-chat path).
+                # Runs for both analyze and dump so media-to-text
+                # conversion flows into either output path.
                 result = await _pick_enrich()
                 if result is BACK:
-                    step = "preset"
+                    # Go back to the step that preceded us: preset for
+                    # analyze mode, thread (forum) or chat (non-forum)
+                    # for dump mode.
+                    if mode == "analyze":
+                        step = "preset"
+                    elif chat and chat["kind"] == "forum":
+                        step = "thread"
+                    else:
+                        step = "chat"
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
@@ -509,10 +539,9 @@ async def _collect_answers(
                     )
                 result = await _pick_period(counts=period_counts)
                 if result is BACK:
-                    if mode == "analyze":
-                        step = "enrich"
-                    else:
-                        step = "thread" if chat and chat["kind"] == "forum" else "chat"
+                    # Both modes run through `enrich` → `period`, so
+                    # Back from period lands on enrich regardless.
+                    step = "enrich"
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")

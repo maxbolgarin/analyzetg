@@ -889,12 +889,33 @@ def dump(
         "--all-per-topic",
         help="Forum only: one file per topic. Reports land in reports/{chat}/.",
     ),
+    enrich: str | None = typer.Option(
+        None,
+        "--enrich",
+        help=(
+            "Comma-separated media enrichments to enable before writing the dump: "
+            "voice, videonote, video, image, doc, link. Mirrors analyze's flag."
+        ),
+    ),
+    enrich_all: bool = typer.Option(
+        False,
+        "--enrich-all",
+        help="Enable every enrichment before writing the dump.",
+    ),
+    no_enrich: bool = typer.Option(
+        False,
+        "--no-enrich",
+        help="Disable all enrichments for this dump (raw message text only).",
+    ),
 ) -> None:
     """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
     Precedence of start-point flags: --full-history > --from-msg >
-    --since/--until/--last-days > (default: unread). Use --with-transcribe
-    to fill voice/videonote transcripts before writing the file.
+    --since/--until/--last-days > (default: unread). `--enrich=...`
+    runs the same media pipeline as analyze (voice→transcript,
+    photo→description, doc→text, link→summary) and embeds results into
+    the saved file. Legacy `--with-transcribe` still works for
+    audio-only; it's suppressed when `--enrich` is set.
     """
     from analyzetg.export.commands import cmd_dump
 
@@ -917,6 +938,9 @@ def dump(
             mark_read=mark_read,
             all_flat=all_flat,
             all_per_topic=all_per_topic,
+            enrich=enrich,
+            enrich_all=enrich_all,
+            no_enrich=no_enrich,
         )
     )
 
