@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,8 +25,10 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-from analyzetg.analyzer.commands import _chat_slug, _topic_slug
 from analyzetg.config import get_settings
+from analyzetg.core.paths import chat_slug as _chat_slug
+from analyzetg.core.paths import compute_window as _compute_window
+from analyzetg.core.paths import topic_slug as _topic_slug
 from analyzetg.db.repo import open_repo
 from analyzetg.media.download import download_message
 from analyzetg.models import Message
@@ -42,21 +43,6 @@ console = Console()
 log = get_logger(__name__)
 
 VALID_TYPES = ("voice", "videonote", "video", "photo", "doc")
-
-
-def _parse_ymd(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    return datetime.strptime(s, "%Y-%m-%d")
-
-
-def _compute_window(
-    since: str | None, until: str | None, last_days: int | None
-) -> tuple[datetime | None, datetime | None]:
-    if last_days:
-        until_dt = datetime.now()
-        return until_dt - timedelta(days=last_days), until_dt
-    return _parse_ymd(since), _parse_ymd(until)
 
 
 def _safe_filename_component(name: str) -> str:
