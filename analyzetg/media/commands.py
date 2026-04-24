@@ -1,9 +1,10 @@
-"""CLI command: atg download-media.
+"""CLI command: atg download-media (+ reusable save_raw_media helper).
 
-Dumps raw media files (photos, voice, video, documents) from a chat to disk.
-Separate from the enrichment pipeline — enrichment transforms media into
-text for the analyzer; this command preserves the original bytes so the
-user can keep an archive of their chat's attachments.
+`atg download-media` is a thin wrapper over the shared chat-run
+pipeline: `prepare_chat_run` → `save_raw_media`. The same helper is
+invoked from `atg dump --save-media` so a single text dump can bundle
+the raw attachment bytes. Keeps original-media archival logic in one
+place regardless of which CLI entry point the user reached.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from analyzetg.tg.resolver import resolve
 from analyzetg.util.logging import get_logger
 
 if TYPE_CHECKING:
-    pass
+    from analyzetg.core.run import PreparedRun
 
 console = Console()
 log = get_logger(__name__)
@@ -83,15 +84,12 @@ def media_filename(msg: Message, tel_msg) -> str:
     if mt in {"videonote", "video"}:
         return f"{msg.msg_id}.mp4"
     if mt == "doc":
-        # Telethon exposes the original filename via DocumentAttributeFilename.
         doc = getattr(tel_msg, "document", None) or getattr(getattr(tel_msg, "media", None), "document", None)
         if doc is not None:
             for attr in getattr(doc, "attributes", None) or []:
                 file_name = getattr(attr, "file_name", None)
                 if file_name:
                     return f"{msg.msg_id}_{_safe_filename_component(file_name)}"
-        # No filename attribute — fall back to mime-based extension so the
-        # file is at least openable in something.
         mime = (getattr(doc, "mime_type", "") or "").lower() if doc else ""
         if "pdf" in mime:
             return f"{msg.msg_id}.pdf"
@@ -102,13 +100,7 @@ def media_filename(msg: Message, tel_msg) -> str:
 
 
 def _existing_for_msg(out_dir: Path, msg_id: int) -> Path | None:
-    """Already-downloaded file for this msg_id, regardless of extension.
-
-    Lets `--overwrite=false` skip a previously-saved file even if its
-    extension drifted (e.g. a doc whose original name we couldn't
-    recover on the first run — we saved `123.bin`, and the user
-    doesn't want a duplicate).
-    """
+    """Already-downloaded file for this msg_id, regardless of extension."""
     try:
         for p in out_dir.glob(f"{msg_id}.*"):
             if p.is_file():
@@ -119,6 +111,121 @@ def _existing_for_msg(out_dir: Path, msg_id: int) -> Path | None:
     except OSError:
         return None
     return None
+
+
+async def save_raw_media(
+    prepared: PreparedRun,
+    *,
+    types: set[str] | None = None,
+    output_dir: Path | None = None,
+    limit: int | None = None,
+    overwrite: bool = False,
+) -> dict[str, int]:
+    """Walk `prepared.messages`, download + save raw media bytes.
+
+    Used by both `atg download-media` (standalone) and `atg dump
+    --save-media` (bundled with a text dump). When `output_dir` is
+    None, derives the path from prepared's slugs:
+      reports/<chat-slug>/media/                — non-forum / flat-forum
+      reports/<chat-slug>/<topic-slug>/media/   — single-topic
+
+    Returns a dict of counts: {'done', 'skipped', 'failed', 'no_media'}.
+    """
+    settings = prepared.settings
+    client = prepared.client
+
+    if output_dir is None:
+        base = Path("reports")
+        chat_slug = _chat_slug(prepared.chat_title, prepared.chat_id)
+        if prepared.thread_id:
+            topic_slug = _topic_slug(prepared.thread_title, prepared.thread_id)
+            output_dir = base / chat_slug / topic_slug / "media"
+        else:
+            output_dir = base / chat_slug / "media"
+
+    candidates = [
+        m
+        for m in prepared.messages
+        if m.media_type is not None
+        and m.media_type in VALID_TYPES
+        and (types is None or m.media_type in types)
+    ]
+    if limit is not None:
+        candidates = candidates[:limit]
+    if not candidates:
+        return {"done": 0, "skipped": 0, "failed": 0, "no_media": 0}
+
+    by_type: dict[str, int] = {}
+    for m in candidates:
+        by_type[m.media_type or "unknown"] = by_type.get(m.media_type or "unknown", 0) + 1
+    breakdown = ", ".join(f"{v} {k}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]))
+    console.print(f"[bold]Saving media:[/] {len(candidates)} file(s) — {breakdown} → [cyan]{output_dir}[/]")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sem = asyncio.Semaphore(settings.media.download_concurrency)
+    stats = {"done": 0, "skipped": 0, "failed": 0, "no_media": 0}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("{task.fields[label]}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("downloading", total=len(candidates), label="")
+
+        async def worker(m: Message) -> None:
+            async with sem:
+                try:
+                    if not overwrite and _existing_for_msg(output_dir, m.msg_id) is not None:
+                        stats["skipped"] += 1
+                        progress.advance(task)
+                        return
+                    tel_msg = await client.get_messages(prepared.chat_id, ids=m.msg_id)
+                    if tel_msg is None or getattr(tel_msg, "media", None) is None:
+                        log.debug(
+                            "save_raw_media.no_media_server",
+                            chat_id=prepared.chat_id,
+                            msg_id=m.msg_id,
+                        )
+                        stats["no_media"] += 1
+                        progress.advance(task)
+                        return
+                    filename = media_filename(m, tel_msg)
+                    dest = output_dir / filename
+                    if dest.exists() and not overwrite:
+                        stats["skipped"] += 1
+                        progress.advance(task)
+                        return
+                    progress.update(task, label=f"[dim]{filename}[/]")
+                    await download_message(client, tel_msg, dest)
+                    stats["done"] += 1
+                except Exception as e:
+                    log.error(
+                        "save_raw_media.error",
+                        chat_id=prepared.chat_id,
+                        msg_id=m.msg_id,
+                        media_type=m.media_type,
+                        err=str(e)[:300],
+                    )
+                    partial = output_dir / f"{m.msg_id}.partial"
+                    with contextlib.suppress(FileNotFoundError):
+                        partial.unlink()
+                    stats["failed"] += 1
+                finally:
+                    progress.advance(task)
+
+        await asyncio.gather(*(worker(m) for m in candidates))
+
+    console.print(
+        f"[green]Saved[/] {stats['done']}/{len(candidates)}  "
+        f"[dim]skipped={stats['skipped']} "
+        f"unavailable={stats['no_media']} failed={stats['failed']}[/]  "
+        f"→ [cyan]{output_dir}[/]"
+    )
+    return stats
 
 
 async def cmd_download_media(
@@ -136,11 +243,13 @@ async def cmd_download_media(
 ) -> None:
     """Download raw media from a chat to local disk.
 
-    Works off messages already synced to the local DB — run `atg sync` or
-    `atg analyze` first if you need the latest messages. Keeps the command
-    cheap and predictable (no surprise network fetches), and means
-    repeated runs are idempotent until new messages land.
+    Thin wrapper over `prepare_chat_run` + `save_raw_media`. Kept as a
+    separate CLI for backwards compat and for users who want raw media
+    without a text dump attached.
     """
+    from analyzetg.core.pipeline import prepare_chat_run
+    from analyzetg.enrich.base import EnrichOpts
+
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
 
@@ -160,52 +269,39 @@ async def cmd_download_media(
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
 
-        msgs = await repo.iter_messages(
-            chat_id,
+        prepared = await prepare_chat_run(
+            client=client,
+            repo=repo,
+            settings=settings,
+            chat_id=chat_id,
             thread_id=thread_id if thread_id else None,
-            since=since_dt,
-            until=until_dt,
+            chat_title=resolved.title,
+            thread_title=None,
+            chat_username=resolved.username,
+            since_dt=since_dt,
+            until_dt=until_dt,
+            full_history=False,
+            enrich_opts=EnrichOpts(),  # raw bytes; no text enrichment
+            include_transcripts=False,
+            mark_read=False,
         )
-        candidates = [
-            m
-            for m in msgs
-            if m.media_type is not None
-            and m.media_type in VALID_TYPES
-            and (type_filter is None or m.media_type in type_filter)
-        ]
-        if limit is not None:
-            candidates = candidates[:limit]
-
-        if not candidates:
-            console.print(
-                "[yellow]No media matching filters.[/] "
-                "Run [cyan]atg sync[/] or [cyan]atg analyze[/] first if this "
-                "chat has new messages not yet in the local DB."
-            )
-            return
-
-        # Compute output dir using the same chat/topic slug conventions
-        # analyze uses, so `reports/` stays navigable.
-        base = output or Path("reports")
-        chat_slug = _chat_slug(resolved.title, chat_id)
-        if thread_id:
-            # We don't have the topic title handy here; use the numeric
-            # fallback. Users on a single-topic forum who want a nicer
-            # name can `atg describe <ref>` + rename the dir manually,
-            # or we can auto-resolve in a later pass.
-            topic_part = _topic_slug(None, thread_id)
-            out_dir = base / chat_slug / topic_part / "media"
-        else:
-            out_dir = base / chat_slug / "media"
-
-        # Preview counts by type so the user sees what they're buying.
-        by_type: dict[str, int] = {}
-        for m in candidates:
-            by_type[m.media_type or "unknown"] = by_type.get(m.media_type or "unknown", 0) + 1
-        breakdown = ", ".join(f"{v} {k}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]))
-        console.print(f"[bold]Plan:[/] {len(candidates)} file(s) — {breakdown} → [cyan]{out_dir}[/]")
 
         if dry_run:
+            candidates = [
+                m
+                for m in prepared.messages
+                if m.media_type in VALID_TYPES and (type_filter is None or m.media_type in type_filter)
+            ]
+            if limit is not None:
+                candidates = candidates[:limit]
+            if not candidates:
+                console.print("[yellow]No media matching filters.[/]")
+                return
+            by_type: dict[str, int] = {}
+            for m in candidates:
+                by_type[m.media_type or "unknown"] = by_type.get(m.media_type or "unknown", 0) + 1
+            breakdown = ", ".join(f"{v} {k}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]))
+            console.print(f"[bold]Plan:[/] {len(candidates)} file(s) — {breakdown}")
             sample = candidates[:10]
             for m in sample:
                 console.print(f"  [dim]{m.media_type:<10}[/] msg_id={m.msg_id}  {m.date}")
@@ -214,75 +310,10 @@ async def cmd_download_media(
             console.print("[dim]Dry run — no files written.[/]")
             return
 
-        out_dir.mkdir(parents=True, exist_ok=True)
-        sem = asyncio.Semaphore(settings.media.download_concurrency)
-        stats = {"done": 0, "skipped": 0, "failed": 0, "no_media": 0}
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TextColumn("{task.fields[label]}"),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("downloading", total=len(candidates), label="")
-
-            async def worker(m: Message) -> None:
-                async with sem:
-                    try:
-                        # Cheap pre-flight: if a file for this msg_id already
-                        # exists and --overwrite is off, don't even hit
-                        # Telegram for the metadata.
-                        if not overwrite and _existing_for_msg(out_dir, m.msg_id) is not None:
-                            stats["skipped"] += 1
-                            progress.advance(task)
-                            return
-
-                        tel_msg = await client.get_messages(chat_id, ids=m.msg_id)
-                        if tel_msg is None or getattr(tel_msg, "media", None) is None:
-                            # Message deleted on the server, or media was
-                            # revoked/expired — not an error, just unavailable.
-                            log.debug(
-                                "download_media.no_media_server",
-                                chat_id=chat_id,
-                                msg_id=m.msg_id,
-                            )
-                            stats["no_media"] += 1
-                            progress.advance(task)
-                            return
-                        filename = media_filename(m, tel_msg)
-                        dest = out_dir / filename
-                        if dest.exists() and not overwrite:
-                            stats["skipped"] += 1
-                            progress.advance(task)
-                            return
-                        progress.update(task, label=f"[dim]{filename}[/]")
-                        await download_message(client, tel_msg, dest)
-                        stats["done"] += 1
-                    except Exception as e:
-                        log.error(
-                            "download_media.error",
-                            chat_id=chat_id,
-                            msg_id=m.msg_id,
-                            media_type=m.media_type,
-                            err=str(e)[:300],
-                        )
-                        # Best-effort cleanup of a partial file so a retry
-                        # can re-download cleanly.
-                        partial = out_dir / f"{m.msg_id}.partial"
-                        with contextlib.suppress(FileNotFoundError):
-                            partial.unlink()
-                        stats["failed"] += 1
-                    finally:
-                        progress.advance(task)
-
-            await asyncio.gather(*(worker(m) for m in candidates))
-
-        console.print(
-            f"[green]Downloaded[/] {stats['done']}/{len(candidates)}  "
-            f"[dim]skipped={stats['skipped']} "
-            f"unavailable={stats['no_media']} failed={stats['failed']}[/]  "
-            f"→ [cyan]{out_dir}[/]"
+        await save_raw_media(
+            prepared,
+            types=type_filter,
+            output_dir=output,
+            limit=limit,
+            overwrite=overwrite,
         )
