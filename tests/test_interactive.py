@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from analyzetg import interactive
 from analyzetg.interactive import InteractiveAnswers, build_analyze_args, build_dump_args
 
 
@@ -160,3 +161,23 @@ def test_dump_populated_enrich_becomes_csv() -> None:
     kw = build_dump_args(_answers(enrich_kinds=["voice", "image", "link"]), **_dump_kwargs())
     assert kw["enrich"] == "voice,image,link"
     assert kw["no_enrich"] is False
+
+
+async def test_dump_all_unread_wizard_skips_second_confirm_and_forwards_enrich(monkeypatch) -> None:
+    answers = _answers(run_on_all_unread=True, enrich_kinds=["image"], mark_read=True)
+    captured = {}
+
+    async def fake_collect_answers(**kwargs):
+        return answers
+
+    async def fake_run_all_unread_dump(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(interactive, "_collect_answers", fake_collect_answers)
+    monkeypatch.setattr("analyzetg.export.commands.run_all_unread_dump", fake_run_all_unread_dump)
+
+    await interactive.run_interactive_dump(fmt="md", with_transcribe=False, include_transcripts=True)
+
+    assert captured["yes"] is True
+    assert captured["enrich"] == "image"
+    assert captured["mark_read"] is True

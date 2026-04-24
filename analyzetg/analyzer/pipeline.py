@@ -16,7 +16,7 @@ from analyzetg.analyzer.formatter import (
     chat_header_preamble,
     format_messages,
 )
-from analyzetg.analyzer.hasher import batch_hash, reduce_hash
+from analyzetg.analyzer.hasher import batch_hash, reduce_hash, text_hash
 from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
 from analyzetg.analyzer.prompts import (
     BASE_VERSION,
@@ -107,7 +107,7 @@ class AnalysisOptions:
         """Hash ingredients that must bust cache when toggled."""
         s = get_settings()
         enrich_kinds = sorted(self.enrich.kinds_enabled()) if self.enrich else []
-        return {
+        payload: dict[str, Any] = {
             "min_msg_chars": self.min_msg_chars
             if self.min_msg_chars is not None
             else s.analyze.min_msg_chars,
@@ -121,6 +121,36 @@ class AnalysisOptions:
             "map_output": preset.map_output_tokens,
             "enrich_kinds": enrich_kinds,
         }
+        if self.enrich:
+            payload["enrich_options"] = {
+                "vision_model": self.enrich.vision_model,
+                "doc_model": self.enrich.doc_model,
+                "link_model": self.enrich.link_model,
+                "audio_model": self.enrich.audio_model,
+                "max_images_per_run": self.enrich.max_images_per_run,
+                "max_link_fetches_per_run": self.enrich.max_link_fetches_per_run,
+                "max_doc_bytes": self.enrich.max_doc_bytes,
+                "max_doc_chars": self.enrich.max_doc_chars,
+                "link_fetch_timeout_sec": self.enrich.link_fetch_timeout_sec,
+                "skip_link_domains": sorted(self.enrich.skip_link_domains),
+            }
+        return payload
+
+
+def _with_prompt_inputs(
+    options_payload: dict[str, Any],
+    *,
+    system: str,
+    static_ctx: str,
+    dynamic: str,
+) -> dict[str, Any]:
+    payload = dict(options_payload)
+    payload["prompt_input"] = {
+        "system": text_hash(system),
+        "static": text_hash(static_ctx),
+        "dynamic": text_hash(dynamic),
+    }
+    return payload
 
 
 def _load_preset(opts: AnalysisOptions) -> Preset:
@@ -381,8 +411,6 @@ async def run_analysis(
     # --- Single pass: one chunk OR preset disables reduce
     if len(chunks) <= 1 or not preset.needs_reduce:
         chunk = chunks[0]
-        bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload)
-        batch_hashes.append(bhash)
         dynamic = format_messages(
             chunk.messages,
             period=period,
@@ -390,6 +418,20 @@ async def run_analysis(
             link_template=link_template,
             topic_titles=topic_titles,
         )
+        user = preset.render_user(
+            period=_fmt_period(period),
+            title=title or "—",
+            msg_count=len(msgs),
+            messages=dynamic,
+        )
+        call_options = _with_prompt_inputs(
+            options_payload,
+            system=composed_system,
+            static_ctx=static_ctx,
+            dynamic=user,
+        )
+        bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, call_options)
+        batch_hashes.append(bhash)
         text, cost, hit, truncated = await _progress_single(
             label=f"Analyzing ({len(msgs)} msgs, {preset.name}/{final_model})",
             coro=_call_cached(
@@ -400,12 +442,7 @@ async def run_analysis(
                 bhash=bhash,
                 system=composed_system,
                 static_ctx=static_ctx,
-                dynamic=preset.render_user(
-                    period=_fmt_period(period),
-                    title=title or "—",
-                    msg_count=len(msgs),
-                    messages=dynamic,
-                ),
+                dynamic=user,
                 max_tokens=preset.output_budget_tokens,
                 run_context=run_ctx,
                 use_cache=opts.use_cache,
@@ -474,7 +511,6 @@ async def run_analysis(
         _map_task = _map_progress.add_task("map", total=len(chunks), model=filter_model)
 
         async def _map(chunk) -> tuple[str, str, float, bool, bool]:
-            bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
             dynamic = format_messages(
                 chunk.messages,
                 period=period,
@@ -488,6 +524,13 @@ async def run_analysis(
                 msg_count=len(chunk.messages),
                 messages=dynamic,
             )
+            call_options = _with_prompt_inputs(
+                options_payload,
+                system=composed_system,
+                static_ctx=static_ctx,
+                dynamic=user,
+            )
+            bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, call_options)
             try:
                 async with map_sem:
                     t, c, hit, tr = await _call_cached(
@@ -516,9 +559,6 @@ async def run_analysis(
         cache_misses += int(not hit)
         any_truncated = any_truncated or tr
 
-    reduce_bh = reduce_hash(preset.name, preset.prompt_version, final_model, map_hashes, options_payload)
-    batch_hashes.append(reduce_bh)
-
     joined = "\n\n---\n\n".join(f"[Фрагмент {i + 1}]\n{r[1]}" for i, r in enumerate(map_results))
     reduce_user = (
         f"{REDUCE_PROMPT}\n\n"
@@ -528,6 +568,14 @@ async def run_analysis(
         f"Число фрагментов: {len(map_results)}\n\n"
         f"{joined}"
     )
+    reduce_options = _with_prompt_inputs(
+        options_payload,
+        system=composed_system,
+        static_ctx=static_ctx,
+        dynamic=reduce_user,
+    )
+    reduce_bh = reduce_hash(preset.name, preset.prompt_version, final_model, map_hashes, reduce_options)
+    batch_hashes.append(reduce_bh)
     text, cost, hit, truncated = await _progress_single(
         label=f"Merging {len(map_results)} fragments ({final_model})",
         coro=_call_cached(

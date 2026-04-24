@@ -121,7 +121,10 @@ async def test_prepare_chat_run_returns_full_shape(repo, monkeypatch):
     )
 
     # Short-circuit the network: patch backfill to a no-op.
+    backfill_calls = []
+
     async def _no_backfill(*args, **kwargs):
+        backfill_calls.append(kwargs)
         return 0
 
     monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
@@ -237,3 +240,64 @@ async def test_prepare_chat_run_skip_filter_preserves_media_only_messages(repo, 
     assert len(prepared_raw.messages) == 2
     assert {m.msg_id for m in prepared_raw.messages} == {5, 6}
     assert {m.media_type for m in prepared_raw.messages} == {"photo", "voice"}
+
+
+async def test_prepare_all_unread_forum_uses_per_topic_markers(repo, monkeypatch):
+    from analyzetg.core.pipeline import prepare_all_unread_runs
+    from analyzetg.tg.dialogs import UnreadDialog
+    from analyzetg.tg.topics import ForumTopic
+
+    await repo.upsert_messages(
+        [
+            Message(chat_id=-100, msg_id=40, date=datetime(2026, 4, 24, 12, 0), thread_id=1, text="old t1"),
+            Message(chat_id=-100, msg_id=100, date=datetime(2026, 4, 24, 12, 1), thread_id=1, text="new t1"),
+            Message(chat_id=-100, msg_id=200, date=datetime(2026, 4, 24, 12, 2), thread_id=2, text="old t2"),
+            Message(chat_id=-100, msg_id=300, date=datetime(2026, 4, 24, 12, 3), thread_id=2, text="new t2"),
+        ]
+    )
+
+    async def fake_unread(_client):
+        return [
+            UnreadDialog(
+                chat_id=-100,
+                kind="forum",
+                title="Forum",
+                username=None,
+                unread_count=2,
+                read_inbox_max_id=0,
+            )
+        ]
+
+    async def fake_topics(_client, _chat_id):
+        return [
+            ForumTopic(topic_id=1, title="T1", unread_count=1, read_inbox_max_id=50),
+            ForumTopic(topic_id=2, title="T2", unread_count=1, read_inbox_max_id=250),
+        ]
+
+    backfill_calls = []
+
+    async def _no_backfill(*args, **kwargs):
+        backfill_calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr("analyzetg.tg.dialogs.list_unread_dialogs", fake_unread)
+    monkeypatch.setattr("analyzetg.tg.topics.list_forum_topics", fake_topics)
+    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+
+    runs = [
+        prepared
+        async for prepared in prepare_all_unread_runs(
+            client=MagicMock(),
+            repo=repo,
+            settings=get_settings(),
+            enrich_opts=EnrichOpts(),
+            yes=True,
+        )
+    ]
+
+    assert len(runs) == 1
+    prepared = runs[0]
+    assert prepared.topic_titles == {1: "T1", 2: "T2"}
+    assert prepared.topic_markers == {1: 50, 2: 250}
+    assert {m.msg_id for m in prepared.messages} == {100, 300}
+    assert backfill_calls[0]["from_msg_id"] == 51

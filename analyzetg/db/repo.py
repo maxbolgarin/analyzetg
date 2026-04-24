@@ -1,7 +1,10 @@
 """Async SQLite repository.
 
-Thin wrapper around aiosqlite with typed methods per spec §4. Migrations are
-applied on connect; a service table `_migrations` tracks applied names.
+Thin wrapper around aiosqlite with typed methods per spec §4. `schema.sql`
+is the single source of truth and is applied (idempotently) on every
+connect. Additive compatibility checks run before the schema script so
+older local DB files can receive columns that `CREATE TABLE IF NOT EXISTS`
+would otherwise skip.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import aiosqlite
 
 from analyzetg.models import Message, Subscription, SyncState
 
-MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def _utcnow() -> str:
@@ -50,12 +53,12 @@ class Repo:
         await conn.execute("PRAGMA synchronous=NORMAL")
         repo = cls(conn, p)
         try:
-            await repo._apply_migrations()
+            await repo._apply_schema()
         except BaseException:
-            # Don't leave the aiosqlite worker thread dangling if migrations
-            # bail out (e.g. prefix collision, malformed SQL). Without this
-            # the test harness complains about "Event loop is closed" when
-            # the thread tries to signal a future after the loop ends.
+            # Don't leave the aiosqlite worker thread dangling if schema
+            # application bails out. Without this, the test harness
+            # complains about "Event loop is closed" when the thread tries
+            # to signal a future after the loop ends.
             await conn.close()
             raise
         return repo
@@ -63,34 +66,101 @@ class Repo:
     async def close(self) -> None:
         await self._conn.close()
 
-    async def _apply_migrations(self) -> None:
-        await self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMP)"
-        )
+    async def _apply_schema(self) -> None:
+        """Idempotently apply `schema.sql`.
+
+        `CREATE TABLE IF NOT EXISTS` handles fresh DBs, but does not add
+        columns to existing tables. Run a tiny additive compatibility pass
+        first so indexes and repo methods can rely on the current columns.
+        """
+        await self._apply_additive_migrations()
+        sql = SCHEMA_PATH.read_text(encoding="utf-8")
+        await self._conn.executescript(sql)
         await self._conn.commit()
-        cur = await self._conn.execute("SELECT name FROM _migrations")
-        applied = {row["name"] async for row in cur}
+
+    async def _table_columns(self, table: str) -> set[str]:
+        cur = await self._conn.execute(f"PRAGMA table_info({table})")
+        rows = await cur.fetchall()
         await cur.close()
-        scripts = sorted(MIGRATIONS_DIR.glob("*.sql"))
-        prefixes: dict[str, str] = {}
-        for script in scripts:
-            prefix = script.name.split("_", 1)[0]
-            if prefix in prefixes:
-                raise RuntimeError(
-                    f"Migration prefix collision: {prefixes[prefix]!r} and {script.name!r} "
-                    "share the same ordering prefix; rename one so sort order is unambiguous."
-                )
-            prefixes[prefix] = script.name
-        for script in scripts:
-            if script.name in applied:
-                continue
-            sql = script.read_text(encoding="utf-8")
-            await self._conn.executescript(sql)
-            await self._conn.execute(
-                "INSERT INTO _migrations(name, applied_at) VALUES (?, ?)",
-                (script.name, _utcnow()),
+        return {str(row["name"]) for row in rows}
+
+    async def _add_missing_columns(self, table: str, columns: dict[str, str]) -> None:
+        existing = await self._table_columns(table)
+        if not existing:
+            return
+        for name, definition in columns.items():
+            if name not in existing:
+                await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    async def _sqlite_object_type(self, name: str) -> str | None:
+        cur = await self._conn.execute("SELECT type FROM sqlite_master WHERE name=?", (name,))
+        row = await cur.fetchone()
+        await cur.close()
+        return str(row["type"]) if row else None
+
+    async def _migrate_legacy_media_transcripts(self) -> None:
+        kind = await self._sqlite_object_type("media_transcripts")
+        if kind == "view":
+            await self._conn.execute("DROP VIEW IF EXISTS media_transcripts")
+            return
+        if kind != "table":
+            return
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS media_enrichments (
+                doc_id       INTEGER NOT NULL,
+                kind         TEXT NOT NULL,
+                content      TEXT NOT NULL,
+                model        TEXT,
+                cost_usd     REAL,
+                duration_sec INTEGER,
+                language     TEXT,
+                file_sha1    TEXT,
+                extra_json   TEXT,
+                created_at   TIMESTAMP,
+                PRIMARY KEY (doc_id, kind)
             )
-            await self._conn.commit()
+            """
+        )
+        await self._conn.execute(
+            """
+            INSERT OR IGNORE INTO media_enrichments(
+                doc_id, kind, content, model, cost_usd, duration_sec,
+                language, file_sha1, extra_json, created_at
+            )
+            SELECT doc_id, 'transcript', transcript, model, cost_usd,
+                   duration_sec, language, file_sha1, NULL, created_at
+            FROM media_transcripts
+            """
+        )
+        await self._conn.execute("DROP TABLE media_transcripts")
+
+    async def _apply_additive_migrations(self) -> None:
+        """Apply forward-compatible column additions for pre-schema.sql DBs."""
+        await self._add_missing_columns("chats", {"linked_chat_id": "INTEGER"})
+        await self._add_missing_columns(
+            "subscriptions",
+            {
+                "transcribe_voice": "INTEGER DEFAULT 1",
+                "transcribe_videonote": "INTEGER DEFAULT 1",
+                "transcribe_video": "INTEGER DEFAULT 0",
+            },
+        )
+        await self._add_missing_columns(
+            "messages",
+            {
+                "media_type": "TEXT",
+                "media_doc_id": "INTEGER",
+                "media_duration": "INTEGER",
+                "transcript": "TEXT",
+                "transcript_model": "TEXT",
+                "reactions": "TEXT",
+            },
+        )
+        await self._add_missing_columns("analysis_cache", {"truncated": "INTEGER NOT NULL DEFAULT 0"})
+        await self._add_missing_columns("usage_log", {"cached_tokens": "INTEGER"})
+        await self._migrate_legacy_media_transcripts()
+        await self._conn.commit()
 
     # ------------------------------------------------------------------ chats
 
@@ -746,9 +816,11 @@ class Repo:
         preset: str | None = None,
         model: str | None = None,
     ) -> int:
+        if older_than_days is not None and older_than_days <= 0:
+            return 0
         sql = "DELETE FROM analysis_cache WHERE 1=1"
         args: list[Any] = []
-        if older_than_days:
+        if older_than_days is not None:
             sql += " AND datetime(created_at) < datetime('now', ?)"
             args.append(f"-{older_than_days} days")
         if preset:

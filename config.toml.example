@@ -1,103 +1,160 @@
 # analyzetg — configuration
-# Copy to config.toml and adjust values. Most values have sane defaults;
-# only overrides need to be present.
+#
+# Convention: only settings you override are uncommented. Every other knob
+# is listed commented-out, showing its default, so it's discoverable. Flip
+# to uncomment and edit. Secrets (api_id / api_hash / api_key) live in .env.
+#
+# Model picks (Chat Completions API):
+#   gpt-5.4       — flagship: long context, strong reasoning; use for final reduce.
+#   gpt-5.4-mini  — balance of cost/latency/quality for medium workloads.
+#   gpt-5.4-nano  — cheapest; per-chunk map/filter passes.
+#   gpt-4o / gpt-4o-mini — previous generation; gpt-4o-mini is the vision default.
 
-[telegram]
-# api_id / api_hash are read from .env (TELEGRAM_API_ID / TELEGRAM_API_HASH).
-session_path = "storage/session.sqlite"
-max_msgs_per_minute = 3000
+# ==================================================================== OpenAI
 
 [openai]
-# api_key is read from .env (OPENAI_API_KEY).
-#
-# Model picks (Chat Completions API — same stack this project uses):
-#   gpt-5.4          — flagship: long context, strong reasoning; use for final summaries.
-#   gpt-5.4-mini     — balance of cost/latency/quality for medium workloads.
-#   gpt-5.4-nano     — cheapest; good for high-volume per-chunk “map” / filter passes.
-#   gpt-4o / gpt-4o-mini — still available if you prefer the previous generation.
-# Reasoning-only models (o3, o4-mini, …) are a different tradeoff; not required here.
-#
+# What you'll usually tune:
 chat_model_default = "gpt-5.4"
 filter_model_default = "gpt-5.4-nano"
-audio_model_default = "gpt-4o-mini-transcribe"
 audio_language = "ru"
-request_timeout_sec = 120
-max_retries = 5
-temperature = 0.2
 
-[sync]
-default_lookback_days = 7
-batch_size = 500
-concurrency = 3
+# audio_model_default = "gpt-4o-mini-transcribe"
+# temperature = 0.2
+# request_timeout_sec = 120
+# max_retries = 5
 
-[media]
-transcribe_voice = true
-transcribe_videonote = true
-transcribe_video = false
-max_media_duration_sec = 600
-min_media_duration_sec = 1
-download_concurrency = 3
-tmp_dir = "storage/media"
-ffmpeg_path = "ffmpeg"
+# =================================================================== Analyze
 
 [analyze]
+# Drop messages shorter than N chars after enrichment. 0 = keep everything
+# (including media-only rows that didn't get enrichment text).
 min_msg_chars = 3
-output_budget_tokens = 1500
-# Cushion between packed-chunk size and the model's hard context cap.
-# Tiktoken undercounts Cyrillic and some emoji; 4000 absorbs that gap.
-# Bump higher if you ever hit context_length_exceeded on non-English chats.
-safety_margin_tokens = 4000
-chunk_soft_break_minutes = 30
+
+# Collapse forwards/memes with identical text. false = keep every duplicate.
 dedupe_forwards = true
-map_concurrency = 4
 
-[retention]
-message_retention_days = 0            # 0 = forever
-keep_transcripts_forever = true
-keep_analysis_cache_forever = true
+# Cap on the final reduce output. Bump if "Output truncated" banners appear.
+output_budget_tokens = 1500
 
-[storage]
-data_path = "storage/data.sqlite"
+# safety_margin_tokens = 4000          # context cushion; bump for non-English
+# chunk_soft_break_minutes = 30        # roll new chunk on > N min idle gap
+# map_concurrency = 4                  # parallel per-chunk OpenAI calls
 
-# Pricing tables — update manually when OpenAI publishes new rates (platform.openai.com/docs/pricing).
-# Chat: $ per 1M tokens (standard tier: input, cached input, output).
+# ==================================================================== Enrich
+#
+# Per-run overrides via CLI: --enrich=image,link / --enrich-all / --no-enrich.
+# Uncomment below only for persistent defaults (what every run uses when no
+# CLI flag is passed).
+
+[enrich]
+# Vision model for --enrich=image. gpt-4o-mini is cheap and decent for
+# "screenshot of text / photo of product" descriptions.
+vision_model = "gpt-4o-mini"
+
+# Defaults (commented = config value matches default):
+# voice = true
+# videonote = true
+# link = true
+# video = false
+# image = false
+# doc = false
+
+# Cost caps per run (skipped once exceeded — re-run to get more):
+# max_images_per_run = 50
+# max_link_fetches_per_run = 50
+# max_doc_bytes = 25000000             # 25 MB hard download cap
+# max_doc_chars = 20000                # text excerpt cap after extract
+# link_fetch_timeout_sec = 10
+# concurrency = 3                      # parallel enrichment API calls
+
+# doc_model / link_model default to filter_model when unset.
+# doc_model = "gpt-5.4-nano"
+# link_model = "gpt-5.4-nano"
+
+# Host substring match (case-insensitive) — URLs on these domains are skipped.
+# skip_link_domains = ["twitter.com", "x.com"]
+
+# ==================================================================== Pricing
+#
+# $ per 1M tokens (chat) / $ per minute (audio). `atg stats` uses these to
+# attribute spend. A model missing from this table shows up as
+# "⚠ N call(s) had no pricing entry" in the stats output.
+# Keep entries for every model you actually use.
+# Rates last pulled from platform.openai.com/docs/pricing — update manually.
+
 [pricing.chat."gpt-5.4"]
 input = 2.50
 cached_input = 0.25
 output = 15.00
-
-[pricing.chat."gpt-5.4-mini"]
-input = 0.75
-cached_input = 0.075
-output = 4.50
 
 [pricing.chat."gpt-5.4-nano"]
 input = 0.20
 cached_input = 0.02
 output = 1.25
 
-[pricing.chat."gpt-4o"]
-input = 2.50
-cached_input = 1.25
-output = 10.00
-
 [pricing.chat."gpt-4o-mini"]
 input = 0.15
 cached_input = 0.075
 output = 0.60
 
-[pricing.chat."gpt-5"]
-input = 1.25
-cached_input = 0.125
-output = 10.00
+# [pricing.chat."gpt-5.4-mini"]
+# input = 0.75
+# cached_input = 0.075
+# output = 4.50
+#
+# [pricing.chat."gpt-4o"]
+# input = 2.50
+# cached_input = 1.25
+# output = 10.00
+#
+# [pricing.chat."gpt-5"]
+# input = 1.25
+# cached_input = 0.125
+# output = 10.00
+#
+# [pricing.chat."o3-mini"]
+# input = 1.10
+# cached_input = 0.55
+# output = 4.40
 
-[pricing.chat."o3-mini"]
-input = 1.10
-cached_input = 0.55
-output = 4.40
-
-# Audio: $ per minute.
 [pricing.audio]
-"whisper-1" = 0.006
-"gpt-4o-transcribe" = 0.006
 "gpt-4o-mini-transcribe" = 0.003
+# "gpt-4o-transcribe" = 0.006
+# "whisper-1" = 0.006
+
+# ==================================================================== Media
+
+# [media]
+# transcribe_voice = true
+# transcribe_videonote = true
+# transcribe_video = false             # audio track of videos — opt-in (spendy)
+# max_media_duration_sec = 600         # skip voices/videos longer than this
+# min_media_duration_sec = 1
+# download_concurrency = 3
+# tmp_dir = "storage/media"
+# ffmpeg_path = "ffmpeg"
+
+# =================================================================== Telegram
+
+# [telegram]
+# session_path = "storage/session.sqlite"
+# max_msgs_per_minute = 3000
+
+# ======================================================================= Sync
+
+# [sync]
+# default_lookback_days = 7
+# batch_size = 500
+# concurrency = 3
+
+# ================================================================== Retention
+
+# [retention]
+# message_retention_days = 0           # 0 = forever
+# keep_transcripts_forever = true
+# keep_analysis_cache_forever = true
+
+# ==================================================================== Storage
+
+# [storage]
+# data_path = "storage/data.sqlite"

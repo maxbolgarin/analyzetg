@@ -5,6 +5,7 @@ Covers the compat view on `media_transcripts` so existing callers keep working.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,41 @@ async def test_transcript_alias_still_works(repo: Repo):
     raw = await repo.get_media_enrichment(7, "transcript")
     assert raw is not None
     assert raw["content"] == "hello world"
+
+
+async def test_legacy_media_transcripts_table_is_migrated(tmp_path: Path):
+    db = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE media_transcripts (
+            doc_id INTEGER PRIMARY KEY,
+            file_sha1 TEXT,
+            duration_sec INTEGER,
+            transcript TEXT NOT NULL,
+            model TEXT,
+            language TEXT,
+            cost_usd REAL,
+            created_at TIMESTAMP
+        );
+        INSERT INTO media_transcripts(
+            doc_id, file_sha1, duration_sec, transcript, model, language, cost_usd, created_at
+        )
+        VALUES(7, 'sha', 15, 'legacy hello', 'whisper-1', 'en', 0.001, '2026-04-24T00:00:00+00:00');
+        """
+    )
+    conn.close()
+
+    repo = await Repo.open(db)
+    try:
+        got = await repo.get_media_transcript(7)
+        assert got is not None
+        assert got["transcript"] == "legacy hello"
+        raw = await repo.get_media_enrichment(7, "transcript")
+        assert raw is not None
+        assert raw["content"] == "legacy hello"
+    finally:
+        await repo.close()
 
 
 async def test_different_kinds_coexist_for_same_doc(repo: Repo):

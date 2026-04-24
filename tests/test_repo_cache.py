@@ -153,6 +153,23 @@ async def test_cache_purge_by_preset_and_model(repo: Repo) -> None:
     assert await repo.cache_get("c") is not None
 
 
+async def test_cache_purge_zero_days_is_noop(repo: Repo) -> None:
+    await repo.cache_put(
+        "zero",
+        preset="summary",
+        model="gpt-5.4",
+        prompt_version="v1",
+        result="r",
+        prompt_tokens=1,
+        cached_tokens=0,
+        completion_tokens=1,
+        cost_usd=0.0,
+    )
+    removed = await repo.cache_purge(older_than_days=0, preset="summary")
+    assert removed == 0
+    assert await repo.cache_get("zero") is not None
+
+
 async def test_cache_stats_totals_and_groups(repo: Repo) -> None:
     await repo.cache_put(
         "a",
@@ -275,7 +292,7 @@ async def test_vacuum_returns_nonnegative_int(repo: Repo) -> None:
             completion_tokens=1,
             cost_usd=0.0,
         )
-    await repo.cache_purge(older_than_days=0, preset="p")  # keeps all (0 days → no filter)
+    await repo.cache_purge(older_than_days=0, preset="p")  # keeps all (0 days → no-op)
     reclaimed = await repo.vacuum()
     assert isinstance(reclaimed, int)
     assert reclaimed >= 0

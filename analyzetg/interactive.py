@@ -339,6 +339,8 @@ async def run_interactive_dump(
             include_transcripts=include_transcripts,
             console_out=answers.console_out,
             mark_read=answers.mark_read,
+            yes=True,
+            **_build_enrich_kwargs(answers),
         )
         return
 

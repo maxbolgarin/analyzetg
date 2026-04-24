@@ -4,7 +4,7 @@ Each test locks in a bug found during the April 2026 audit so the same
 regression can't quietly sneak back in.
 
 Covered:
-- Migration prefix uniqueness (repo.py _apply_migrations guard)
+- `schema.sql` is idempotent across repeated `Repo.open()` calls
 - `--folder` batch rejects period flags (analyzer.commands cmd_analyze)
 - `--all-flat` requires explicit period
 - `.env` loader strips UTF-8 BOM
@@ -19,6 +19,7 @@ Covered:
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC
 from pathlib import Path
 
@@ -30,23 +31,91 @@ from analyzetg.analyzer.commands import cmd_analyze
 from analyzetg.config import _load_dotenv, _read_toml, load_settings
 from analyzetg.core.paths import compute_window, parse_ymd
 from analyzetg.db.repo import Repo
+from analyzetg.export.commands import cmd_dump
 
-# --- Migration prefix uniqueness ---------------------------------------
+# --- Schema idempotency -------------------------------------------------
 
 
-async def test_migrations_reject_duplicate_prefix(tmp_path: Path, monkeypatch) -> None:
-    """If two migration files share a numeric prefix, open() must fail fast."""
-    # Drop two files with the same prefix into a scratch migrations dir and
-    # point the repo at it.
-    scratch = tmp_path / "migrations"
-    scratch.mkdir()
-    (scratch / "001_a.sql").write_text("CREATE TABLE IF NOT EXISTS a(x INT);")
-    (scratch / "001_b.sql").write_text("CREATE TABLE IF NOT EXISTS b(x INT);")
-    from analyzetg.db import repo as repo_mod
+async def test_schema_apply_is_idempotent(tmp_path: Path) -> None:
+    """Opening the same DB twice must be a no-op the second time.
 
-    monkeypatch.setattr(repo_mod, "MIGRATIONS_DIR", scratch)
-    with pytest.raises(RuntimeError, match="prefix collision"):
-        await Repo.open(tmp_path / "t.sqlite")
+    The whole point of dropping migrations in favor of `schema.sql` is that
+    every statement uses `IF NOT EXISTS` and applying it repeatedly is safe.
+    Regression guard against someone adding a statement without that clause.
+    """
+    db = tmp_path / "t.sqlite"
+    repo = await Repo.open(db)
+    await repo.close()
+    # Second open on the same DB used to fail ("duplicate column name:
+    # reactions") when ALTER statements lived in migrations; with schema.sql
+    # as the source of truth, it must succeed cleanly.
+    repo = await Repo.open(db)
+    try:
+        # Basic sanity: the schema actually created something.
+        cur = await repo._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        assert row is not None
+    finally:
+        await repo.close()
+
+
+async def test_schema_apply_upgrades_legacy_tables(tmp_path: Path) -> None:
+    """Existing DBs must receive additive columns that CREATE TABLE skips."""
+    db = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE messages (
+            chat_id INTEGER NOT NULL,
+            msg_id INTEGER NOT NULL,
+            thread_id INTEGER,
+            date TIMESTAMP NOT NULL,
+            sender_id INTEGER,
+            sender_name TEXT,
+            text TEXT,
+            reply_to INTEGER,
+            forward_from TEXT,
+            PRIMARY KEY (chat_id, msg_id)
+        );
+        CREATE TABLE analysis_cache (
+            batch_hash TEXT PRIMARY KEY,
+            preset TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            result TEXT NOT NULL,
+            prompt_tokens INTEGER,
+            cached_tokens INTEGER,
+            completion_tokens INTEGER,
+            cost_usd REAL,
+            created_at TIMESTAMP
+        );
+        """
+    )
+    conn.close()
+
+    repo = await Repo.open(db)
+    try:
+        msg_cols = {
+            row["name"] for row in await (await repo._conn.execute("PRAGMA table_info(messages)")).fetchall()
+        }
+        cache_cols = {
+            row["name"]
+            for row in await (await repo._conn.execute("PRAGMA table_info(analysis_cache)")).fetchall()
+        }
+        assert {
+            "media_type",
+            "media_doc_id",
+            "media_duration",
+            "transcript",
+            "transcript_model",
+            "reactions",
+        } <= msg_cols
+        assert "truncated" in cache_cols
+    finally:
+        await repo.close()
 
 
 # --- BOM-safe .env loader ----------------------------------------------
@@ -235,6 +304,28 @@ async def test_all_flat_requires_period() -> None:
             model=None,
             filter_model=None,
             output=None,
+            all_flat=True,
+        )
+
+
+async def test_dump_all_flat_requires_period() -> None:
+    """`atg dump --all-flat` must match analyze: explicit period required."""
+    import typer as _typer
+
+    with pytest.raises(_typer.BadParameter, match="--all-flat requires"):
+        await cmd_dump(
+            ref="@somechat",
+            output=None,
+            fmt="md",
+            since=None,
+            until=None,
+            last_days=None,
+            full_history=False,
+            thread=None,
+            from_msg=None,
+            join=False,
+            with_transcribe=False,
+            include_transcripts=True,
             all_flat=True,
         )
 
