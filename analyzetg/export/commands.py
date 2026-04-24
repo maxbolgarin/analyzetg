@@ -22,7 +22,6 @@ from analyzetg.models import Message
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import (
     UnreadDialog,
-    get_unread_state,
     list_unread_dialogs,
     mark_as_read,
 )
@@ -95,6 +94,9 @@ async def cmd_dump(
     enrich: str | None = None,
     enrich_all: bool = False,
     no_enrich: bool = False,
+    save_media: bool = False,
+    save_media_types: str | None = None,
+    yes: bool = False,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
 
@@ -139,6 +141,13 @@ async def cmd_dump(
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
 
+    # Parse save_media_types CSV once; None → all kinds.
+    save_media_kinds: set[str] | None = None
+    if save_media_types:
+        save_media_kinds = {k.strip() for k in save_media_types.split(",") if k.strip()}
+
+    from analyzetg.analyzer.commands import _derive_internal_id
+
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         console.print(f"[dim]→ Resolving[/] {ref}")
         resolved = await resolve(client, repo, ref, join=join)
@@ -170,6 +179,8 @@ async def cmd_dump(
                 settings=settings,
                 chat_id=chat_id,
                 chat_title=resolved.title,
+                chat_username=resolved.username,
+                chat_internal_id=_derive_internal_id(chat_id),
                 since_dt=since_dt,
                 until_dt=until_dt,
                 from_msg_id=from_msg_id,
@@ -181,14 +192,35 @@ async def cmd_dump(
                 console_out=console_out,
                 mark_read=mark_read_bool,
                 enrich_opts=enrich_opts,
+                save_media=save_media,
+                save_media_types=save_media_kinds,
+                yes=yes,
             )
             return
 
+        # Flat-forum: fetch topics for per-topic read markers + titles (same
+        # precision analyze uses). Needed for both unread-floor computation
+        # and per-topic mark-read after the dump finishes.
+        topic_titles: dict[int, str] | None = None
+        topic_markers: dict[int, int] | None = None
+        thread_title: str | None = None
+
         if is_forum and all_flat:
-            # Unread default (no explicit period) is supported: falls through
-            # to the dialog-level read marker via _determine_start →
-            # get_unread_state, matching the analyze command.
             thread_id = None
+            console.print("[dim]→ Listing forum topics for flat-forum grouping...[/]")
+            topics_for_flat = await list_forum_topics(client, chat_id)
+            topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
+            topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
+            if not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
+                non_zero = [m for m in topic_markers.values() if m > 0]
+                if non_zero:
+                    from_msg_id = min(non_zero)
+                    unread_across = sum(t.unread_count for t in topics_for_flat)
+                    console.print(
+                        f"[dim]→ Forum unread: {unread_across} across "
+                        f"{len(topic_markers)} topics "
+                        f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
+                    )
 
         # Single topic in a forum + unread-default → resolve topic's marker.
         if (
@@ -210,10 +242,17 @@ async def cmd_dump(
                 )
                 raise typer.Exit(0)
             from_msg_id = matched.read_inbox_max_id + 1
+            thread_title = matched.title
             console.print(
                 f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
                 f"after msg_id={matched.read_inbox_max_id}[/]"
             )
+        elif is_forum and thread_id and thread_id > 0:
+            # Explicit period path still needs the topic title for the
+            # per-topic report directory layout.
+            topics = await list_forum_topics(client, chat_id)
+            matched = next((t for t in topics if t.topic_id == thread_id), None)
+            thread_title = matched.title if matched else None
 
         await _dump_single(
             client=client,
@@ -222,6 +261,9 @@ async def cmd_dump(
             chat_id=chat_id,
             thread_id=thread_id,
             title=resolved.title,
+            thread_title=thread_title,
+            chat_username=resolved.username,
+            chat_internal_id=_derive_internal_id(chat_id),
             since_dt=since_dt,
             until_dt=until_dt,
             from_msg_id=from_msg_id,
@@ -233,6 +275,10 @@ async def cmd_dump(
             console_out=console_out,
             mark_read=mark_read_bool,
             enrich_opts=enrich_opts,
+            topic_titles=topic_titles,
+            topic_markers=topic_markers,
+            save_media=save_media,
+            save_media_types=save_media_kinds,
         )
 
 
@@ -264,74 +310,58 @@ async def _dump_single(
     console_out: bool,
     mark_read: bool,
     enrich_opts=None,
+    thread_title: str | None = None,
+    chat_username: str | None = None,
+    chat_internal_id: int | None = None,
+    topic_titles: dict[int, str] | None = None,
+    topic_markers: dict[int, int] | None = None,
+    save_media: bool = False,
+    save_media_types: set[str] | None = None,
 ) -> None:
-    """Dump one chat (or one thread, or flat-forum) to a file or console.
+    """Dump one chat / thread / flat-forum using the shared pipeline."""
+    from analyzetg.core.pipeline import prepare_chat_run
+    from analyzetg.enrich.base import EnrichOpts
 
-    `enrich_opts` (EnrichOpts) enables the same media-to-text pipeline
-    the analyzer uses: voice/videonote/video → transcript, photo →
-    image description, doc → extract, links → fetched summaries. When
-    set, enrichment runs after backfill and before export, so the
-    written MD picks up enriched bodies via `format_messages` (JSONL /
-    CSV include the new fields explicitly).
-    """
-    start_msg_id = await _determine_start(
-        client=client,
-        chat_id=chat_id,
-        thread_id=thread_id if thread_id else 0,
-        full_history=full_history,
-        from_msg_id=from_msg_id,
-        time_window=(since_dt, until_dt),
-    )
+    # Legacy --with-transcribe: fall back to voice+videonote+video
+    # enrichment when no enrich_opts was supplied. Direct enrichment
+    # supersedes transcribe-only mode.
+    effective_enrich = enrich_opts if enrich_opts is not None else EnrichOpts()
+    if with_transcribe and not effective_enrich.any_enabled():
+        effective_enrich = EnrichOpts(voice=True, videonote=True, video=True)
 
-    console.print("[dim]→ Fetching new messages from Telegram...[/]")
-    await _pull_history(
+    prepared = await prepare_chat_run(
         client=client,
         repo=repo,
+        settings=settings,
         chat_id=chat_id,
-        thread_id=thread_id if thread_id else 0,
-        start_msg_id=start_msg_id,
+        thread_id=thread_id,
+        chat_title=title,
+        thread_title=thread_title,
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
         since_dt=since_dt,
+        until_dt=until_dt,
+        from_msg_id=from_msg_id,
         full_history=full_history,
+        enrich_opts=effective_enrich,
+        include_transcripts=include_transcripts,
+        topic_titles=topic_titles,
+        topic_markers=topic_markers,
+        mark_read=mark_read,
     )
 
-    # --with-transcribe is the legacy audio-only path. Enrichment (new)
-    # is broader: voice/videonote/video + image + doc + link. When both
-    # are set, enrichment supersedes — audio transcription still runs
-    # via the enrich.audio enricher.
-    if with_transcribe and (enrich_opts is None or not enrich_opts.any_enabled()):
-        await _transcribe_pending(
-            client=client,
-            repo=repo,
-            settings=settings,
-            chat_id=chat_id,
-            since_dt=since_dt,
-            until_dt=until_dt,
+    if save_media and prepared.messages:
+        from analyzetg.media.commands import save_raw_media
+
+        await save_raw_media(
+            prepared,
+            types=save_media_types,
+            output_dir=None,
+            limit=None,
+            overwrite=False,
         )
 
-    msgs = await repo.iter_messages(
-        chat_id,
-        thread_id=thread_id,
-        since=since_dt,
-        until=until_dt,
-        min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
-    )
-
-    # Enrichment runs before export so the MD formatter sees transcripts,
-    # image descriptions, extracted doc text, and link summaries on the
-    # in-memory Message objects. JSONL/CSV read the same attributes.
-    if enrich_opts is not None and enrich_opts.any_enabled() and msgs:
-        from analyzetg.enrich.pipeline import enrich_messages
-
-        stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
-        summary = stats.summary()
-        if summary:
-            console.print(f"[dim]→ {summary}[/]")
-
-    if not include_transcripts:
-        for m in msgs:
-            if m.transcript and not m.text:
-                m.transcript = None
-
+    msgs = prepared.messages
     if console_out:
         _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
         if output is not None:
@@ -344,11 +374,8 @@ async def _dump_single(
         _write(msgs, fmt=fmt, output=target, title=title)
         console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {target}")
 
-    if mark_read and msgs:
-        latest = max(m.msg_id for m in msgs)
-        ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
-        if ok:
-            console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+    if prepared.mark_read_fn and msgs:
+        await prepared.mark_read_fn()
 
 
 async def _dump_forum_per_topic(
@@ -358,10 +385,12 @@ async def _dump_forum_per_topic(
     settings,
     chat_id: int,
     chat_title: str | None,
-    since_dt: datetime | None,
-    until_dt: datetime | None,
-    from_msg_id: int | None,
-    full_history: bool,
+    chat_username: str | None = None,
+    chat_internal_id: int | None = None,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
+    from_msg_id: int | None = None,
+    full_history: bool = False,
     fmt: str,
     output: Path | None,
     with_transcribe: bool,
@@ -369,79 +398,98 @@ async def _dump_forum_per_topic(
     console_out: bool,
     mark_read: bool,
     enrich_opts=None,
+    save_media: bool = False,
+    save_media_types: set[str] | None = None,
+    yes: bool = False,
 ) -> None:
-    console.print("[dim]→ Listing forum topics...[/]")
-    topics = await list_forum_topics(client, chat_id)
-    explicit_period = _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
-    targets = topics if explicit_period else [t for t in topics if t.unread_count > 0]
-    if not targets:
-        console.print(
-            "[yellow]No topics with unread messages.[/] "
-            "Pass --last-days / --full-history to dump everything anyway."
-        )
-        return
+    """One dump per topic, using the shared per-topic iterator.
 
-    _print_topics_table(targets, with_unread=True)
-    if not typer.confirm(f"Dump {len(targets)} topic(s)?", default=True):
-        console.print("[dim]Aborted.[/]")
-        return
+    Layout: `{output_root}/{chat-slug}/{topic-slug}/dump/dump-{stamp}.{ext}`
+    — mirrors the analyze per-topic layout so a forum's artefacts stay
+    grouped by topic regardless of which command produced them.
+    """
+    from analyzetg.analyzer.commands import _chat_slug, _topic_slug
+    from analyzetg.core.pipeline import prepare_chat_runs_per_topic
+    from analyzetg.enrich.base import EnrichOpts
+
+    effective_enrich = enrich_opts if enrich_opts is not None else EnrichOpts()
+    if with_transcribe and not effective_enrich.any_enabled():
+        effective_enrich = EnrichOpts(voice=True, videonote=True, video=True)
 
     if console_out:
-        out_dir = None
+        base_dir: Path | None = None
     else:
-        chat_slug = _slugify(chat_title or str(chat_id))
-        # Layout: {output_root}/{chat-slug}/dump/{topic-slug}-{stamp}.{ext}
         if output is not None and output.exists() and output.is_dir():
-            out_dir = output / chat_slug / "dump"
+            base_dir = output
         elif output is not None and output.suffix:
             console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
             raise typer.Exit(2)
         else:
-            out_dir = (output or Path("reports")) / chat_slug / "dump"
-        out_dir.mkdir(parents=True, exist_ok=True)
+            base_dir = output or Path("reports")
+        base_dir.mkdir(parents=True, exist_ok=True)
 
-    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
-    for t in targets:
-        topic_title = f"{chat_title or chat_id} / {t.title}"
-        console.print(f"\n[bold cyan]>>[/] {t.title} (topic_id={t.topic_id})")
+    chat_slug_str = _chat_slug(chat_title, chat_id)
+
+    async for prepared in prepare_chat_runs_per_topic(
+        client=client,
+        repo=repo,
+        settings=settings,
+        chat_id=chat_id,
+        chat_title=chat_title,
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
+        since_dt=since_dt,
+        until_dt=until_dt,
+        from_msg_id=from_msg_id,
+        full_history=full_history,
+        enrich_opts=effective_enrich,
+        include_transcripts=include_transcripts,
+        mark_read=mark_read,
+        yes=yes,
+    ):
         try:
-            topic_from_msg = from_msg_id
-            topic_full = full_history
-            if not explicit_period:
-                topic_from_msg = t.read_inbox_max_id + 1 if t.read_inbox_max_id else None
-                if topic_from_msg is None:
-                    topic_full = True
-            per_file = out_dir / f"{_slugify(t.title or str(t.topic_id))}-{stamp}.{ext}" if out_dir else None
-            await _dump_single(
-                client=client,
-                repo=repo,
-                settings=settings,
-                chat_id=chat_id,
-                thread_id=t.topic_id,
-                title=topic_title,
-                since_dt=since_dt,
-                until_dt=until_dt,
-                from_msg_id=topic_from_msg,
-                full_history=topic_full,
-                fmt=fmt,
-                output=per_file,
-                with_transcribe=with_transcribe,
-                include_transcripts=include_transcripts,
-                console_out=console_out,
-                mark_read=mark_read,
-                enrich_opts=enrich_opts,
-            )
+            if save_media and prepared.messages:
+                from analyzetg.media.commands import save_raw_media
+
+                await save_raw_media(
+                    prepared,
+                    types=save_media_types,
+                    output_dir=None,
+                    limit=None,
+                    overwrite=False,
+                )
+
+            per_file = None
+            if base_dir is not None:
+                topic_slug_str = _topic_slug(prepared.thread_title, prepared.thread_id or 0)
+                per_file = base_dir / chat_slug_str / topic_slug_str / "dump" / f"dump-{stamp}.{ext}"
+
+            msgs = prepared.messages
+            if console_out:
+                _print_console(msgs, title=prepared.chat_title, fmt=fmt, count=len(msgs))
+                if per_file is not None:
+                    per_file.parent.mkdir(parents=True, exist_ok=True)
+                    _write(msgs, fmt=fmt, output=per_file, title=prepared.chat_title)
+            else:
+                target = per_file if per_file else _default_output_path(prepared.chat_title, fmt)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write(msgs, fmt=fmt, output=target, title=prepared.chat_title)
+                console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {target}")
+
+            if prepared.mark_read_fn and msgs:
+                await prepared.mark_read_fn()
         except typer.Exit:
             raise
         except Exception as e:
             log.error(
                 "dump.forum_per_topic.error",
                 chat_id=chat_id,
-                topic_id=t.topic_id,
+                topic_id=prepared.thread_id,
                 err=str(e)[:200],
             )
-            console.print(f"[red]Topic {t.title} failed:[/] {e}")
+            console.print(f"[red]Topic {prepared.thread_title} failed:[/] {e}")
 
 
 async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
@@ -504,105 +552,6 @@ def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -
         ]
         t.add_row(*[c for c in row if c is not None])
     console.print(t)
-
-
-async def _determine_start(
-    *,
-    client,
-    chat_id: int,
-    thread_id: int,
-    full_history: bool,
-    from_msg_id: int | None,
-    time_window: tuple[datetime | None, datetime | None],
-) -> int | None:
-    if full_history:
-        return None
-    if from_msg_id is not None:
-        return max(from_msg_id - 1, 0)
-    if time_window[0] is not None or time_window[1] is not None:
-        return None
-    if thread_id:
-        console.print(
-            "[red]Per-topic unread is not exposed by Telegram's high-level API.[/]\n"
-            "Pass [cyan]--last-days N[/], [cyan]--from-msg <id>[/], or [cyan]--full-history[/]."
-        )
-        raise typer.Exit(2)
-    console.print("[dim]→ Reading unread marker...[/]")
-    unread_count, read_marker = await get_unread_state(client, chat_id)
-    if unread_count == 0:
-        console.print(
-            f"[yellow]No unread messages in chat {chat_id}.[/] "
-            "Pass --last-days / --from-msg / --full-history to dump anyway."
-        )
-        raise typer.Exit(0)
-    console.print(f"[dim]→ {unread_count} unread message(s) after msg_id={read_marker}[/]")
-    return read_marker
-
-
-async def _pull_history(
-    *,
-    client,
-    repo: Repo,
-    chat_id: int,
-    thread_id: int,
-    start_msg_id: int | None,
-    since_dt: datetime | None,
-    full_history: bool = False,
-) -> None:
-    """Fetch messages from Telegram, skipping any range already in the DB.
-
-    `full_history=True` triggers an additional backward walk from the
-    oldest local msg_id after the forward walk, so "full history" in
-    dump mode pulls the entire chat — not just what we've synced
-    forward of last time.
-    """
-    thread_param = thread_id if thread_id else None
-    if start_msg_id is not None or since_dt is None:
-        floor = start_msg_id if start_msg_id is not None else 0
-        local_max = await repo.get_max_msg_id(chat_id, thread_param, min_msg_id=floor)
-        effective = max(floor, local_max or 0)
-        if local_max and local_max > floor:
-            console.print(f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]")
-        await backfill(
-            client,
-            repo,
-            chat_id=chat_id,
-            thread_id=thread_param,
-            from_msg_id=effective + 1,
-            direction="forward",
-        )
-        # Full-history: walk backward from the oldest local msg to the
-        # chat's first message. See analyzer/commands.py:_pull_history
-        # for the matching rationale.
-        if full_history and start_msg_id is None:
-            local_min = await repo.get_min_msg_id(chat_id, thread_param)
-            if local_min and local_min > 1:
-                console.print(f"[dim]→ Have from msg_id={local_min} locally, fetching older history…[/]")
-                await backfill(
-                    client,
-                    repo,
-                    chat_id=chat_id,
-                    thread_id=thread_param,
-                    from_msg_id=local_min,
-                    direction="back",
-                )
-            elif local_min is None:
-                console.print("[dim]→ No local messages; fetching full chat history…[/]")
-                await backfill(
-                    client,
-                    repo,
-                    chat_id=chat_id,
-                    thread_id=thread_param,
-                    direction="back",
-                )
-    else:
-        await backfill(
-            client,
-            repo,
-            chat_id=chat_id,
-            thread_id=thread_param,
-            since_date=since_dt,
-        )
 
 
 async def _transcribe_pending(

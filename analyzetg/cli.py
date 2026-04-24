@@ -907,6 +907,29 @@ def dump(
         "--no-enrich",
         help="Disable all enrichments for this dump (raw message text only).",
     ),
+    save_media: bool = typer.Option(
+        False,
+        "--save-media",
+        help=(
+            "Save raw media files (photo / voice / video / doc) alongside "
+            "the text dump in reports/<chat>/[topic]/media/. Same effect "
+            "as atg download-media but bundled with the dump run."
+        ),
+    ),
+    save_media_types: str | None = typer.Option(
+        None,
+        "--save-media-types",
+        help=(
+            "Comma-separated subset to save (voice, videonote, video, photo, doc). "
+            "Default: all. Only meaningful with --save-media."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip interactive confirmations (per-topic / batch prompts).",
+    ),
 ) -> None:
     """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
@@ -915,7 +938,8 @@ def dump(
     runs the same media pipeline as analyze (voice→transcript,
     photo→description, doc→text, link→summary) and embeds results into
     the saved file. Legacy `--with-transcribe` still works for
-    audio-only; it's suppressed when `--enrich` is set.
+    audio-only; it's suppressed when `--enrich` is set. `--save-media`
+    additionally saves the raw media bytes next to the text dump.
     """
     from analyzetg.export.commands import cmd_dump
 
@@ -941,6 +965,9 @@ def dump(
             enrich=enrich,
             enrich_all=enrich_all,
             no_enrich=no_enrich,
+            save_media=save_media,
+            save_media_types=save_media_types,
+            yes=yes,
         )
     )
 
