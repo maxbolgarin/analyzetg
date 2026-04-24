@@ -1,11 +1,12 @@
 ---
 name: links
-prompt_version: v2
+prompt_version: v3
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4
 output_budget_tokens: 2500
 map_output_tokens: 1500
+enrich: [link]
 ---
 Ты собираешь полезные внешние ссылки из переписки: инструменты, статьи,
 репозитории, документацию, видео, доки. Telegram-ссылки (t.me/...),

@@ -55,6 +55,33 @@ class AnalyzeCfg(BaseModel):
     map_concurrency: int = 4
 
 
+class EnrichCfg(BaseModel):
+    """Per-media-type enrichment toggles and model choices.
+
+    Defaults preserve today's behavior (voice/videonote transcription ON) while
+    keeping the newer enrichers (image/doc/video/link) opt-in so a plain
+    `atg analyze` never quietly racks up vision-API spend. Override per-run
+    via CLI flags, per-preset via frontmatter, or here for persistent defaults.
+    """
+
+    voice: bool = True
+    videonote: bool = True
+    video: bool = False
+    image: bool = False
+    doc: bool = False
+    link: bool = False
+    vision_model: str = "gpt-4o-mini"
+    doc_model: str | None = None  # None → falls back to filter_model
+    link_model: str | None = None  # None → falls back to filter_model
+    max_images_per_run: int = 50
+    max_link_fetches_per_run: int = 50
+    max_doc_bytes: int = 5_000_000
+    max_doc_chars: int = 20_000
+    link_fetch_timeout_sec: int = 10
+    skip_link_domains: list[str] = Field(default_factory=list)
+    concurrency: int = 3
+
+
 class RetentionCfg(BaseModel):
     message_retention_days: int = 0
     keep_transcripts_forever: bool = True
@@ -88,6 +115,7 @@ class Settings(BaseSettings):
     sync: SyncCfg = Field(default_factory=SyncCfg)
     media: MediaCfg = Field(default_factory=MediaCfg)
     analyze: AnalyzeCfg = Field(default_factory=AnalyzeCfg)
+    enrich: EnrichCfg = Field(default_factory=EnrichCfg)
     retention: RetentionCfg = Field(default_factory=RetentionCfg)
     storage: StorageCfg = Field(default_factory=StorageCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
@@ -156,6 +184,19 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
         raw["openai"] = {}
     if api_key := os.environ.get("OPENAI_API_KEY"):
         raw["openai"]["api_key"] = api_key
+
+    # Back-compat: mirror legacy [media].transcribe_* into [enrich] when the
+    # user hasn't declared [enrich] yet. Keeps existing configs working without
+    # a forced rewrite.
+    media_block = raw.get("media") or {}
+    enrich_block = raw.setdefault("enrich", {})
+    for legacy_key, new_key in (
+        ("transcribe_voice", "voice"),
+        ("transcribe_videonote", "videonote"),
+        ("transcribe_video", "video"),
+    ):
+        if legacy_key in media_block and new_key not in enrich_block:
+            enrich_block[new_key] = bool(media_block[legacy_key])
 
     settings = Settings(**raw)
     settings.config_path = cfg_path

@@ -1,4 +1,11 @@
-"""Transcribe voice / videonote / video messages via OpenAI Audio API."""
+"""Audio transcription enricher for voice / videonote / video messages.
+
+Downloads the media via existing `media.download` utilities, transcodes to
+OpenAI-compatible mp3 (for video/videonote) via ffmpeg, and transcribes via
+the OpenAI Audio API. Results cache in `media_enrichments(kind='transcript')`
+keyed by Telegram's `document_id` so the same audio forwarded across chats
+is transcribed once.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ from openai import AsyncOpenAI
 
 from analyzetg.config import get_settings
 from analyzetg.db.repo import Repo
+from analyzetg.enrich.base import EnrichResult
 from analyzetg.media.download import (
     FfmpegMissing,
     download_message,
@@ -42,30 +50,42 @@ async def _transcribe_file(oai: AsyncOpenAI, path: Path, model: str, language: s
             language=language or "auto",
             response_format="text",
         )
-    # response_format=text yields a plain string
     return resp if isinstance(resp, str) else getattr(resp, "text", str(resp))
 
 
-async def transcribe_message(
+async def enrich_audio(
+    msg: Message,
     *,
     client: TelegramClient,
     repo: Repo,
-    msg: Message,
     model: str | None = None,
     language: str | None = None,
-) -> str | None:
-    """Transcribe a single message if possible. Returns transcript text or None."""
+) -> EnrichResult | None:
+    """Transcribe a voice / videonote / video message into text.
+
+    Cache-check-then-call:
+      1. If the message already has a transcript in-memory, return it as a hit.
+      2. If the doc_id has a cached transcript (even from a different chat),
+         copy it onto the message and return as hit.
+      3. Otherwise download, transcode, transcribe, cache, return.
+
+    Returns None only when there's no media to transcribe — the orchestrator
+    treats that as a skip, not an error.
+    """
     settings = get_settings()
     if msg.transcript is not None:
-        return msg.transcript
+        return EnrichResult(kind="transcript", content=msg.transcript, cache_hit=True)
     if msg.media_doc_id is None or msg.media_type is None:
         return None
 
-    # Dedup by document_id across chats
-    cached = await repo.get_media_transcript(msg.media_doc_id)
+    cached = await repo.get_media_enrichment(msg.media_doc_id, "transcript")
     if cached:
-        await repo.set_message_transcript(msg.chat_id, msg.msg_id, cached["transcript"], cached["model"])
-        return cached["transcript"]
+        content = cached.get("content") or ""
+        used_model = cached.get("model") or ""
+        await repo.set_message_transcript(msg.chat_id, msg.msg_id, content, used_model)
+        msg.transcript = content
+        msg.transcript_model = used_model
+        return EnrichResult(kind="transcript", content=content, model=used_model, cache_hit=True)
 
     used_model = model or settings.openai.audio_model_default
     used_lang = language or settings.openai.audio_language
@@ -74,7 +94,7 @@ async def transcribe_message(
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tel_msg = await client.get_messages(msg.chat_id, ids=msg.msg_id)
     if tel_msg is None or tel_msg.media is None:
-        log.warning("transcribe.no_media", chat_id=msg.chat_id, msg_id=msg.msg_id)
+        log.warning("enrich.audio.no_media", chat_id=msg.chat_id, msg_id=msg.msg_id)
         return None
 
     src = tmp_dir / f"{msg.chat_id}_{msg.msg_id}"
@@ -85,7 +105,7 @@ async def transcribe_message(
         try:
             parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir)
         except FfmpegMissing as e:
-            log.warning("transcribe.skipped_ffmpeg", err=str(e))
+            log.warning("enrich.audio.skipped_ffmpeg", err=str(e))
             return None
         produced.extend(p for p in parts if p != downloaded)
 
@@ -98,20 +118,22 @@ async def transcribe_message(
         duration = msg.media_duration or 0
         cost = audio_cost(used_model, duration)
 
-        # Record dedup cache (by doc_id)
         sha1: str | None = None
         with contextlib.suppress(Exception):
             sha1 = await asyncio.get_event_loop().run_in_executor(None, sha1_of_file, downloaded)
-        await repo.put_media_transcript(
-            doc_id=int(msg.media_doc_id),
-            transcript=transcript,
+        await repo.put_media_enrichment(
+            int(msg.media_doc_id),
+            "transcript",
+            transcript,
             model=used_model,
+            cost_usd=cost,
             duration_sec=duration,
             language=used_lang,
-            cost_usd=cost,
             file_sha1=sha1,
         )
         await repo.set_message_transcript(msg.chat_id, msg.msg_id, transcript, used_model)
+        msg.transcript = transcript
+        msg.transcript_model = used_model
         await repo.log_usage(
             kind="audio",
             model=used_model,
@@ -119,8 +141,27 @@ async def transcribe_message(
             cost_usd=cost,
             context={"doc_id": msg.media_doc_id, "chat_id": msg.chat_id, "msg_id": msg.msg_id},
         )
-        return transcript
+        return EnrichResult(
+            kind="transcript",
+            content=transcript,
+            cost_usd=float(cost or 0.0),
+            model=used_model,
+        )
     finally:
         for p in produced:
             with contextlib.suppress(FileNotFoundError):
                 p.unlink()
+
+
+# Legacy name kept so existing callers (analyzer/commands.py fallback, tests)
+# that imported `transcribe_message` keep working during the transition.
+async def transcribe_message(
+    *,
+    client: TelegramClient,
+    repo: Repo,
+    msg: Message,
+    model: str | None = None,
+    language: str | None = None,
+) -> str | None:
+    res = await enrich_audio(msg, client=client, repo=repo, model=model, language=language)
+    return res.content if res else None

@@ -6,26 +6,36 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A local Python CLI that pulls your Telegram chats (DMs, groups, forum
-topics, channels, channel comments), transcribes voice messages, video
-notes and videos via OpenAI, and analyzes the result with GPT. By default
-it starts from Telegram's **unread marker** — the spot where you stopped
-reading — and writes a Markdown report to `reports/` with clickable
-links back to every cited message.
+topics, channels, channel comments) and analyzes them with GPT. Every
+message type flows through the analyzer: **text, voice, video notes,
+videos, photos, PDFs / docs, and external links** — each gets
+transformed into text before the LLM sees it. Voice/video notes are
+transcribed by default; images, docs, video audio, and link summaries
+are opt-in per run (they cost extra). By default `atg` starts from
+Telegram's **unread marker** — the spot where you stopped reading — and
+writes a Markdown report to `reports/` with clickable links back to
+every cited message.
 
 Everything is local. The only network calls are to Telegram (via
-[Telethon](https://docs.telethon.dev)) and OpenAI.
+[Telethon](https://docs.telethon.dev)), OpenAI, and — when link
+enrichment is enabled — the URLs shared in your chats.
 
 ```bash
 # First time
 atg init                      # log in to Telegram, verify OpenAI key
 
 # Most common: interactive wizard — pick a chat, pick a preset, done
-atg analyze                   # pick chat → preset → period → runs
+atg analyze                   # pick chat → preset → (enrich?) → period → runs
 
 # Direct, when you know which chat
-atg analyze @somegroup                  # summary of unread messages
+atg analyze @somegroup                  # summary of unread (voice/videonote auto-transcribed)
 atg analyze @somegroup --console        # render in terminal instead of a file
 atg analyze @somegroup --last-days 7 --preset digest
+
+# Turn on extra enrichments for this run
+atg analyze @somegroup --enrich=image,link         # describe photos + summarize URLs
+atg analyze @somegroup --enrich-all                # every media kind
+atg analyze @somegroup --no-enrich                 # skip everything (text only)
 
 # Dump history to a file, no OpenAI
 atg dump @somegroup -o history.md --last-days 30
@@ -43,8 +53,11 @@ from step 3.
 - **Python 3.11+**
 - **[`uv`](https://github.com/astral-sh/uv)** — install with
   `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- **`ffmpeg`** on PATH — **only** if you want to transcribe videos
-  (voice messages and video notes work without it)
+- **`ffmpeg`** on PATH — **only** if you want to enrich video / video
+  notes (voice messages, images, PDFs, and links work without it). PDF
+  and DOCX extraction, HTTP fetch, HTML parsing, and image-to-base64
+  are handled by `pypdf` / `python-docx` / `httpx` / `beautifulsoup4`,
+  all installed automatically.
 
 ### 2. Clone the repo
 
@@ -155,15 +168,19 @@ the interactive wizard or point it at a chat directly.
 ### The wizard (no chat ref)
 
 ```bash
-atg analyze            # → pick a chat → pick a preset → pick a period → go
+atg analyze            # → pick a chat → pick a preset → pick enrichments → pick a period → go
 atg dump               # → pick a chat → pick a period → dump to file
 atg describe           # → pick a chat → show details / topics
 ```
 
 Navigation: **↑/↓** move, **type** to filter, **Enter** to select,
-**ESC** to go back a step, **Ctrl-C** to quit. The first item in the
-chat list is always *"Run on ALL N unread chats"* — picking it
-batch-processes every chat with unread messages at once.
+**SPACE** to toggle a checkbox (enrichment step), **ESC** to go back a
+step, **Ctrl-C** to quit. The first item in the chat list is always
+*"Run on ALL N unread chats"* — picking it batch-processes every chat
+with unread messages at once.
+
+The enrichment step pre-checks the same defaults as `config.toml`
+(voice + videonote), so for most chats you can just hit Enter.
 
 ### Direct (with a chat ref)
 
@@ -205,6 +222,94 @@ Flags:
 - **`--mark-read`** — after the analysis, advance Telegram's read
   marker to cover every processed message (so the chat looks "read" in
   your other Telegram clients).
+- **`--enrich=<list>`** / **`--enrich-all`** / **`--no-enrich`** —
+  control which media types get turned into text for this run. See
+  [Media enrichment](#media-enrichment) below.
+
+---
+
+## Media enrichment
+
+Telegram chats carry more than text. `atg` turns each non-text message
+into something the LLM can read:
+
+| Kind | What happens | Default |
+|---|---|---|
+| **text** | Used as-is | always on |
+| **voice** (🎤) | Transcribed via OpenAI Audio (`gpt-4o-mini-transcribe`) | **on** |
+| **videonote** (round) | Audio extracted by ffmpeg → transcribed | **on** |
+| **video** | Audio extracted by ffmpeg → transcribed | off |
+| **photo** | Described via vision model (`gpt-4o-mini` by default) — short caption + OCR of any on-image text | off |
+| **doc** (PDF / DOCX / txt / md / code) | Text extracted locally (`pypdf` / `python-docx` / plain read); truncated to `max_doc_chars` | off |
+| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | off |
+
+Everything except voice/videonote is **opt-in** — extra enrichments cost
+extra API calls. Three ways to turn them on:
+
+```bash
+# Per-run, explicit set
+atg analyze @somegroup --enrich=voice,image,link
+
+# Per-run, everything
+atg analyze @somegroup --enrich-all
+
+# Per-run, nothing (not even voice/videonote)
+atg analyze @somegroup --no-enrich
+```
+
+**Precedence** when multiple sources disagree:
+`--no-enrich` → `--enrich-all` → `--enrich=<csv>` (unioned with the
+preset's declared needs) → the preset's `enrich:` frontmatter → the
+`[enrich]` block in `config.toml` (config defaults).
+
+**Per-preset requirements.** A preset can declare enrichments it
+genuinely needs in its frontmatter, e.g. `links.md` already has
+`enrich: [link]` so picking that preset fetches + summarizes every URL
+without you remembering a flag.
+
+**Config defaults** live in `config.toml`:
+
+```toml
+[enrich]
+voice = true
+videonote = true
+video = false
+image = false
+doc = false
+link = false
+vision_model = "gpt-4o-mini"
+# doc_model / link_model default to the preset's filter_model when null.
+max_images_per_run = 50
+max_link_fetches_per_run = 50
+max_doc_bytes = 5000000
+max_doc_chars = 20000
+link_fetch_timeout_sec = 10
+# skip_link_domains = ["twitter.com", "x.com"]
+concurrency = 3
+```
+
+**Caching.** Each enrichment is stored once and reused:
+- Voice / videonote / video / image / doc → keyed by Telegram's stable
+  `document_id` or `photo_id`, so the same media forwarded across 10
+  chats is processed once.
+- External URLs → keyed by a normalized URL hash.
+
+Repeat runs over the same messages cost **$0** once enrichments are
+cached. Toggling flags busts only the analysis cache, not the
+enrichment caches.
+
+**Costs at a glance** (all spend flows into `atg stats`):
+- Voice / videonote / video → Whisper (~$0.006/min).
+- Image → one vision call per unique photo.
+- Doc → free for text/PDF/DOCX extraction (local), then the extract
+  rides inside the analysis prompt like any other message body.
+- Link → one `filter_model` call per unique URL (cheap, `nano`-class).
+
+The orchestrator logs a one-line summary after every run:
+
+```
+enrich: voice: 12 (5 cached); image: 3; link: 7 (2 cached) — $0.13
+```
 
 ---
 
@@ -226,7 +331,10 @@ What kind of analysis do you want? Pick a preset with `--preset`:
 
 Prompts live in [`presets/*.md`](presets/) — edit them, add your own,
 commit them to your fork. Bump `prompt_version` inside the preset file
-to invalidate the cache after you change the prompt.
+to invalidate the cache after you change the prompt. Optional
+frontmatter field `enrich: [link, image]` declares which media
+enrichments this preset assumes the chat will need; they get unioned
+with whatever the user passed via `--enrich`.
 
 ---
 
@@ -289,7 +397,17 @@ atg analyze @somegroup --preset highlights
 atg analyze @somegroup --preset questions
 
 # All external links mentioned in the chat, grouped by topic
+# (links preset auto-enables link enrichment via its frontmatter)
 atg analyze @somegroup --preset links
+
+# Describe photos + read PDFs before summarizing
+atg analyze @somegroup --enrich=image,doc
+
+# Everything enriched — max context, max spend
+atg analyze @somegroup --enrich-all
+
+# Text-only, skip even voice transcription
+atg analyze @somegroup --no-enrich --text-only
 
 # From a specific message onwards (link embeds the msg_id)
 atg analyze "https://t.me/somegroup/10000"
@@ -342,11 +460,19 @@ OpenAI automatically discounts the repeated tokens. `atg stats` shows
 the hit rate; `config.toml` enforces `temperature=0.2` and a fixed
 *system → static → dynamic* message order to maximize it.
 
-### Transcription dedup
+### Enrichment dedup
 
-Each Telegram voice/videonote has a stable `document_id`. One
-transcription per document, even if the voice is forwarded across 10
-chats.
+Every enrichment — transcript, image description, PDF extract, URL
+summary — is stored once and reused across every future run:
+
+- Media (voice, videonote, video, photo, doc) keys by Telegram's
+  stable `document_id` or `photo_id` via the `media_enrichments` table.
+  Forwarded 10×, fetched once.
+- External links key by a normalized URL hash via `link_enrichments`,
+  so a viral article shared across 3 chats is summarized once.
+
+Toggling `--enrich` flags only busts the **analysis** cache (because
+the prompt changes) — the enrichment caches survive and get reused.
 
 ---
 
@@ -381,9 +507,15 @@ local DB, sync on a cron, and analyze by date ranges across many runs.
 atg chats add @somegroup         # subscribe
 atg chats list                   # see what's subscribed
 atg sync                         # fetch new messages for every subscription
-atg transcribe --since 2026-01-01   # transcribe pending voices in a window
 atg chats remove <chat_id>       # unsubscribe
 ```
+
+> The old standalone `atg transcribe` command has been removed —
+> enrichment now runs inside `analyze`. If you want to pre-cache
+> transcripts in bulk before analyzing, just run `atg analyze @chat
+> --full-history --no-cache` (or the preset of your choice); voice /
+> videonote transcription fires by default and populates the cache,
+> and the analysis itself is then a cache hit on every later run.
 
 Forum support: `atg chats add @forum --all-topics` subscribes to every
 topic; `--thread N` subscribes to one.
@@ -397,19 +529,36 @@ subscribes to both the channel and its linked discussion group.
 
 ```
 CLI (Typer)
-   └─ Resolver (Telethon)   ──► SQLite: chats
-   └─ Backfill             ──► SQLite: messages
-   └─ Transcriber (OpenAI) ──► SQLite: media_transcripts
-   └─ Analyzer (OpenAI)    ──► SQLite: analysis_cache, runs, usage_log
+   └─ Resolver (Telethon)        ──► SQLite: chats
+   └─ Backfill                   ──► SQLite: messages
+   └─ Analyzer pipeline
+        ├─ Filter + dedupe
+        ├─ Enrich (per-kind, opt-in)
+        │     ├─ voice/videonote/video → OpenAI Audio        ──► media_enrichments(kind=transcript)
+        │     ├─ photo                 → OpenAI Vision        ──► media_enrichments(kind=image_description)
+        │     ├─ doc                   → pypdf / python-docx  ──► media_enrichments(kind=doc_extract)
+        │     └─ link                  → httpx + bs4 + LLM    ──► link_enrichments
+        ├─ Chunk (token-aware, soft-breaks on idle gaps)
+        └─ Map-reduce (OpenAI)  ──► analysis_cache, analysis_runs, usage_log
 ```
 
 Two SQLite files under `storage/`:
 
 - `session.sqlite` — Telethon session.
-- `data.sqlite` — chats, messages, transcripts, analysis cache, token
-  usage log.
+- `data.sqlite` — chats, messages, enrichments, link summaries,
+  analysis cache, token usage log. A read-only `media_transcripts`
+  view of `media_enrichments(kind='transcript')` is preserved for
+  backward compatibility with external tooling that queried the old
+  table directly.
 
 Reports land in `reports/` (gitignored by default).
+
+**Enrichment stage** runs between filter and chunk: each message's
+media gets turned into text (or skipped, when the kind isn't enabled)
+and the result is attached to the in-memory `Message`. The formatter
+then composes `text → [image: …] → [doc: …] → transcript → ↳ link
+summaries` into one dense line per message, which is what the LLM
+actually reads.
 
 Analyses larger than one context window are automatically **map-reduced**:
 a cheap model (`gpt-5.4-nano`) summarizes chunks in parallel, then the

@@ -16,7 +16,7 @@ from analyzetg.util.logging import setup_logging
 
 app = typer.Typer(
     name="analyzetg",
-    help="Pull Telegram chats/channels, transcribe voice, and analyze via OpenAI — all local.",
+    help="Pull Telegram chats, enrich media (voice/images/docs/links), and analyze via OpenAI — all local.",
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
@@ -311,35 +311,6 @@ def backfill(
     _run(cmd_backfill(chat=chat, from_msg=from_msg, direction=direction))
 
 
-# ========================================================= 5.3 Transcriptions
-
-
-@app.command(rich_help_panel=PANEL_SYNC)
-def transcribe(
-    chat: int | None = typer.Option(None, "--chat"),
-    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
-    until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
-    model: str | None = typer.Option(None, "--model"),
-    max_duration: int | None = typer.Option(None, "--max-duration"),
-    limit: int | None = typer.Option(None, "--limit"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
-) -> None:
-    """Transcribe pending voice / videonote / video messages via OpenAI Audio."""
-    from analyzetg.media.commands import cmd_transcribe
-
-    _run(
-        cmd_transcribe(
-            chat=chat,
-            since=since,
-            until=until,
-            model=model,
-            max_duration=max_duration,
-            limit=limit,
-            dry_run=dry_run,
-        )
-    )
-
-
 # =================================================================== 5.4 Analyze
 
 
@@ -408,6 +379,26 @@ def analyze(
     no_cache: bool = typer.Option(False, "--no-cache"),
     include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
     min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
+    enrich: str | None = typer.Option(
+        None,
+        "--enrich",
+        help=(
+            "Comma-separated media enrichments to enable: "
+            "voice, videonote, video, image, doc, link. "
+            "Overrides config defaults for this run. "
+            "Example: --enrich=voice,image,link"
+        ),
+    ),
+    enrich_all: bool = typer.Option(
+        False,
+        "--enrich-all",
+        help="Enable every enrichment (voice/videonote/video/image/doc/link). Spendy; use for exploratory runs.",
+    ),
+    no_enrich: bool = typer.Option(
+        False,
+        "--no-enrich",
+        help="Disable all enrichments for this run, even those that would default on.",
+    ),
     folder: str | None = typer.Option(
         None,
         "--folder",
@@ -450,6 +441,9 @@ def analyze(
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
+            enrich=enrich,
+            enrich_all=enrich_all,
+            no_enrich=no_enrich,
             all_flat=all_flat,
             all_per_topic=all_per_topic,
             folder=folder,

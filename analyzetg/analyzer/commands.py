@@ -22,8 +22,10 @@ from rich.console import Console
 from rich.table import Table
 
 from analyzetg.analyzer.pipeline import AnalysisOptions, AnalysisResult, run_analysis
+from analyzetg.analyzer.prompts import PRESETS, Preset, load_custom_preset
 from analyzetg.config import get_settings
 from analyzetg.db.repo import Repo, open_repo
+from analyzetg.enrich.base import EnrichOpts
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import (
     UnreadDialog,
@@ -44,6 +46,99 @@ def _parse_ymd(s: str | None) -> datetime | None:
     if not s:
         return None
     return datetime.strptime(s, "%Y-%m-%d")
+
+
+_ENRICH_KINDS = ("voice", "videonote", "video", "image", "doc", "link")
+
+
+def _load_preset_for_commands(preset_name: str, prompt_file: Path | None) -> Preset | None:
+    """Best-effort preset load — returns None if the preset isn't resolvable
+    yet (e.g. `custom` without a prompt_file). Used only to read
+    `enrich_kinds` for opts merging; the pipeline does its own strict load.
+    """
+    if preset_name == "custom":
+        if prompt_file is None:
+            return None
+        try:
+            return load_custom_preset(prompt_file)
+        except Exception:
+            return None
+    return PRESETS.get(preset_name)
+
+
+def build_enrich_opts(
+    *,
+    cli_enrich: str | None,
+    cli_enrich_all: bool,
+    cli_no_enrich: bool,
+    preset: Preset | None,
+) -> EnrichOpts:
+    """Merge CLI flags → preset → config into a single EnrichOpts for a run.
+
+    Precedence (first wins): --no-enrich, --enrich-all, --enrich=<csv> (union
+    with preset.enrich_kinds), preset.enrich_kinds alone, config defaults.
+    """
+    s = get_settings()
+    cfg = s.enrich
+
+    if cli_no_enrich:
+        return EnrichOpts(
+            vision_model=cfg.vision_model,
+            doc_model=cfg.doc_model,
+            link_model=cfg.link_model,
+            max_images_per_run=cfg.max_images_per_run,
+            max_link_fetches_per_run=cfg.max_link_fetches_per_run,
+            max_doc_bytes=cfg.max_doc_bytes,
+            max_doc_chars=cfg.max_doc_chars,
+            link_fetch_timeout_sec=cfg.link_fetch_timeout_sec,
+            skip_link_domains=list(cfg.skip_link_domains),
+            concurrency=cfg.concurrency,
+        )
+
+    if cli_enrich_all:
+        enabled = set(_ENRICH_KINDS)
+    elif cli_enrich:
+        requested = {k.strip() for k in cli_enrich.split(",") if k.strip()}
+        unknown = requested - set(_ENRICH_KINDS)
+        if unknown:
+            raise typer.BadParameter(
+                f"Unknown --enrich kinds: {sorted(unknown)}. Valid: {', '.join(_ENRICH_KINDS)}"
+            )
+        # Union with whatever the preset considers essential.
+        preset_kinds = set(preset.enrich_kinds) if preset else set()
+        enabled = requested | preset_kinds
+    else:
+        # No CLI hint: take config defaults, union with preset's declared needs.
+        enabled = {
+            "voice" if cfg.voice else None,
+            "videonote" if cfg.videonote else None,
+            "video" if cfg.video else None,
+            "image" if cfg.image else None,
+            "doc" if cfg.doc else None,
+            "link" if cfg.link else None,
+        }
+        enabled.discard(None)
+        if preset:
+            enabled |= set(preset.enrich_kinds)
+
+    return EnrichOpts(
+        voice="voice" in enabled,
+        videonote="videonote" in enabled,
+        video="video" in enabled,
+        image="image" in enabled,
+        doc="doc" in enabled,
+        link="link" in enabled,
+        vision_model=cfg.vision_model,
+        doc_model=cfg.doc_model,
+        link_model=cfg.link_model,
+        max_images_per_run=cfg.max_images_per_run,
+        max_link_fetches_per_run=cfg.max_link_fetches_per_run,
+        max_doc_bytes=cfg.max_doc_bytes,
+        max_doc_chars=cfg.max_doc_chars,
+        link_fetch_timeout_sec=cfg.link_fetch_timeout_sec,
+        skip_link_domains=list(cfg.skip_link_domains),
+        concurrency=cfg.concurrency,
+    )
 
 
 def _derive_internal_id(chat_id: int) -> int | None:
@@ -100,12 +195,22 @@ async def cmd_analyze(
     no_cache: bool = False,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
+    enrich: str | None = None,
+    enrich_all: bool = False,
+    no_enrich: bool = False,
     all_flat: bool = False,
     all_per_topic: bool = False,
     folder: str | None = None,
 ) -> None:
     # Default preset — overridden later for single-msg mode.
     effective_preset = preset or "summary"
+    resolved_preset = _load_preset_for_commands(effective_preset, prompt_file)
+    enrich_opts = build_enrich_opts(
+        cli_enrich=enrich,
+        cli_enrich_all=enrich_all,
+        cli_no_enrich=no_enrich,
+        preset=resolved_preset,
+    )
 
     # No ref but --folder → batch-analyze unread chats in that folder; skip wizard.
     if ref is None and folder:
@@ -120,6 +225,7 @@ async def cmd_analyze(
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
+            enrich_opts=enrich_opts,
             folder=folder,
         )
         return
@@ -183,6 +289,14 @@ async def cmd_analyze(
         if msg_id is not None:
             # User didn't specify a preset? Pick the single-msg one rather
             # than forcing a 3-topics/key-messages layout onto one message.
+            single_preset_name = preset or "single_msg"
+            single_preset = _load_preset_for_commands(single_preset_name, prompt_file)
+            single_enrich = build_enrich_opts(
+                cli_enrich=enrich,
+                cli_enrich_all=enrich_all,
+                cli_no_enrich=no_enrich,
+                preset=single_preset,
+            )
             await _run_single_msg(
                 client=client,
                 repo=repo,
@@ -192,7 +306,7 @@ async def cmd_analyze(
                 chat_username=resolved.username,
                 chat_internal_id=_derive_internal_id(chat_id),
                 msg_id=msg_id,
-                preset=preset or "single_msg",
+                preset=single_preset_name,
                 prompt_file=prompt_file,
                 model=model,
                 filter_model=filter_model,
@@ -201,6 +315,7 @@ async def cmd_analyze(
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
+                enrich_opts=single_enrich,
             )
             return
 
@@ -232,6 +347,7 @@ async def cmd_analyze(
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
+                enrich_opts=enrich_opts,
             )
             return
 
@@ -299,6 +415,7 @@ async def cmd_analyze(
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
+            enrich_opts=enrich_opts,
         )
 
 
@@ -321,12 +438,14 @@ async def _run_single_msg(
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
+    enrich_opts: EnrichOpts | None = None,
 ) -> None:
     """Analyze exactly one message.
 
-    Fetches it via Telethon if missing from the DB, auto-transcribes voice /
-    videonote / video when `include_transcripts` is on, then runs the selected
-    preset bounded to that single msg_id.
+    Fetches it via Telethon if missing from the DB, enriches media when
+    `enrich_opts` is set (or falls back to the legacy voice/videonote
+    auto-transcribe when it isn't), then runs the selected preset bounded
+    to that single msg_id.
     """
     from analyzetg.models import Subscription
     from analyzetg.tg.sync import normalize
@@ -353,41 +472,37 @@ async def _run_single_msg(
 
     loaded = existing[0]
 
-    # Auto-transcribe media if missing and user wants transcripts.
-    if (
-        include_transcripts
-        and loaded.media_type in {"voice", "videonote", "video"}
-        and not loaded.transcript
-        and loaded.media_doc_id
-    ):
-        duration = loaded.media_duration or 0
-        console.print(f"[dim]→ Transcribing {loaded.media_type} ({duration}s)...[/]")
-        try:
-            from analyzetg.media.transcribe import transcribe_message
-
-            await transcribe_message(client=client, repo=repo, msg=loaded)
-        except Exception as e:
-            console.print(f"[yellow]Transcription failed: {e}[/]")
-        # Re-read to pick up the transcript we just wrote.
-        refreshed = await repo.iter_messages(
-            chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id
-        )
-        if refreshed:
-            loaded = refreshed[0]
-
-    # Guard: if there's nothing analyzable, bail with a useful message
-    # instead of letting the pipeline silently return "msgs=0".
+    # The enrichment stage inside run_analysis will handle voice/video
+    # transcription, image description, etc. — whatever `enrich_opts` has on.
+    # We still do a pre-flight sanity check: if the message has no text and
+    # no enrichment is enabled that would rescue it, bail with a hint rather
+    # than letting the pipeline silently return "msgs=0".
     has_text = bool((loaded.text or "").strip())
     has_transcript = bool((loaded.transcript or "").strip())
-    if not has_text and not has_transcript:
+    enrich_would_rescue = False
+    if enrich_opts is not None:
+        mt = loaded.media_type
+        enrich_map = {
+            "voice": enrich_opts.voice,
+            "videonote": enrich_opts.videonote,
+            "video": enrich_opts.video,
+            "photo": enrich_opts.image,
+            "doc": enrich_opts.doc,
+        }
+        enrich_would_rescue = bool(enrich_map.get(mt or "", False))
+
+    if not has_text and not has_transcript and not enrich_would_rescue:
         hint = ""
         if loaded.media_type in {"voice", "videonote", "video"}:
             hint = (
                 f" The {loaded.media_type} has no transcript — "
-                "check ffmpeg, OPENAI_API_KEY, or the max_media_duration setting."
+                "enable with --enrich=voice (or --enrich-all), "
+                "or check ffmpeg/OPENAI_API_KEY/max_media_duration."
             )
         elif loaded.media_type == "photo":
-            hint = " It's a photo with no caption; nothing text-analyzable."
+            hint = " It's a photo with no caption; try --enrich=image to describe it."
+        elif loaded.media_type == "doc":
+            hint = " It's a document; try --enrich=doc to extract text."
         console.print(f"[yellow]Nothing to analyze for msg {msg_id}.[/]{hint}")
         raise typer.Exit(0)
 
@@ -402,6 +517,7 @@ async def _run_single_msg(
         min_msg_chars=min_msg_chars,
         min_msg_id=msg_id - 1,
         max_msg_id=msg_id,
+        enrich=enrich_opts,
     )
     # Pass thread_id=None: msg_id is chat-unique; thread filter would risk
     # excluding a forum-topic message we just fetched outside the subscription.
@@ -413,6 +529,7 @@ async def _run_single_msg(
         opts=opts,
         chat_username=chat_username,
         chat_internal_id=chat_internal_id,
+        client=client,
     )
     _print_and_write(result, output=output, title=title, console_out=console_out)
 
@@ -440,6 +557,7 @@ async def _run_single(
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
+    enrich_opts: EnrichOpts | None = None,
 ) -> None:
     """Analyze one chat or one thread. Shared by ref-mode and per-topic loop."""
     start_msg_id = await _determine_start(
@@ -472,6 +590,7 @@ async def _run_single(
         since=since_dt,
         until=until_dt,
         min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
+        enrich=enrich_opts,
     )
     result = await run_analysis(
         repo=repo,
@@ -481,6 +600,7 @@ async def _run_single(
         opts=opts,
         chat_username=chat_username,
         chat_internal_id=chat_internal_id,
+        client=client,
     )
 
     if mark_read and result.msg_count > 0:
@@ -518,6 +638,7 @@ async def _run_forum_per_topic(
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
+    enrich_opts: EnrichOpts | None = None,
 ) -> None:
     """One analysis per topic; reports land in reports/{chat-slug}/."""
     console.print("[dim]→ Listing forum topics...[/]")
@@ -600,6 +721,7 @@ async def _run_forum_per_topic(
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
+                enrich_opts=enrich_opts,
             )
         except typer.Exit:
             raise
@@ -757,6 +879,7 @@ async def _run_no_ref(
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
+    enrich_opts: EnrichOpts | None = None,
     folder: str | None = None,
 ) -> None:
     """No <ref>: list dialogs with unread messages, confirm, analyze each.
@@ -835,6 +958,7 @@ async def _run_no_ref(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 min_msg_id=u.read_inbox_max_id,
+                enrich=enrich_opts,
             )
             result = await run_analysis(
                 repo=repo,
@@ -844,6 +968,7 @@ async def _run_no_ref(
                 opts=opts,
                 chat_username=u.username,
                 chat_internal_id=_derive_internal_id(u.chat_id),
+                client=client,
             )
             per_file = None
             if out_dir:
@@ -984,6 +1109,7 @@ async def run_all_unread_analyze(
     no_cache: bool = False,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
+    enrich_opts: EnrichOpts | None = None,
     folder: str | None = None,
 ) -> None:
     """Public: run the batch-across-all-unread-chats flow (was the old no-ref default).
@@ -1005,6 +1131,7 @@ async def run_all_unread_analyze(
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
+            enrich_opts=enrich_opts,
             folder=folder,
         )
 

@@ -528,13 +528,76 @@ class Repo:
         )
         await self._conn.commit()
 
-    # ---------------------------------------------------------- transcripts
+    # ---------------------------------------------------------- enrichments
 
-    async def get_media_transcript(self, doc_id: int) -> dict[str, Any] | None:
-        cur = await self._conn.execute("SELECT * FROM media_transcripts WHERE doc_id=?", (doc_id,))
+    async def get_media_enrichment(self, doc_id: int, kind: str) -> dict[str, Any] | None:
+        """Fetch a cached enrichment row by (doc_id, kind).
+
+        `kind` is one of: transcript, image_description, doc_extract,
+        video_description. Returns a dict with the full row or None.
+        """
+        cur = await self._conn.execute(
+            "SELECT * FROM media_enrichments WHERE doc_id=? AND kind=?",
+            (doc_id, kind),
+        )
         row = await cur.fetchone()
         await cur.close()
         return dict(row) if row else None
+
+    async def put_media_enrichment(
+        self,
+        doc_id: int,
+        kind: str,
+        content: str,
+        *,
+        model: str | None = None,
+        cost_usd: float | None = None,
+        duration_sec: int | None = None,
+        language: str | None = None,
+        file_sha1: str | None = None,
+        extra_json: str | None = None,
+    ) -> None:
+        """Upsert a content-addressable enrichment. `doc_id` dedups the same
+        media across chats — one photo forwarded 10 times = one row.
+        """
+        await self._conn.execute(
+            """
+            INSERT INTO media_enrichments(doc_id, kind, content, model, cost_usd,
+                duration_sec, language, file_sha1, extra_json, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id, kind) DO UPDATE SET
+                content=excluded.content,
+                model=excluded.model,
+                cost_usd=excluded.cost_usd,
+                duration_sec=COALESCE(excluded.duration_sec, media_enrichments.duration_sec),
+                language=COALESCE(excluded.language, media_enrichments.language),
+                file_sha1=COALESCE(excluded.file_sha1, media_enrichments.file_sha1),
+                extra_json=COALESCE(excluded.extra_json, media_enrichments.extra_json)
+            """,
+            (
+                doc_id,
+                kind,
+                content,
+                model,
+                cost_usd,
+                duration_sec,
+                language,
+                file_sha1,
+                extra_json,
+                _utcnow(),
+            ),
+        )
+        await self._conn.commit()
+
+    # Backward-compat wrappers for the old transcript-only API. New code should
+    # call get_media_enrichment/put_media_enrichment with kind='transcript'.
+
+    async def get_media_transcript(self, doc_id: int) -> dict[str, Any] | None:
+        row = await self.get_media_enrichment(doc_id, "transcript")
+        if row is None:
+            return None
+        # Old call sites expect a `transcript` key, not `content`. Map back.
+        return {**row, "transcript": row.get("content")}
 
     async def put_media_transcript(
         self,
@@ -546,26 +609,48 @@ class Repo:
         cost_usd: float | None,
         file_sha1: str | None = None,
     ) -> None:
+        await self.put_media_enrichment(
+            doc_id,
+            "transcript",
+            transcript,
+            model=model,
+            cost_usd=cost_usd,
+            duration_sec=duration_sec,
+            language=language,
+            file_sha1=file_sha1,
+        )
+
+    async def get_link_enrichment(self, url_hash: str) -> dict[str, Any] | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM link_enrichments WHERE url_hash=?",
+            (url_hash,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def put_link_enrichment(
+        self,
+        url_hash: str,
+        url: str,
+        summary: str,
+        *,
+        title: str | None = None,
+        model: str | None = None,
+        cost_usd: float | None = None,
+    ) -> None:
         await self._conn.execute(
             """
-            INSERT INTO media_transcripts(doc_id, file_sha1, duration_sec, transcript,
-                model, language, cost_usd, created_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(doc_id) DO UPDATE SET
-                transcript=excluded.transcript,
+            INSERT INTO link_enrichments(url_hash, url, summary, title, model, cost_usd, fetched_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url_hash) DO UPDATE SET
+                summary=excluded.summary,
+                title=COALESCE(excluded.title, link_enrichments.title),
                 model=excluded.model,
-                file_sha1=COALESCE(excluded.file_sha1, media_transcripts.file_sha1)
+                cost_usd=excluded.cost_usd,
+                fetched_at=excluded.fetched_at
             """,
-            (
-                doc_id,
-                file_sha1,
-                duration_sec,
-                transcript,
-                model,
-                language,
-                cost_usd,
-                _utcnow(),
-            ),
+            (url_hash, url, summary, title, model, cost_usd, _utcnow()),
         )
         await self._conn.commit()
 

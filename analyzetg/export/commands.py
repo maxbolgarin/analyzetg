@@ -543,7 +543,7 @@ async def _transcribe_pending(
     since_dt: datetime | None,
     until_dt: datetime | None,
 ) -> None:
-    from analyzetg.media.transcribe import transcribe_message
+    from analyzetg.enrich.audio import transcribe_message
 
     pending = await repo.untranscribed_media(chat_id=chat_id, since=since_dt, until=until_dt)
     pending = [m for m in pending if _transcribable(m, settings)]
