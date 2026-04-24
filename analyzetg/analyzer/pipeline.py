@@ -195,6 +195,7 @@ async def run_analysis(
     client=None,
     topic_titles: dict[int, str] | None = None,
     topic_markers: dict[int, int] | None = None,
+    messages: list[Any] | None = None,
 ) -> AnalysisResult:
     """Run the end-to-end analysis for a chat/thread/period.
 
@@ -213,6 +214,12 @@ async def run_analysis(
     — forums carry read state per topic. When this is provided, every
     message is kept only if `msg.msg_id > topic_markers[msg.thread_id]`.
     Leave as None to skip the filter (default for all other paths).
+
+    `messages`: optional pre-prepared list. When supplied, skips the
+    iter_messages / per-topic filter / enrichment / filter_messages /
+    dedupe pipeline — the consumer has already done all of that (e.g.,
+    via `core.pipeline.prepare_chat_run`). When None (default), falls
+    back to the legacy path that does it all internally.
     """
     settings = get_settings()
     preset = _load_preset(opts)
@@ -220,67 +227,78 @@ async def run_analysis(
     final_model = opts.model_override or preset.final_model or settings.openai.chat_model_default
     filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
 
-    # --- Load messages
-    # thread_param (int) is used for DB records; thread_id (Optional) is
-    # forwarded as-is so iter_messages skips the filter entirely on None.
     thread_param = thread_id if thread_id is not None else 0
-    msgs = await repo.iter_messages(
-        chat_id,
-        thread_id=thread_id,
-        since=opts.since,
-        until=opts.until,
-        min_msg_id=opts.min_msg_id,
-        max_msg_id=opts.max_msg_id,
-    )
 
-    # Per-topic unread filter for flat-forum mode. `iter_messages` applies
-    # a single `min_msg_id` floor — fine for a non-forum chat, but forums
-    # track read state per topic. Drop messages already read in their
-    # specific topic. Messages whose thread_id isn't in the map (e.g.
-    # topic deleted between marker fetch and analysis) pass through.
-    if topic_markers:
-        before = len(msgs)
-        msgs = [
-            m
-            for m in msgs
-            if m.thread_id is None
-            or m.thread_id not in topic_markers
-            or m.msg_id > topic_markers[m.thread_id]
-        ]
-        if before != len(msgs):
-            log.info(
-                "analyze.topic_markers.filtered",
-                kept=len(msgs),
-                dropped=before - len(msgs),
-            )
+    if messages is not None:
+        # Consumer (cmd_analyze via prepare_chat_run) has already done
+        # backfill, per-topic filter, enrichment, filter+dedupe. Use
+        # what they gave us verbatim.
+        msgs = messages
+        raw_count = len(messages)
+        enrich_cost = 0.0
+        enrich_summary_str = ""
+        enrich_kinds_used: list[str] = []
+        if opts.enrich is not None and opts.enrich.any_enabled():
+            enrich_kinds_used = list(opts.enrich.kinds_enabled())
+    else:
+        # --- Load messages
+        msgs = await repo.iter_messages(
+            chat_id,
+            thread_id=thread_id,
+            since=opts.since,
+            until=opts.until,
+            min_msg_id=opts.min_msg_id,
+            max_msg_id=opts.max_msg_id,
+        )
 
-    raw_count = len(msgs)
+        # Per-topic unread filter for flat-forum mode. `iter_messages` applies
+        # a single `min_msg_id` floor — fine for a non-forum chat, but forums
+        # track read state per topic. Drop messages already read in their
+        # specific topic. Messages whose thread_id isn't in the map (e.g.
+        # topic deleted between marker fetch and analysis) pass through.
+        if topic_markers:
+            before = len(msgs)
+            msgs = [
+                m
+                for m in msgs
+                if m.thread_id is None
+                or m.thread_id not in topic_markers
+                or m.msg_id > topic_markers[m.thread_id]
+            ]
+            if before != len(msgs):
+                log.info(
+                    "analyze.topic_markers.filtered",
+                    kept=len(msgs),
+                    dropped=before - len(msgs),
+                )
 
-    # --- Enrichment (voice → text, image → description, etc.) runs BEFORE
-    # filtering so enrichment can rescue a photo-only or voice-only message
-    # from being dropped by min_msg_chars / text_only.
-    enrich_opts = opts.enrich
-    enrich_cost = 0.0
-    enrich_summary_str = ""
-    enrich_kinds_used: list[str] = []
-    if enrich_opts is not None and enrich_opts.any_enabled() and msgs:
-        stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
-        enrich_summary_str = stats.summary()
-        enrich_cost = float(stats.total_cost_usd)
-        enrich_kinds_used = list(enrich_opts.kinds_enabled())
-        if enrich_summary_str:
-            log.info("analyze.enrich", summary=enrich_summary_str)
+        raw_count = len(msgs)
 
-    f_opts = FilterOpts(
-        min_msg_chars=opts.min_msg_chars
-        if opts.min_msg_chars is not None
-        else settings.analyze.min_msg_chars,
-        include_transcripts=opts.include_transcripts,
-        text_only=not opts.include_transcripts,
-    )
-    msgs = filter_messages(msgs, f_opts)
-    if opts.dedupe_forwards if opts.dedupe_forwards is not None else settings.analyze.dedupe_forwards:
-        msgs = dedupe(msgs)
+        # --- Enrichment (voice → text, image → description, etc.) runs BEFORE
+        # filtering so enrichment can rescue a photo-only or voice-only message
+        # from being dropped by min_msg_chars / text_only.
+        enrich_opts = opts.enrich
+        enrich_cost = 0.0
+        enrich_summary_str = ""
+        enrich_kinds_used: list[str] = []
+        if enrich_opts is not None and enrich_opts.any_enabled() and msgs:
+            stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
+            enrich_summary_str = stats.summary()
+            enrich_cost = float(stats.total_cost_usd)
+            enrich_kinds_used = list(enrich_opts.kinds_enabled())
+            if enrich_summary_str:
+                log.info("analyze.enrich", summary=enrich_summary_str)
+
+        f_opts = FilterOpts(
+            min_msg_chars=opts.min_msg_chars
+            if opts.min_msg_chars is not None
+            else settings.analyze.min_msg_chars,
+            include_transcripts=opts.include_transcripts,
+            text_only=not opts.include_transcripts,
+        )
+        msgs = filter_messages(msgs, f_opts)
+        if opts.dedupe_forwards if opts.dedupe_forwards is not None else settings.analyze.dedupe_forwards:
+            msgs = dedupe(msgs)
 
     if not msgs:
         return AnalysisResult(
