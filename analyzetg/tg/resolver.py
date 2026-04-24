@@ -122,7 +122,16 @@ async def resolve(
         except ValueError as e:
             # Telethon raises ValueError("No user has ...") on UsernameNotOccupied.
             # Fall through to fuzzy: the ref might be a dialog title, not a @username.
-            log.info("resolve.username_miss", username=parsed.username, err=str(e)[:80])
+            # Visible warning: without this, fuzzy could silently return a
+            # different chat whose title happens to match the query — and the
+            # user wouldn't know their @username lookup failed.
+            log.warning("resolve.username_miss", username=parsed.username, err=str(e)[:80])
+            from rich.console import Console
+
+            Console().print(
+                f"[yellow]⚠ @{parsed.username} not found on Telegram;[/] "
+                "searching your dialogs by fuzzy title match instead."
+            )
 
     # Fuzzy / fallback: search iter_dialogs by title+username
     return await _fuzzy_resolve(

@@ -150,11 +150,14 @@ async def _call_cached(
 ) -> tuple[str, float, bool, bool]:
     """Return (text, cost, was_cache_hit, truncated). Writes cache and usage log on miss.
 
-    `truncated` is only reliable for cache misses — cached rows predate the
-    flag and are assumed not-truncated (re-run with --no-cache if in doubt)."""
+    A hit whose row reports `truncated=1` is treated as a miss and re-run —
+    the invariant in `cache_put` never stores truncated results today, but
+    keeping the guard on the read side protects against any future write path
+    that bypasses it (and surfaces legacy truncated rows that slipped in
+    before the invariant existed)."""
     if use_cache:
         hit = await repo.cache_get(bhash)
-        if hit:
+        if hit and not hit.get("truncated"):
             log.debug("cache.hit", batch=bhash[:10])
             return hit["result"], 0.0, True, False
     messages = build_messages(system, static_ctx, dynamic)

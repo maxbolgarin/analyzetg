@@ -170,8 +170,13 @@ class InteractiveAnswers:
     custom_from_msg: str | None = None
 
 
-def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
-    """Turn interactive answers into `cmd_analyze` kwargs. Pure."""
+def _build_period_kwargs(answers: InteractiveAnswers, *, include_from_msg: bool) -> dict[str, Any]:
+    """Map the wizard's `period` choice to CLI kwargs.
+
+    `include_from_msg=True` for analyze (which supports `--from-msg`),
+    `False` for dump (which does not). Extracted so analyze and dump
+    don't drift on period semantics.
+    """
     last_days: int | None = None
     full_history = False
     since: str | None = None
@@ -186,11 +191,25 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
     elif answers.period == "custom":
         since = answers.custom_since
         until = answers.custom_until
-    elif answers.period == "from_msg":
+    elif answers.period == "from_msg" and include_from_msg:
         from_msg = answers.custom_from_msg
+    out: dict[str, Any] = {
+        "last_days": last_days,
+        "full_history": full_history,
+        "since": since,
+        "until": until,
+    }
+    if include_from_msg:
+        out["from_msg"] = from_msg
+    return out
 
-    # Enrichment flags: None (wizard was skipped / defaults) vs empty list
-    # (user explicitly disabled all) vs populated list (explicit set).
+
+def _build_enrich_kwargs(answers: InteractiveAnswers) -> dict[str, Any]:
+    """Translate wizard's enrich_kinds tri-state into CLI flags.
+
+    None (wizard skipped / defaults) → pass nothing, cmd_analyze/dump
+    will use config. [] → no_enrich=True. Populated list → --enrich=<csv>.
+    """
     enrich_csv: str | None = None
     no_enrich = False
     if answers.enrich_kinds is not None:
@@ -198,15 +217,15 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
             no_enrich = True
         else:
             enrich_csv = ",".join(answers.enrich_kinds)
+    return {"enrich": enrich_csv, "enrich_all": False, "no_enrich": no_enrich}
 
+
+def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
+    """Turn interactive answers into `cmd_analyze` kwargs. Pure."""
     return {
         "ref": answers.chat_ref,
         "thread": answers.thread_id,
-        "from_msg": from_msg,
-        "full_history": full_history,
-        "since": since,
-        "until": until,
-        "last_days": last_days,
+        **_build_period_kwargs(answers, include_from_msg=True),
         "preset": answers.preset,
         "prompt_file": None,
         "model": None,
@@ -218,9 +237,7 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
         "no_cache": False,
         "include_transcripts": True,
         "min_msg_chars": None,
-        "enrich": enrich_csv,
-        "enrich_all": False,
-        "no_enrich": no_enrich,
+        **_build_enrich_kwargs(answers),
         # The wizard already asked "Run it?" at the confirm step via
         # questionary. Passing yes=True here prevents cmd_analyze from
         # double-confirming via typer.confirm — that second prompt is
@@ -236,39 +253,11 @@ def build_dump_args(
     answers: InteractiveAnswers, *, fmt: str, with_transcribe: bool, include_transcripts: bool
 ) -> dict[str, Any]:
     """Turn interactive answers into `cmd_dump` kwargs. Pure."""
-    last_days: int | None = None
-    full_history = False
-    since: str | None = None
-    until: str | None = None
-    if answers.period == "last7":
-        last_days = 7
-    elif answers.period == "last30":
-        last_days = 30
-    elif answers.period == "full":
-        full_history = True
-    elif answers.period == "custom":
-        since = answers.custom_since
-        until = answers.custom_until
-
-    # Enrichment: same tri-state as build_analyze_args. None (wizard
-    # skipped) → config defaults; [] → explicit "off"; populated list
-    # → explicit "on set".
-    enrich_csv: str | None = None
-    no_enrich = False
-    if answers.enrich_kinds is not None:
-        if not answers.enrich_kinds:
-            no_enrich = True
-        else:
-            enrich_csv = ",".join(answers.enrich_kinds)
-
     return {
         "ref": answers.chat_ref,
         "output": answers.output_path,
         "fmt": fmt,
-        "since": since,
-        "until": until,
-        "last_days": last_days,
-        "full_history": full_history,
+        **_build_period_kwargs(answers, include_from_msg=False),
         "thread": answers.thread_id,
         "from_msg": None,
         "join": False,
@@ -279,9 +268,7 @@ def build_dump_args(
         "mark_read": answers.mark_read,
         "all_flat": answers.forum_all_flat,
         "all_per_topic": answers.forum_all_per_topic,
-        "enrich": enrich_csv,
-        "enrich_all": False,
-        "no_enrich": no_enrich,
+        **_build_enrich_kwargs(answers),
     }
 
 

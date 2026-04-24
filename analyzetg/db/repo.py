@@ -49,7 +49,15 @@ class Repo:
         await conn.execute("PRAGMA foreign_keys=ON")
         await conn.execute("PRAGMA synchronous=NORMAL")
         repo = cls(conn, p)
-        await repo._apply_migrations()
+        try:
+            await repo._apply_migrations()
+        except BaseException:
+            # Don't leave the aiosqlite worker thread dangling if migrations
+            # bail out (e.g. prefix collision, malformed SQL). Without this
+            # the test harness complains about "Event loop is closed" when
+            # the thread tries to signal a future after the loop ends.
+            await conn.close()
+            raise
         return repo
 
     async def close(self) -> None:
@@ -63,7 +71,17 @@ class Repo:
         cur = await self._conn.execute("SELECT name FROM _migrations")
         applied = {row["name"] async for row in cur}
         await cur.close()
-        for script in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        scripts = sorted(MIGRATIONS_DIR.glob("*.sql"))
+        prefixes: dict[str, str] = {}
+        for script in scripts:
+            prefix = script.name.split("_", 1)[0]
+            if prefix in prefixes:
+                raise RuntimeError(
+                    f"Migration prefix collision: {prefixes[prefix]!r} and {script.name!r} "
+                    "share the same ordering prefix; rename one so sort order is unambiguous."
+                )
+            prefixes[prefix] = script.name
+        for script in scripts:
             if script.name in applied:
                 continue
             sql = script.read_text(encoding="utf-8")
@@ -697,12 +715,14 @@ class Repo:
         cached_tokens: int | None,
         completion_tokens: int | None,
         cost_usd: float | None,
+        truncated: bool = False,
     ) -> None:
         await self._conn.execute(
             """
             INSERT OR REPLACE INTO analysis_cache(batch_hash, preset, model, prompt_version,
-                result, prompt_tokens, cached_tokens, completion_tokens, cost_usd, created_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                result, prompt_tokens, cached_tokens, completion_tokens, cost_usd,
+                truncated, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_hash,
@@ -714,6 +734,7 @@ class Repo:
                 cached_tokens,
                 completion_tokens,
                 cost_usd,
+                1 if truncated else 0,
                 _utcnow(),
             ),
         )
@@ -922,9 +943,14 @@ class Repo:
             "kind": "kind",
         }
         col = group_cols.get(group_by, "model")
+        # `unpriced_calls` counts rows whose `cost_usd` is NULL — that
+        # happens when a model isn't listed in the pricing table. Without
+        # this, SUM(cost_usd) silently under-reports spend for every
+        # unknown-model row and the user has no way to tell.
         sql = f"""
             SELECT {col} AS bucket,
                    COUNT(*) AS calls,
+                   SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
                    COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,

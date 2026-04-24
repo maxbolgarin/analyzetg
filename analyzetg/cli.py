@@ -4,7 +4,7 @@ declare the final signatures so UX is stable from day one."""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -984,11 +984,11 @@ def parse_ymd(s: str | None) -> datetime | None:
 def compute_period(
     since: str | None, until: str | None, last_days: int | None
 ) -> tuple[datetime | None, datetime | None]:
-    if last_days:
-        until_dt = datetime.now()
-        since_dt = until_dt - timedelta(days=last_days)
-        return since_dt, until_dt
-    return parse_ymd(since), parse_ymd(until)
+    # Delegate to the canonical implementation to keep UTC-awareness
+    # consistent with how `messages.date` is stored (ISO-UTC strings).
+    from analyzetg.core.paths import compute_window
+
+    return compute_window(since, until, last_days)
 
 
 _NEG_NUM_RE = __import__("re").compile(r"^-\d+$")

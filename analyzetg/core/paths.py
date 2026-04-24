@@ -8,7 +8,7 @@ and media/commands.py. Consolidated here so a future slug rule change
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Permissive regex: keep Unicode letters/digits/underscore/hyphen, collapse
@@ -83,16 +83,29 @@ def derive_internal_id(chat_id: int) -> int | None:
 
 
 def parse_ymd(s: str | None) -> datetime | None:
+    """Parse a YYYY-MM-DD string as UTC midnight.
+
+    Returning UTC-aware datetimes keeps comparisons consistent with
+    stored message timestamps, which are ISO-formatted UTC strings.
+    A naive datetime here would sort wrong against those stored values.
+    """
     if not s:
         return None
-    return datetime.strptime(s, "%Y-%m-%d")
+    return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
 
 
 def compute_window(
     since: str | None, until: str | None, last_days: int | None
 ) -> tuple[datetime | None, datetime | None]:
+    """Return a UTC-aware (since, until) window.
+
+    `--last-days N` → (now-UTC - N days, now-UTC); `--since/--until`
+    are parsed as UTC-midnight by `parse_ymd`. Telethon's
+    `offset_date` and SQLite `messages.date` column are both UTC, so
+    staying UTC end-to-end avoids off-by-timezone window edges.
+    """
     if last_days:
-        until_dt = datetime.now()
+        until_dt = datetime.now(UTC)
         return until_dt - timedelta(days=last_days), until_dt
     return parse_ymd(since), parse_ymd(until)
 

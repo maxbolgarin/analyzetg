@@ -52,6 +52,12 @@ CREATE INDEX IF NOT EXISTS idx_msg_has_media
 CREATE INDEX IF NOT EXISTS idx_msg_untranscr
     ON messages(chat_id, media_doc_id)
     WHERE media_doc_id IS NOT NULL AND transcript IS NULL;
+-- Companion index for untranscribed_media() queries that DON'T pin a chat_id
+-- (e.g. `transcribe` across the whole DB). Without this, the scan skips the
+-- chat_id-leading partial index above and degrades to a full table scan.
+CREATE INDEX IF NOT EXISTS idx_msg_untranscr_all
+    ON messages(date)
+    WHERE media_doc_id IS NOT NULL AND transcript IS NULL AND media_type IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sync_state (
     chat_id        INTEGER NOT NULL,
@@ -104,6 +110,7 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
     cached_tokens     INTEGER,
     completion_tokens INTEGER,
     cost_usd          REAL,
+    truncated         INTEGER NOT NULL DEFAULT 0,
     created_at        TIMESTAMP
 );
 

@@ -77,6 +77,25 @@ def _coerce_list(v: str) -> list[str]:
     return [p for p in parts if p]
 
 
+_PIPELINE_PLACEHOLDERS = ("period", "title", "msg_count", "messages")
+
+
+def _validate_user_template(user_template: str, *, path: Path) -> None:
+    """Catch preset typos like `{periiod}` at load time rather than mid-run.
+
+    `.format(**kwargs)` raises a cryptic KeyError deep inside the pipeline;
+    surfacing the bad placeholder at load time (with the file path) saves
+    the user the debugging round-trip.
+    """
+    try:
+        user_template.format(period="", title="", msg_count=0, messages="")
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(
+            f"Preset {path}: user template references unknown placeholder {e!s}. "
+            f"Only {_PIPELINE_PLACEHOLDERS} are provided by the pipeline."
+        ) from e
+
+
 def _load_preset_file(path: Path) -> Preset:
     text = path.read_text(encoding="utf-8")
     meta, body = _parse_frontmatter(text)
@@ -94,7 +113,18 @@ def _load_preset_file(path: Path) -> Preset:
         if key not in user_template:
             user_template = user_template + "\n" + key
 
+    _validate_user_template(user_template, path=path)
+
     name = meta.get("name") or path.stem
+    # Keep `name` authoritative for CLI lookups, but reject a mismatch at
+    # load time so a rename (`presets/summary.md` with `name: digest` in
+    # frontmatter) can't silently make `atg analyze --preset summary`
+    # resolve to the wrong preset.
+    if name != path.stem:
+        raise RuntimeError(
+            f"Preset {path}: frontmatter name {name!r} does not match filename stem "
+            f"{path.stem!r}. Rename the file or update the name field so the two match."
+        )
     return Preset(
         name=name,
         prompt_version=meta.get("prompt_version", "v1"),
@@ -282,6 +312,8 @@ def load_custom_preset(prompt_file: Path) -> Preset:
     for key in ("{period}", "{title}", "{msg_count}", "{messages}"):
         if key not in user_instr:
             user_instr += "\n" + key
+
+    _validate_user_template(user_instr, path=prompt_file)
 
     version = meta.get("prompt_version") or "custom-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
     return Preset(

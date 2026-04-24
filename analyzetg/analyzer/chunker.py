@@ -68,7 +68,17 @@ def build_chunks(
     context = model_context_window(model)
     overhead = count_tokens(system_prompt, model) + count_tokens(user_overhead, model)
     budget = context - overhead - output_budget - safety_margin
-    budget = max(500, budget)  # avoid degenerate zero budgets; caller should pick bigger model
+    if budget < 2000:
+        # Silently clamping to 500 here used to produce 200+ pathological
+        # tiny chunks and a runaway bill. Surface the misconfiguration so
+        # the user can either lower output_budget_tokens or switch to a
+        # bigger-context model rather than discover it from the invoice.
+        raise ValueError(
+            f"Chunk token budget too small ({budget}) for model {model!r} "
+            f"(context={context}, overhead={overhead}, output_budget={output_budget}, "
+            f"safety_margin={safety_margin}). "
+            "Reduce preset.output_budget_tokens or pick a larger-context model."
+        )
 
     chunks: list[Chunk] = []
     current = Chunk()

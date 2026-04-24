@@ -186,6 +186,34 @@ async def cmd_analyze(
 
     # No ref but --folder → batch-analyze unread chats in that folder; skip wizard.
     if ref is None and folder:
+        # Batch mode is unread-only today. Reject period flags explicitly —
+        # silently analyzing unread when the user asked for --full-history
+        # (or --since/--until/--last-days/--from-msg) would both hide data
+        # and waste LLM spend. Pointing them at single-chat mode is cheap.
+        rejected = []
+        if full_history:
+            rejected.append("--full-history")
+        if since:
+            rejected.append("--since")
+        if until:
+            rejected.append("--until")
+        if last_days is not None:
+            rejected.append("--last-days")
+        if from_msg:
+            rejected.append("--from-msg")
+        if rejected:
+            raise typer.BadParameter(
+                f"--folder is unread-only and does not support {', '.join(rejected)}. "
+                "Run per-chat with `atg analyze <ref> <flag>` for a specific window."
+            )
+        # --output must be a directory (or absent) — we write one file per chat.
+        # Validate upfront so a typo like `-o report.md` doesn't surface only
+        # after Telegram has been hit for every chat in the batch.
+        if output and output.suffix and not (output.exists() and output.is_dir()):
+            raise typer.BadParameter(
+                f"--output {output} looks like a file but --folder batch needs a directory "
+                "(one report per chat). Pass a directory path or drop --output."
+            )
         await run_all_unread_analyze(
             preset=effective_preset,
             prompt_file=prompt_file,
@@ -193,7 +221,7 @@ async def cmd_analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
-            mark_read=bool(mark_read),
+            mark_read=mark_read,
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -221,6 +249,21 @@ async def cmd_analyze(
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
     msg_id = _parse_from_msg(msg)
+
+    # --all-flat is documented as "needs an explicit period flag". Enforce
+    # that contract at argument parse time so the code path behaves the
+    # same regardless of per-topic read-marker state (fresh account vs.
+    # long-running user). msg_id is treated as a period here too —
+    # single-msg mode is its own world and exits below.
+    if (
+        all_flat
+        and msg_id is None
+        and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
+    ):
+        raise typer.BadParameter(
+            "--all-flat requires an explicit period: "
+            "--full-history, --last-days N, --since/--until, or --from-msg."
+        )
 
     # If --msg is a full link with a chat identifier, it's authoritative —
     # use it as the ref so an ambiguous/stale text ref can't misdirect us.
@@ -634,7 +677,14 @@ async def _run_single(
     )
 
     if prepared.mark_read_fn and result.msg_count > 0:
-        await prepared.mark_read_fn()
+        # Report is already on disk; a mark-read failure (permission denied,
+        # network blip) should warn rather than crash with a traceback the
+        # user can't act on.
+        try:
+            await prepared.mark_read_fn()
+        except Exception as e:
+            log.warning("analyze.mark_read_failed", chat_id=chat_id, err=str(e)[:200])
+            console.print(f"[yellow]⚠ Could not mark as read:[/] {e}")
 
 
 async def _run_forum_per_topic(
@@ -826,7 +876,7 @@ async def _run_no_ref(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
-    mark_read: bool,
+    mark_read: bool | None,
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
@@ -839,11 +889,27 @@ async def _run_no_ref(
     Delegates resolve/backfill/enrich to prepare_all_unread_runs and
     only adds the LLM stage + per-chat report write. Folder filtering
     flows through to the iterator unchanged.
+
+    `mark_read=None` is the tri-state "not specified" — prompt the user
+    once upfront so a batch of 30 chats doesn't silently stay unread.
     """
     from analyzetg.core.pipeline import prepare_all_unread_runs
     from analyzetg.enrich.base import EnrichOpts as _EnrichOpts
 
     effective_enrich = enrich_opts if enrich_opts is not None else _EnrichOpts()
+
+    # Tri-state default: ask once (unless --yes was passed → keep unread).
+    mark_read_effective: bool
+    if mark_read is None:
+        if yes or not sys.stdin.isatty():
+            mark_read_effective = False
+        else:
+            mark_read_effective = typer.confirm(
+                "Mark messages as read in Telegram after each chat is analyzed?",
+                default=False,
+            )
+    else:
+        mark_read_effective = mark_read
 
     if console_out:
         out_dir: Path | None = None
@@ -852,6 +918,9 @@ async def _run_no_ref(
         out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
+    successes = 0
+    failures: list[tuple[int, str | None, str]] = []
+
     async for prepared in prepare_all_unread_runs(
         client=client,
         repo=repo,
@@ -859,7 +928,7 @@ async def _run_no_ref(
         enrich_opts=effective_enrich,
         include_transcripts=include_transcripts,
         min_msg_chars=min_msg_chars,
-        mark_read=mark_read,
+        mark_read=mark_read_effective,
         folder=folder,
         yes=yes,
     ):
@@ -897,10 +966,34 @@ async def _run_no_ref(
                 console_out=console_out,
             )
             if prepared.mark_read_fn and result.msg_count > 0:
-                await prepared.mark_read_fn()
+                try:
+                    await prepared.mark_read_fn()
+                except Exception as e:
+                    # Report was already saved — a marking failure should warn,
+                    # not crash the remainder of the batch.
+                    log.warning(
+                        "analyze.no_ref.mark_read_failed",
+                        chat_id=prepared.chat_id,
+                        err=str(e)[:200],
+                    )
+                    console.print(f"[yellow]⚠ Could not mark as read:[/] {e}")
+            successes += 1
         except Exception as e:
             log.error("analyze.no_ref.chat_error", chat_id=prepared.chat_id, err=str(e)[:200])
             console.print(f"[red]Failed:[/] {e}")
+            failures.append((prepared.chat_id, prepared.chat_title, str(e)[:200]))
+
+    total = successes + len(failures)
+    if total == 0:
+        return
+    if failures:
+        console.print(
+            f"\n[bold]Batch complete:[/] {successes}/{total} chats succeeded, [red]{len(failures)} failed[/]."
+        )
+        for cid, ctitle, err in failures:
+            console.print(f"  [red]×[/] {ctitle or cid}: {err}")
+        raise typer.Exit(1)
+    console.print(f"\n[bold green]Batch complete:[/] {successes}/{total} chats succeeded.")
 
 
 def _resolve_output_dir(output: Path | None, n_chats: int) -> Path | None:
@@ -1121,7 +1214,7 @@ async def run_all_unread_analyze(
     filter_model: str | None = None,
     output: Path | None = None,
     console_out: bool = False,
-    mark_read: bool = False,
+    mark_read: bool | None = False,
     no_cache: bool = False,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
@@ -1163,15 +1256,22 @@ async def cmd_stats(since: str | None, by: str) -> None:
         rows = await repo.stats_by(group_by=by, since=since_dt)
         hit_rate = await repo.cache_hit_rate(since=since_dt)
         total_cost = sum(float(r["cost_usd"] or 0) for r in rows)
+        total_unpriced = sum(int(r.get("unpriced_calls") or 0) for r in rows)
 
         t = Table(title=f"Usage (by {by}){' since ' + since if since else ''}")
         cols = ("bucket", "calls", "prompt", "cached", "completion", "audio_s", "cost_usd")
         for c in cols:
             t.add_column(c)
         for r in rows:
+            # Mark buckets where some calls weren't priced — user knows the
+            # `cost_usd` column under-reports for that row.
+            unpriced = int(r.get("unpriced_calls") or 0)
+            calls_cell = str(r["calls"])
+            if unpriced:
+                calls_cell = f"{r['calls']} ([yellow]{unpriced} unpriced[/])"
             t.add_row(
                 str(r["bucket"]) if r["bucket"] is not None else "-",
-                str(r["calls"]),
+                calls_cell,
                 str(r["prompt_tokens"] or 0),
                 str(r["cached_tokens"] or 0),
                 str(r["completion_tokens"] or 0),
@@ -1180,4 +1280,9 @@ async def cmd_stats(since: str | None, by: str) -> None:
             )
         console.print(t)
         console.print(f"[bold]Total cost:[/] ${total_cost:.4f}")
+        if total_unpriced:
+            console.print(
+                f"[yellow]⚠ {total_unpriced} call(s) had no pricing entry — total cost under-reports.[/] "
+                "Add the model to [cyan][pricing.chat][/] or [cyan][pricing.audio][/] in config.toml."
+            )
         console.print(f"[bold]Cache hit rate:[/] {hit_rate:.1%}")
