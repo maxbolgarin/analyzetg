@@ -324,3 +324,215 @@ async def prepare_chat_run(
         repo=repo,
         settings=settings,
     )
+
+
+async def prepare_chat_runs_per_topic(
+    *,
+    client: Any,
+    repo: Any,
+    settings: Any,
+    chat_id: int,
+    chat_title: str | None,
+    enrich_opts: EnrichOpts,
+    chat_username: str | None = None,
+    chat_internal_id: int | None = None,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
+    from_msg_id: int | None = None,
+    full_history: bool = False,
+    include_transcripts: bool = True,
+    min_msg_chars: int | None = None,
+    mark_read: bool = False,
+    yes: bool = False,
+):
+    """Yield one PreparedRun per forum topic.
+
+    Use `async for prepared in prepare_chat_runs_per_topic(...)`. The
+    iterator defers each topic's backfill+enrichment until the
+    consumer pulls it — keeps memory bounded for big forums.
+    """
+    from analyzetg.tg.topics import list_forum_topics
+    from analyzetg.util.logging import get_logger
+
+    log = get_logger(__name__)
+
+    console.print("[dim]→ Listing forum topics...[/]")
+    topics = await list_forum_topics(client, chat_id)
+    explicit_period = bool(since_dt or until_dt or from_msg_id is not None or full_history)
+    targets = topics if explicit_period else [t for t in topics if t.unread_count > 0]
+    if not targets:
+        console.print(
+            "[yellow]No topics with unread messages.[/] "
+            "Pass --last-days / --full-history to analyze everything anyway."
+        )
+        return
+
+    if not yes:
+        total_unread = sum(t.unread_count for t in targets)
+        if not typer.confirm(
+            f"Process {len(targets)} topic(s)"
+            + (f" with {total_unread} unread" if not explicit_period else "")
+            + "?",
+            default=True,
+        ):
+            console.print("[dim]Aborted.[/]")
+            return
+
+    for t in targets:
+        topic_title_display = f"{chat_title or chat_id} / {t.title}"
+        console.print(
+            f"\n[bold cyan]>>[/] {t.title} (topic_id={t.topic_id}"
+            + (f", {t.unread_count} unread" if not explicit_period else "")
+            + ")"
+        )
+        topic_from_msg = from_msg_id
+        topic_full = full_history
+        if not explicit_period:
+            # Per-topic unread anchor: Telegram's topic-level marker is
+            # "last read msg_id". Add 1 to get first-unread.
+            topic_from_msg = t.read_inbox_max_id + 1 if t.read_inbox_max_id else None
+            if topic_from_msg is None:
+                topic_full = True
+
+        try:
+            prepared = await prepare_chat_run(
+                client=client,
+                repo=repo,
+                settings=settings,
+                chat_id=chat_id,
+                thread_id=t.topic_id,
+                chat_title=topic_title_display,
+                thread_title=t.title,
+                chat_username=chat_username,
+                chat_internal_id=chat_internal_id,
+                since_dt=since_dt,
+                until_dt=until_dt,
+                from_msg_id=topic_from_msg,
+                full_history=topic_full,
+                enrich_opts=enrich_opts,
+                include_transcripts=include_transcripts,
+                min_msg_chars=min_msg_chars,
+                topic_titles=None,
+                topic_markers=None,
+                mark_read=mark_read,
+            )
+            yield prepared
+        except typer.Exit:
+            raise
+        except Exception as e:
+            log.error(
+                "prepare_chat_runs_per_topic.error",
+                chat_id=chat_id,
+                topic_id=t.topic_id,
+                err=str(e)[:300],
+            )
+            console.print(f"[red]Topic {t.title} failed:[/] {e}")
+
+
+async def prepare_all_unread_runs(
+    *,
+    client: Any,
+    repo: Any,
+    settings: Any,
+    enrich_opts: EnrichOpts,
+    include_transcripts: bool = True,
+    min_msg_chars: int | None = None,
+    mark_read: bool = False,
+    folder: str | None = None,
+    yes: bool = False,
+):
+    """Yield one PreparedRun per chat with unread messages.
+
+    Analog of today's `_run_no_ref`. Folder-scoped when `folder` is set
+    (matches Telegram folder title case-insensitively).
+    """
+    from analyzetg.tg.dialogs import list_unread_dialogs
+    from analyzetg.util.logging import get_logger
+
+    log = get_logger(__name__)
+
+    unread = await list_unread_dialogs(client)
+    if not unread:
+        console.print("[yellow]No dialogs with unread messages.[/]")
+        return
+
+    if folder:
+        from analyzetg.tg.folders import list_folders, resolve_folder
+
+        folders = await list_folders(client)
+        matched = resolve_folder(folder, folders)
+        if matched is None:
+            titles = ", ".join(f"'{f.title}'" for f in folders) or "(none)"
+            console.print(f"[red]No folder matching[/] '{folder}'. Available folders: {titles}")
+            raise typer.Exit(2)
+        ids = matched.include_chat_ids
+        if not ids and matched.has_rule_based_inclusion:
+            console.print(
+                f"[yellow]Folder '{matched.title}' uses category rules "
+                "(contacts/groups/bots/etc.) without explicit chats — "
+                "rule expansion isn't supported.[/]"
+            )
+            raise typer.Exit(2)
+        before = len(unread)
+        unread = [d for d in unread if d.chat_id in ids]
+        console.print(
+            f"[dim]→ Folder[/] [bold]{matched.title}[/]"
+            f"{' ' + matched.emoticon if matched.emoticon else ''}"
+            f" [dim]— {len(unread)}/{before} unread chats match[/]"
+        )
+        if not unread:
+            console.print("[yellow]No chats in this folder have unread messages.[/]")
+            return
+
+    if not yes:
+        total = sum(d.unread_count for d in unread)
+        if not typer.confirm(
+            f"Process {len(unread)} chat(s) with {total} total unread message(s)?",
+            default=False,
+        ):
+            console.print("[dim]Aborted.[/]")
+            return
+
+    for u in unread:
+        console.print(f"\n[bold cyan]>>[/] {u.title or u.chat_id} ({u.unread_count} unread)")
+        try:
+            # Derive internal_id for t.me/c/ link template.
+            internal_id = None
+            if u.chat_id < 0:
+                abs_id = abs(u.chat_id)
+                if abs_id > 1_000_000_000_000:
+                    internal_id = abs_id - 1_000_000_000_000
+
+            # Dialog read_inbox_max_id is "last read msg_id"; +1 gets us
+            # to first-unread. prepare_chat_run subtracts one inside
+            # _determine_start, so the net is iter_messages with
+            # min_msg_id = read_inbox_max_id (exclusive) = correct.
+            from_msg = u.read_inbox_max_id + 1 if u.read_inbox_max_id else None
+
+            prepared = await prepare_chat_run(
+                client=client,
+                repo=repo,
+                settings=settings,
+                chat_id=u.chat_id,
+                thread_id=None,
+                chat_title=u.title,
+                thread_title=None,
+                chat_username=u.username,
+                chat_internal_id=internal_id,
+                from_msg_id=from_msg,
+                full_history=from_msg is None,
+                enrich_opts=enrich_opts,
+                include_transcripts=include_transcripts,
+                min_msg_chars=min_msg_chars,
+                mark_read=mark_read,
+            )
+            yield prepared
+        except typer.Exit:
+            raise
+        except Exception as e:
+            log.error(
+                "prepare_all_unread_runs.chat_error",
+                chat_id=u.chat_id,
+                err=str(e)[:300],
+            )
+            console.print(f"[red]Failed:[/] {e}")
