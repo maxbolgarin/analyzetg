@@ -458,6 +458,67 @@ def analyze(
     )
 
 
+# ============================================================== 5.4b Download media
+
+
+@app.command("download-media", rich_help_panel=PANEL_MAIN)
+def download_media(
+    ref: str = typer.Argument(
+        ...,
+        help=(
+            "Chat reference: @user, t.me link, title (fuzzy), or numeric id. "
+            "Saves photos/voice/video/documents from this chat to disk."
+        ),
+    ),
+    thread: int | None = typer.Option(None, "--thread", help="Forum-topic id."),
+    types: str | None = typer.Option(
+        None,
+        "--types",
+        help=("Comma-separated subset: voice, videonote, video, photo, doc. Default: all five."),
+    ),
+    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
+    until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
+    last_days: int | None = typer.Option(None, "--last-days"),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Base output dir (default: reports/). Files land under reports/<chat-slug>/media/.",
+    ),
+    limit: int | None = typer.Option(None, "--limit", help="Max files to download this run."),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Re-download even if a file for the same msg_id already exists.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview counts + sample without writing."),
+) -> None:
+    """Download raw media files (photos, voice, video, documents) from a chat.
+
+    Works off messages already in the local DB — run [cyan]atg sync[/] or
+    [cyan]atg analyze[/] first if you need the latest messages. Safe to
+    re-run: files are skipped when they already exist on disk (pass
+    [cyan]--overwrite[/] to force). No OpenAI calls; no cost beyond
+    Telegram download bandwidth.
+    """
+    from analyzetg.media.commands import cmd_download_media
+
+    _run(
+        cmd_download_media(
+            ref=ref,
+            thread=thread,
+            types=types,
+            since=since,
+            until=until,
+            last_days=last_days,
+            output=output,
+            limit=limit,
+            overwrite=overwrite,
+            dry_run=dry_run,
+        )
+    )
+
+
 # ============================================================== 5.5 Maintenance
 
 
@@ -882,32 +943,62 @@ def compute_period(
 _NEG_NUM_RE = __import__("re").compile(r"^-\d+$")
 
 
-def _preprocess_argv() -> None:
+def _preprocess_argv(argv: list[str] | None = None) -> list[str]:
     """Let users type bare negative numeric chat ids as positional args.
 
-    `analyzetg analyze -1003865481227` would normally fail because Click sees
-    `-1003865481227` as a short-option token. We inject the `--` separator
-    before any bare negative-number argument so it falls into a positional
-    argument slot. No-op if `--` already appeared before it.
-    """
-    import sys as _sys
+    `atg analyze -1003865481227` normally fails because Click sees
+    `-1003865481227` as a short-option token. Older versions of this
+    preprocessor injected `--` in place — which fixed the bare case but
+    broke `atg analyze -1003865481227 --all-flat`, because `--` closes
+    option parsing and `--all-flat` then becomes an unexpected second
+    positional.
 
-    argv = _sys.argv
-    out = [argv[0]] if argv else []
-    seen_dd = False
-    for arg in argv[1:]:
-        if arg == "--":
-            seen_dd = True
-        elif not seen_dd and _NEG_NUM_RE.match(arg):
-            out.append("--")
-            seen_dd = True
-        out.append(arg)
-    _sys.argv = out
+    The fix: pull negative-number **positionals** out of the arg list
+    and re-append them at the end, prefixed by `--`. Flags in between
+    stay in place and get parsed normally. A negative number is
+    considered a positional when the token before it is NOT a flag
+    (so `--chat -1001234` leaves `-1001234` in place as the value of
+    `--chat`, but `analyze -1003… --all-flat` pulls the id to the end).
+
+    If the user already used `--` explicitly, we don't touch argv —
+    that's a load-bearing user choice.
+
+    Pure function for testability; `main()` passes `sys.argv` in.
+    """
+    if argv is None:
+        import sys as _sys
+
+        argv = list(_sys.argv)
+    if not argv:
+        return argv
+    rest = argv[1:]
+    if "--" in rest:
+        return list(argv)  # user supplied explicit separator, respect it
+
+    negs: list[str] = []
+    kept: list[str] = []
+    for i, tok in enumerate(rest):
+        if _NEG_NUM_RE.match(tok):
+            prev = rest[i - 1] if i > 0 else ""
+            # If the previous token is an option (starts with "-"), this
+            # negative number is likely its value (e.g. `--chat -1001234`).
+            # Leave it in place. Otherwise it's a positional — move it.
+            if prev.startswith("-"):
+                kept.append(tok)
+            else:
+                negs.append(tok)
+        else:
+            kept.append(tok)
+    if not negs:
+        return list(argv)
+    return [argv[0], *kept, "--", *negs]
 
 
 def main() -> None:
     """Entry point — preprocesses argv, then hands off to Typer."""
-    _preprocess_argv()
+    import sys as _sys
+
+    _sys.argv = _preprocess_argv(list(_sys.argv))
     app()
 
 

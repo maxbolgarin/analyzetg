@@ -354,6 +354,30 @@ class Repo:
             return None
         return int(row["m"])
 
+    async def get_min_msg_id(
+        self,
+        chat_id: int,
+        thread_id: int | None = None,
+    ) -> int | None:
+        """Lowest msg_id stored for this chat/thread, or None if empty.
+
+        Used by the full-history backfill path: we walk backward from
+        this value to msg_id=1 to pull the pre-sync history we've never
+        seen. Without it, "full history" would only ever mean "history
+        since the first time we synced".
+        """
+        sql = "SELECT MIN(msg_id) AS m FROM messages WHERE chat_id=?"
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row or row["m"] is None:
+            return None
+        return int(row["m"])
+
     async def chat_stats(self, chat_id: int, thread_id: int | None = None) -> dict[str, Any]:
         """Summary stats for a chat (or thread): count and date range."""
         sql = "SELECT COUNT(*) AS c, MIN(date) AS dmin, MAX(date) AS dmax FROM messages WHERE chat_id=?"

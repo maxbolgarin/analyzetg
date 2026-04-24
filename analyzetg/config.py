@@ -69,7 +69,7 @@ class EnrichCfg(BaseModel):
     video: bool = False
     image: bool = False
     doc: bool = False
-    link: bool = False
+    link: bool = True
     vision_model: str = "gpt-4o-mini"
     doc_model: str | None = None  # None → falls back to filter_model
     link_model: str | None = None  # None → falls back to filter_model

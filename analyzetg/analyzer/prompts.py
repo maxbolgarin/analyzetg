@@ -137,8 +137,120 @@ def _load_reduce_prompt() -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+def _load_base_system() -> str:
+    """Base rules shared by every preset (citations, reactions, media tags,
+    forum context hints, anti-fabrication).
+
+    Lives in `presets/_base.md` so non-Python contributors can edit it
+    without touching code. If the file is missing, fall back to a
+    minimal inline string so the app still runs.
+    """
+    path = PRESETS_DIR / "_base.md"
+    if not path.is_file():
+        return (
+            "Ты — аналитик Telegram-чатов. Опирайся только на приведённые "
+            "сообщения; не выдумывай фактов. Ссылки на сообщения формата "
+            "[#<msg_id>](<link>), где link — шаблон из преамбулы. Пиши "
+            "по-русски, плотно, без воды."
+        )
+    return path.read_text(encoding="utf-8").strip()
+
+
+# Bumped whenever _base.md or compose_system_prompt's structural behavior
+# changes in a way that should invalidate existing analysis_cache rows.
+# Threaded into `options_payload` in analyzer/pipeline.py so a base-rule
+# change busts EVERY preset's cache without needing per-preset version
+# bumps.
+BASE_VERSION = "v2"
+
+
+# Only appears in the system prompt when the caller passes a non-empty
+# `topic_titles` dict — i.e. flat-forum mode. Kept in code (not in a
+# separate file) because it's short and tightly coupled to how the
+# formatter renders topic group headers.
+_FORUM_CONTEXT = """
+## Форум-режим (анализируется весь форум, а не один топик)
+
+Сообщения сгруппированы по топикам. Перед каждой группой стоит
+заголовок `=== Топик: <название> (id=<id>) ===`. Внутри группы
+сообщения идут хронологически; между группами хронология не сохраняется.
+
+**Разные топики = разные обсуждения.** Не сваливай их в одну кучу.
+
+### Обязательное правило структуры
+
+Когда твой формат пресета использует разделы или списки, **каждый
+раздел с содержательным списком обязан быть сгруппирован по топикам
+через подзаголовки третьего уровня (`###`).** Пример для раздела `## Главное`:
+
+```
+## Главное
+
+### <название топика 1>
+- инсайт 1
+- инсайт 2
+
+### <название топика 2>
+- инсайт 1
+
+### <название топика 3>
+- инсайт 1
+- инсайт 2
+```
+
+Правила:
+- Заголовок подраздела — **название топика**, не id.
+- Если в топике реально нечего выделить — пропусти его, не натягивай
+  пункты ради симметрии.
+- Если инсайт реально пересекает несколько топиков (редкий случай), —
+  вынеси его в отдельный подраздел `### Между топиками` в конце.
+- Норма — 2–4 инсайта на топик. В одноразовом саммари больше не нужно
+  (это концентрат, не стенограмма).
+
+### TL;DR в начале
+
+Добавь в самое начало ответа короткий блок:
+
+```
+## TL;DR
+_Одна-две строки: что в этом форуме произошло за период, одним движением._
+```
+
+Для занятого читателя, который откроет файл и решит, стоит ли читать дальше.
+""".strip()
+
+
+def compose_system_prompt(
+    preset_system: str,
+    *,
+    topic_titles: dict[int, str] | None = None,
+) -> str:
+    """Merge the shared base rules with a preset-specific system prompt.
+
+    Order of concatenation matters for the model:
+      1. BASE — global rules (citation format, reactions, media tags,
+         anti-fabrication).
+      2. Forum addendum — **only when `topic_titles` is non-empty**.
+         Explains the `=== Топик: X ===` separators and the "don't blend
+         topics" rule. Skipped for non-forum / single-topic / per-topic
+         paths so they don't spend tokens on irrelevant context.
+      3. Preset system — the specific task (summarize, extract links, etc.).
+
+    Callers in `analyzer/pipeline.py` pass the composed string as the
+    `system` argument to `build_messages`. That function is also what
+    all three call sites (single-pass, map phase, reduce phase) use, so
+    consistency is automatic.
+    """
+    parts: list[str] = [BASE_SYSTEM]
+    if topic_titles:
+        parts.append(_FORUM_CONTEXT)
+    parts.append(preset_system)
+    return "\n\n".join(parts)
+
+
 PRESETS: dict[str, Preset] = _load_all_presets()
 REDUCE_PROMPT: str = _load_reduce_prompt()
+BASE_SYSTEM: str = _load_base_system()
 
 
 def load_custom_preset(prompt_file: Path) -> Preset:

@@ -134,13 +134,57 @@ def _reactions_tag(m: Message) -> str:
     return f" [reactions: {' '.join(parts)}]"
 
 
+def _topic_header(thread_id: int | None, topic_titles: dict[int, str] | None) -> str | None:
+    """Render the `=== Топик: X (id=Y) ===` separator for a group.
+
+    Falls back to `Topic #<id>` when the title isn't in the map — happens
+    if a topic was deleted between fetch time and analysis, or if the
+    caller didn't pass the titles dict. Returns None when there's nothing
+    to emit (no thread, or empty titles map).
+    """
+    if not topic_titles:
+        return None
+    if not thread_id:
+        return "=== Топик: Без топика ==="
+    name = topic_titles.get(thread_id) or f"Topic #{thread_id}"
+    return f"=== Топик: {name} (id={thread_id}) ==="
+
+
+def _emit_msg_line(m: Message, idx: dict[int, Message], date_fmt: str) -> str | None:
+    """Render a single message line, or None if it has no analyzable body."""
+    body = _body(m)
+    if not body:
+        return None
+    ts = m.date.strftime(date_fmt)
+    who = _short_sender(m)
+    reply = _reply_marker(m, idx)
+    return (
+        f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}{_reactions_tag(m)}:"
+        f" {reply}{body}{_dup_suffix(m)}{_link_summary_block(m)}"
+    )
+
+
 def format_messages(
     msgs: list[Message],
     *,
     period: tuple[datetime | None, datetime | None] | None = None,
     title: str | None = None,
     link_template: str | None = None,
+    topic_titles: dict[int, str] | None = None,
 ) -> str:
+    """Dense text format for a list of messages.
+
+    When `topic_titles` is provided and non-empty, messages are grouped by
+    `thread_id` with a `=== Топик: … ===` header before each group —
+    used in all-flat forum analysis so the LLM sees coherent per-topic
+    threads instead of a time-interleaved jumble of unrelated discussions.
+    Groups are ordered by the date of their first message so top-to-bottom
+    reading stays natural. Within each group, chronological order.
+
+    `topic_titles=None` (the default) produces byte-identical output to the
+    old code — crucial because every non-forum / per-topic / single-topic
+    path depends on the ungrouped layout.
+    """
     if not msgs:
         return ""
     date_fmt = _pick_date_format(msgs)
@@ -156,18 +200,55 @@ def format_messages(
     if link_template:
         lines.append(f"Ссылка на сообщение: {link_template}")
     lines.append("")
+
+    if topic_titles:
+        # Preserve input order (chronological) when building groups so
+        # within-topic chronology survives the bucket pass.
+        groups: dict[int, list[Message]] = {}
+        for m in msgs:
+            groups.setdefault(m.thread_id or 0, []).append(m)
+        # Order groups by their first message's date — "which topic started
+        # first in this chunk" — so readers scan top-to-bottom naturally.
+        ordered_tids = sorted(groups.keys(), key=lambda tid: groups[tid][0].date)
+        for i, tid in enumerate(ordered_tids):
+            if i > 0:
+                lines.append("")  # blank separator between topic groups
+            header = _topic_header(tid, topic_titles)
+            if header:
+                lines.append(header)
+            for m in groups[tid]:
+                line = _emit_msg_line(m, idx, date_fmt)
+                if line is not None:
+                    lines.append(line)
+        return "\n".join(lines)
+
     for m in msgs:
-        ts = m.date.strftime(date_fmt)
-        who = _short_sender(m)
-        reply = _reply_marker(m, idx)
-        body = _body(m)
-        if not body:
-            continue
-        lines.append(
-            f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}{_reactions_tag(m)}:"
-            f" {reply}{body}{_dup_suffix(m)}{_link_summary_block(m)}"
-        )
+        line = _emit_msg_line(m, idx, date_fmt)
+        if line is not None:
+            lines.append(line)
     return "\n".join(lines)
+
+
+_FORUM_TITLE_PREVIEW = 8  # Titles listed before truncation; keeps the prefix bounded.
+
+
+def _forum_line(topic_titles: dict[int, str]) -> str:
+    """Build the `Форум: N топиков — a, b, c` line for the preamble.
+
+    Truncates at `_FORUM_TITLE_PREVIEW` names so a huge forum doesn't
+    balloon the static prefix — the LLM only needs to know the forum's
+    shape, not every title verbatim; per-chunk topic headers fill in the
+    rest.
+    """
+    n = len(topic_titles)
+    # Stable order: by topic_id. Not display-sorted — reading a fixed
+    # order helps humans skimming the prompt.
+    names = [topic_titles[k] for k in sorted(topic_titles.keys())]
+    shown = names[:_FORUM_TITLE_PREVIEW]
+    suffix = ""
+    if n > _FORUM_TITLE_PREVIEW:
+        suffix = f" …и ещё {n - _FORUM_TITLE_PREVIEW}"
+    return f"Форум: {n} топик(ов) — {', '.join(shown)}{suffix}"
 
 
 def chat_header_preamble(
@@ -175,8 +256,15 @@ def chat_header_preamble(
     period: tuple[datetime | None, datetime | None] | None,
     *,
     link_template: str | None = None,
+    topic_titles: dict[int, str] | None = None,
 ) -> str:
-    """Static (cacheable) portion of the prompt — appears before dynamic messages."""
+    """Static (cacheable) portion of the prompt — appears before dynamic messages.
+
+    `topic_titles`, when provided, emits one `Форум: …` line enumerating
+    up to `_FORUM_TITLE_PREVIEW` topics. Sits in the static prefix so
+    OpenAI's prompt cache keeps hitting across runs with the same forum
+    shape; only a topic add/remove/rename invalidates it.
+    """
     parts = []
     if title:
         parts.append(f"=== Чат: {title} ===")
@@ -184,6 +272,8 @@ def chat_header_preamble(
         a = period[0].strftime("%Y-%m-%d") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d") if period[1] else "…"
         parts.append(f"Период: {a} — {b}")
+    if topic_titles:
+        parts.append(_forum_line(topic_titles))
     if link_template:
         parts.append(f"Ссылка на сообщение: {link_template}")
     return "\n".join(parts)

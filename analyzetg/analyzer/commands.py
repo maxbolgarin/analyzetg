@@ -354,18 +354,47 @@ async def cmd_analyze(
             )
             return
 
+        topic_titles: dict[int, str] | None = None
+        topic_markers: dict[int, int] | None = None
+
         if is_forum and all_flat:
-            if not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
-                console.print(
-                    "[red]--all-flat on a forum needs an explicit period.[/]\n"
-                    "Pass [cyan]--last-days N[/], [cyan]--full-history[/], or "
-                    "[cyan]--since/--until[/]. Forum-wide unread across topics "
-                    "isn't collapsible into one marker — use "
-                    "[cyan]--all-per-topic[/] instead."
-                )
-                raise typer.Exit(2)
             # thread_id=None → iter_messages skips the thread filter entirely.
             thread_id = None
+            # Fetch topics once: we need both titles (for the formatter's
+            # topic groups + LLM context) and per-topic read markers (to
+            # correctly compute unread across a forum — see below). Same
+            # API call used by _run_forum_per_topic.
+            from analyzetg.tg.topics import list_forum_topics
+
+            console.print("[dim]→ Listing forum topics for flat-forum grouping...[/]")
+            topics_for_flat = await list_forum_topics(client, chat_id)
+            topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
+            topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
+
+            # Unread semantics for a forum ≠ dialog-level read marker.
+            # Telegram tracks read state **per topic**. Using the dialog
+            # marker (what get_unread_state returns) would silently miss
+            # unread messages in topics whose own marker is lower than the
+            # dialog's. Instead:
+            #   - Floor the backfill at min(per-topic markers) so we pull
+            #     enough history.
+            #   - Post-filter in run_analysis via topic_markers so each
+            #     message survives only if msg_id > its own topic's marker.
+            # Skipped when the user passed an explicit period.
+            if not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
+                non_zero = [m for m in topic_markers.values() if m > 0]
+                if non_zero:
+                    from_msg_id = min(non_zero)
+                    unread_across = sum(t.unread_count for t in topics_for_flat)
+                    console.print(
+                        f"[dim]→ Forum unread: {unread_across} across "
+                        f"{len(topic_markers)} topics "
+                        f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
+                    )
+                # If every topic marker is 0 (fresh account, never read
+                # anything), leave from_msg_id=None — _determine_start will
+                # fall back to the dialog unread state, which at that point
+                # genuinely is the right answer.
 
         # --- Single topic in a forum + unread-default: resolve the topic's
         # own read marker so the unread-default path has a usable anchor.
@@ -422,6 +451,8 @@ async def cmd_analyze(
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
             enrich_opts=enrich_opts,
+            topic_titles=topic_titles,
+            topic_markers=topic_markers,
         )
 
 
@@ -565,6 +596,8 @@ async def _run_single(
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
     thread_title: str | None = None,
+    topic_titles: dict[int, str] | None = None,
+    topic_markers: dict[int, int] | None = None,
 ) -> None:
     """Analyze one chat or one thread. Shared by ref-mode and per-topic loop."""
     start_msg_id = await _determine_start(
@@ -583,6 +616,7 @@ async def _run_single(
         thread_id=thread_id if thread_id else 0,
         start_msg_id=start_msg_id,
         since_dt=since_dt,
+        full_history=full_history,
     )
     console.print("[dim]→ Running analysis...[/]")
 
@@ -608,17 +642,33 @@ async def _run_single(
         chat_username=chat_username,
         chat_internal_id=chat_internal_id,
         client=client,
+        topic_titles=topic_titles,
+        topic_markers=topic_markers,
     )
 
     if mark_read and result.msg_count > 0:
-        # For flat-forum (thread_id=None), send_read_acknowledge moves the
-        # dialog-level marker; individual topic markers aren't touched by
-        # Telethon's high-level helper, so we skip (mark_as_read already does).
-        latest = await repo.get_max_msg_id(chat_id, thread_id if thread_id else None)
-        if latest:
-            ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
-            if ok:
-                console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+        if topic_titles:
+            # Flat-forum: Telegram's forum UI displays per-topic unread
+            # badges and ignores the dialog-level read marker, so marking
+            # only the dialog wouldn't clear any of the topic counters the
+            # user actually sees. Mark each topic's latest stored msg_id
+            # read individually via ReadDiscussionRequest (handled inside
+            # mark_as_read when thread_id is set).
+            marked = 0
+            for tid, tname in topic_titles.items():
+                latest = await repo.get_max_msg_id(chat_id, thread_id=tid)
+                if not latest:
+                    continue
+                if await mark_as_read(client, chat_id, latest, thread_id=tid):
+                    marked += 1
+                    log.debug("mark_read.topic", chat_id=chat_id, thread_id=tid, name=tname, max_id=latest)
+            console.print(f"[dim]→ Marked read across {marked}/{len(topic_titles)} topics[/]")
+        else:
+            latest = await repo.get_max_msg_id(chat_id, thread_id if thread_id else None)
+            if latest:
+                ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
+                if ok:
+                    console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
 
     _print_and_write(
         result,
@@ -864,8 +914,17 @@ async def _pull_history(
     thread_id: int,
     start_msg_id: int | None,
     since_dt: datetime | None,
+    full_history: bool = False,
 ) -> None:
-    """Fetch messages from Telegram, skipping any range already in the DB."""
+    """Fetch messages from Telegram, skipping any range already in the DB.
+
+    `full_history=True` is the critical case users kept hitting: after
+    any prior sync we have `local_max > 0`, and the default forward-only
+    backfill can't reach the ~10k older messages the user wanted. On
+    `full_history` we ALSO backfill backwards from the oldest local
+    msg_id down to the chat's first message, so "full history" actually
+    means full history — not "full history from last time we synced".
+    """
     thread_param = thread_id if thread_id else None
     if start_msg_id is not None or (since_dt is None):
         floor = start_msg_id if start_msg_id is not None else 0
@@ -881,6 +940,35 @@ async def _pull_history(
             from_msg_id=effective + 1,
             direction="forward",
         )
+        # Full-history: also walk backward from the oldest local msg to
+        # the chat's first message. Skipped when the user explicitly
+        # bounded the range (start_msg_id or since_dt) — then they only
+        # want the specified window.
+        if full_history and start_msg_id is None:
+            # After the forward pass above, local_max has been updated;
+            # query min afresh so we walk from the actual oldest.
+            local_min = await repo.get_min_msg_id(chat_id, thread_param)
+            if local_min and local_min > 1:
+                console.print(f"[dim]→ Have from msg_id={local_min} locally, fetching older history…[/]")
+                await backfill(
+                    client,
+                    repo,
+                    chat_id=chat_id,
+                    thread_id=thread_param,
+                    from_msg_id=local_min,
+                    direction="back",
+                )
+            elif local_min is None:
+                # Empty local DB for this chat/thread — pull everything
+                # from the server by walking backward from the latest.
+                console.print("[dim]→ No local messages; fetching full chat history…[/]")
+                await backfill(
+                    client,
+                    repo,
+                    chat_id=chat_id,
+                    thread_id=thread_param,
+                    direction="back",
+                )
     else:
         await backfill(
             client,

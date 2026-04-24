@@ -18,7 +18,14 @@ from analyzetg.analyzer.formatter import (
 )
 from analyzetg.analyzer.hasher import batch_hash, reduce_hash
 from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
-from analyzetg.analyzer.prompts import PRESETS, REDUCE_PROMPT, Preset, load_custom_preset
+from analyzetg.analyzer.prompts import (
+    BASE_VERSION,
+    PRESETS,
+    REDUCE_PROMPT,
+    Preset,
+    compose_system_prompt,
+    load_custom_preset,
+)
 from analyzetg.config import get_settings
 from analyzetg.db.repo import Repo
 from analyzetg.enrich.base import EnrichOpts
@@ -186,12 +193,26 @@ async def run_analysis(
     chat_username: str | None = None,
     chat_internal_id: int | None = None,
     client=None,
+    topic_titles: dict[int, str] | None = None,
+    topic_markers: dict[int, int] | None = None,
 ) -> AnalysisResult:
     """Run the end-to-end analysis for a chat/thread/period.
 
     `client` is required when `opts.enrich` requests media-based enrichment
     (voice/video/image/doc). Callers that only want text analysis can pass
     `client=None`.
+
+    `topic_titles` turns on topic-grouped formatting — used by the
+    all-flat forum path so the LLM sees `=== Топик: X ===` separators
+    instead of a time-interleaved jumble. Leave as None for non-forum /
+    per-topic / single-topic analyses.
+
+    `topic_markers` (dict[topic_id → read_inbox_max_id]) enables per-topic
+    unread filtering for flat-forum mode. A single dialog-level `min_msg_id`
+    can't express "msg X is unread in topic A, msg Y is unread in topic B"
+    — forums carry read state per topic. When this is provided, every
+    message is kept only if `msg.msg_id > topic_markers[msg.thread_id]`.
+    Leave as None to skip the filter (default for all other paths).
     """
     settings = get_settings()
     preset = _load_preset(opts)
@@ -211,6 +232,27 @@ async def run_analysis(
         min_msg_id=opts.min_msg_id,
         max_msg_id=opts.max_msg_id,
     )
+
+    # Per-topic unread filter for flat-forum mode. `iter_messages` applies
+    # a single `min_msg_id` floor — fine for a non-forum chat, but forums
+    # track read state per topic. Drop messages already read in their
+    # specific topic. Messages whose thread_id isn't in the map (e.g.
+    # topic deleted between marker fetch and analysis) pass through.
+    if topic_markers:
+        before = len(msgs)
+        msgs = [
+            m
+            for m in msgs
+            if m.thread_id is None
+            or m.thread_id not in topic_markers
+            or m.msg_id > topic_markers[m.thread_id]
+        ]
+        if before != len(msgs):
+            log.info(
+                "analyze.topic_markers.filtered",
+                kept=len(msgs),
+                dropped=before - len(msgs),
+            )
 
     raw_count = len(msgs)
 
@@ -268,7 +310,7 @@ async def run_analysis(
         chat_internal_id=chat_internal_id,
         thread_id=thread_id,
     )
-    static_ctx = chat_header_preamble(title, period, link_template=link_template)
+    static_ctx = chat_header_preamble(title, period, link_template=link_template, topic_titles=topic_titles)
     # user_overhead: template minus {messages} — static, cacheable
     user_overhead = preset.render_user(
         period=_fmt_period(period),
@@ -277,12 +319,19 @@ async def run_analysis(
         messages="",
     )
 
+    # Compose the full system prompt once (base + optional forum addendum +
+    # preset-specific task). Used by chunker AND every OpenAI call so the
+    # token accounting and actual prompt stay consistent — feeding
+    # preset.system to the chunker but composed_system to the LLM would
+    # under-budget each chunk by the base's ~300 tokens.
+    composed_system = compose_system_prompt(preset.system, topic_titles=topic_titles)
+
     # --- Choose chunking strategy
     chunking_model = final_model if not preset.needs_reduce else filter_model
     chunks = build_chunks(
         msgs,
         model=chunking_model,
-        system_prompt=preset.system,
+        system_prompt=composed_system,
         user_overhead=user_overhead,
         output_budget=preset.output_budget_tokens,
         safety_margin=settings.analyze.safety_margin_tokens,
@@ -292,6 +341,15 @@ async def run_analysis(
 
     oai = make_client()
     options_payload = opts.options_payload(preset)
+    # Any change to the shared base system prompt (presets/_base.md) bumps
+    # BASE_VERSION, which lands here and busts every preset's cache — one
+    # knob instead of per-preset prompt_version bumps.
+    options_payload["base_version"] = BASE_VERSION
+    # The forum topic set enters the LLM context via compose_system_prompt
+    # AND via the preamble's `Форум: …` line. A rename/add/remove must
+    # invalidate cache; sorted tuples are deterministic across runs.
+    if topic_titles:
+        options_payload["forum_topics"] = sorted(topic_titles.items())
     run_ctx = {"preset": preset.name, "chat_id": chat_id}
     total_cost = 0.0
     cache_hits = 0
@@ -304,7 +362,13 @@ async def run_analysis(
         chunk = chunks[0]
         bhash = batch_hash(preset.name, preset.prompt_version, final_model, chunk.msg_ids, options_payload)
         batch_hashes.append(bhash)
-        dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
+        dynamic = format_messages(
+            chunk.messages,
+            period=period,
+            title=None,
+            link_template=link_template,
+            topic_titles=topic_titles,
+        )
         text, cost, hit, truncated = await _progress_single(
             label=f"Analyzing ({len(msgs)} msgs, {preset.name}/{final_model})",
             coro=_call_cached(
@@ -313,7 +377,7 @@ async def run_analysis(
                 preset=preset,
                 model=final_model,
                 bhash=bhash,
-                system=preset.system,
+                system=composed_system,
                 static_ctx=static_ctx,
                 dynamic=preset.render_user(
                     period=_fmt_period(period),
@@ -390,7 +454,13 @@ async def run_analysis(
 
         async def _map(chunk) -> tuple[str, str, float, bool, bool]:
             bh = batch_hash(preset.name, preset.prompt_version, filter_model, chunk.msg_ids, options_payload)
-            dynamic = format_messages(chunk.messages, period=period, title=None, link_template=link_template)
+            dynamic = format_messages(
+                chunk.messages,
+                period=period,
+                title=None,
+                link_template=link_template,
+                topic_titles=topic_titles,
+            )
             user = preset.render_user(
                 period=_fmt_period(period),
                 title=title or "—",
@@ -405,7 +475,7 @@ async def run_analysis(
                         preset=preset,
                         model=filter_model,
                         bhash=bh,
-                        system=preset.system,
+                        system=composed_system,
                         static_ctx=static_ctx,
                         dynamic=user,
                         max_tokens=min(preset.output_budget_tokens, preset.map_output_tokens),
@@ -445,7 +515,7 @@ async def run_analysis(
             preset=preset,
             model=final_model,
             bhash=reduce_bh,
-            system=preset.system,
+            system=composed_system,
             static_ctx=static_ctx,
             dynamic=reduce_user,
             max_tokens=preset.output_budget_tokens,

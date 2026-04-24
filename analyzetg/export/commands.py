@@ -170,13 +170,9 @@ async def cmd_dump(
             return
 
         if is_forum and all_flat:
-            if not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
-                console.print(
-                    "[red]--all-flat on a forum needs an explicit period.[/]\n"
-                    "Pass [cyan]--last-days N[/], [cyan]--full-history[/], or "
-                    "[cyan]--since/--until[/]."
-                )
-                raise typer.Exit(2)
+            # Unread default (no explicit period) is supported: falls through
+            # to the dialog-level read marker via _determine_start →
+            # get_unread_state, matching the analyze command.
             thread_id = None
 
         # Single topic in a forum + unread-default → resolve topic's marker.
@@ -270,6 +266,7 @@ async def _dump_single(
         thread_id=thread_id if thread_id else 0,
         start_msg_id=start_msg_id,
         since_dt=since_dt,
+        full_history=full_history,
     )
 
     if with_transcribe:
@@ -507,8 +504,15 @@ async def _pull_history(
     thread_id: int,
     start_msg_id: int | None,
     since_dt: datetime | None,
+    full_history: bool = False,
 ) -> None:
-    """Fetch messages from Telegram, skipping any range already in the DB."""
+    """Fetch messages from Telegram, skipping any range already in the DB.
+
+    `full_history=True` triggers an additional backward walk from the
+    oldest local msg_id after the forward walk, so "full history" in
+    dump mode pulls the entire chat — not just what we've synced
+    forward of last time.
+    """
     thread_param = thread_id if thread_id else None
     if start_msg_id is not None or since_dt is None:
         floor = start_msg_id if start_msg_id is not None else 0
@@ -524,6 +528,30 @@ async def _pull_history(
             from_msg_id=effective + 1,
             direction="forward",
         )
+        # Full-history: walk backward from the oldest local msg to the
+        # chat's first message. See analyzer/commands.py:_pull_history
+        # for the matching rationale.
+        if full_history and start_msg_id is None:
+            local_min = await repo.get_min_msg_id(chat_id, thread_param)
+            if local_min and local_min > 1:
+                console.print(f"[dim]→ Have from msg_id={local_min} locally, fetching older history…[/]")
+                await backfill(
+                    client,
+                    repo,
+                    chat_id=chat_id,
+                    thread_id=thread_param,
+                    from_msg_id=local_min,
+                    direction="back",
+                )
+            elif local_min is None:
+                console.print("[dim]→ No local messages; fetching full chat history…[/]")
+                await backfill(
+                    client,
+                    repo,
+                    chat_id=chat_id,
+                    thread_id=thread_param,
+                    direction="back",
+                )
     else:
         await backfill(
             client,
