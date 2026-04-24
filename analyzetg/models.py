@@ -71,8 +71,14 @@ class Message:
     transcript: str | None = None
     transcript_model: str | None = None
     reactions: dict[str, int] | None = None
-    # Derived, not persisted:
+    # Derived, not persisted on the messages table:
     duplicates: int = 0
+    # Populated by the enrichment stage (analyzetg.enrich.pipeline). Live on the
+    # in-memory Message between enrichment and formatting; persistence lives in
+    # the `media_enrichments` / `link_enrichments` tables, keyed by doc_id / url.
+    image_description: str | None = None
+    extracted_text: str | None = None
+    link_summaries: list[tuple[str, str]] | None = None
 
 
 @dataclass(slots=True)

@@ -1,0 +1,150 @@
+"""Enrichment orchestrator: dispatch per-kind enrichers over a message list.
+
+Called from `analyzer.pipeline.run_analysis` between filter/dedupe and
+chunking. Mutates messages in place (attaching transcripts, image
+descriptions, extracted text, link summaries) so downstream formatting
+and hashing see the enriched body.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from analyzetg.config import get_settings
+from analyzetg.db.repo import Repo
+from analyzetg.enrich.audio import enrich_audio
+from analyzetg.enrich.base import EnrichOpts, EnrichStats
+from analyzetg.enrich.document import enrich_document
+from analyzetg.enrich.image import enrich_image
+from analyzetg.enrich.link import enrich_message_links
+from analyzetg.enrich.video import enrich_video
+from analyzetg.models import Message
+from analyzetg.util.logging import get_logger
+
+if TYPE_CHECKING:
+    from telethon import TelegramClient
+
+log = get_logger(__name__)
+
+
+def _caps(opts: EnrichOpts) -> dict[str, int]:
+    return {
+        "image": opts.max_images_per_run,
+        "link": opts.max_link_fetches_per_run,
+    }
+
+
+async def enrich_messages(
+    msgs: list[Message],
+    *,
+    client: TelegramClient | None,
+    repo: Repo,
+    opts: EnrichOpts,
+) -> EnrichStats:
+    """Run per-kind enrichers across `msgs`, respecting opts + caps.
+
+    Mutates each `Message` in place (sets .transcript, .image_description,
+    .extracted_text, .link_summaries). Returns aggregated stats for logging
+    and UI.
+
+    `client` may be None only when no Telegram-media enrichment is requested
+    (e.g. --enrich=link). The orchestrator raises cleanly if a kind needing
+    the client is enabled without one.
+    """
+    stats = EnrichStats()
+    if not msgs or not opts.any_enabled():
+        return stats
+
+    needs_client = any((opts.voice, opts.videonote, opts.video, opts.image, opts.doc))
+    if needs_client and client is None:
+        raise RuntimeError(
+            "Enrichment requires a TelegramClient for media downloads. "
+            "Pass client=... into run_analysis or disable media-based enrichers."
+        )
+
+    settings = get_settings()
+    sem = asyncio.Semaphore(max(1, opts.concurrency))
+    caps = _caps(opts)
+    counted: dict[str, int] = {"image": 0, "link": 0}
+
+    async def handle(msg: Message) -> None:
+        # Voice / videonote — via audio enricher.
+        mt = msg.media_type
+        try:
+            if mt == "voice" and opts.voice:
+                async with sem:
+                    res = await enrich_audio(msg, client=client, repo=repo, model=opts.audio_model)
+                if res:
+                    stats.record("voice", res)
+            elif mt == "videonote" and opts.videonote:
+                async with sem:
+                    res = await enrich_audio(msg, client=client, repo=repo, model=opts.audio_model)
+                if res:
+                    stats.record("videonote", res)
+            elif mt == "video" and opts.video:
+                async with sem:
+                    res = await enrich_video(msg, client=client, repo=repo, model=opts.audio_model)
+                if res:
+                    stats.record("video", res)
+            elif mt == "photo" and opts.image:
+                if counted["image"] >= caps["image"]:
+                    stats.record_skip("image")
+                else:
+                    counted["image"] += 1
+                    async with sem:
+                        res = await enrich_image(msg, client=client, repo=repo, model=opts.vision_model)
+                    if res:
+                        stats.record("image", res)
+            elif mt == "doc" and opts.doc:
+                async with sem:
+                    res = await enrich_document(msg, client=client, repo=repo)
+                if res:
+                    stats.record("doc", res)
+        except Exception as e:  # Per-message errors must not abort the run.
+            log.error(
+                "enrich.error",
+                kind=mt,
+                chat_id=msg.chat_id,
+                msg_id=msg.msg_id,
+                err=str(e)[:500],
+            )
+            stats.record_error(mt or "unknown")
+
+        # Link enrichment is orthogonal — any message with text may have URLs.
+        if opts.link and msg.text:
+            try:
+                if counted["link"] >= caps["link"]:
+                    # Cap on *fetches* per run, not per message — but we
+                    # approximate by capping at message granularity to keep
+                    # this simple. Users hitting the cap should raise it.
+                    pass
+                else:
+                    async with sem:
+                        pairs = await enrich_message_links(
+                            msg,
+                            repo=repo,
+                            model=opts.link_model,
+                            timeout_sec=opts.link_fetch_timeout_sec,
+                            skip_domains=opts.skip_link_domains or settings.enrich.skip_link_domains,
+                        )
+                    # Count one per unique URL fetched (cache hits excluded
+                    # doesn't matter here — we bound network calls, not
+                    # DB lookups).
+                    for _ in pairs:
+                        counted["link"] += 1
+                        if counted["link"] > caps["link"]:
+                            break
+                    if pairs:
+                        stats.counts["link"] = stats.counts.get("link", 0) + len(pairs)
+            except Exception as e:
+                log.error(
+                    "enrich.link.error",
+                    chat_id=msg.chat_id,
+                    msg_id=msg.msg_id,
+                    err=str(e)[:500],
+                )
+                stats.record_error("link")
+
+    await asyncio.gather(*(handle(m) for m in msgs))
+    return stats

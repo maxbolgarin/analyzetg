@@ -106,6 +106,10 @@ class InteractiveAnswers:
     mark_read: bool
     output_path: Path | None = None
     run_on_all_unread: bool = False  # User picked "Run on ALL N unread chats"
+    # None = "use defaults" (config.toml + preset); [] = "disable everything";
+    # non-empty list = "enable exactly these kinds" (unioned with preset.enrich_kinds
+    # by cmd_analyze via --enrich=<csv>).
+    enrich_kinds: list[str] | None = None
 
 
 def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
@@ -123,6 +127,16 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
     elif answers.period == "custom":
         since = answers.custom_since
         until = answers.custom_until
+
+    # Enrichment flags: None (wizard was skipped / defaults) vs empty list
+    # (user explicitly disabled all) vs populated list (explicit set).
+    enrich_csv: str | None = None
+    no_enrich = False
+    if answers.enrich_kinds is not None:
+        if not answers.enrich_kinds:
+            no_enrich = True
+        else:
+            enrich_csv = ",".join(answers.enrich_kinds)
 
     return {
         "ref": answers.chat_ref,
@@ -143,6 +157,9 @@ def build_analyze_args(answers: InteractiveAnswers) -> dict[str, Any]:
         "no_cache": False,
         "include_transcripts": True,
         "min_msg_chars": None,
+        "enrich": enrich_csv,
+        "enrich_all": False,
+        "no_enrich": no_enrich,
         "all_flat": answers.forum_all_flat,
         "all_per_topic": answers.forum_all_per_topic,
     }
@@ -332,6 +349,7 @@ async def _collect_answers(
         forum_all_flat = False
         forum_all_per_topic = False
         preset: str | None = None
+        enrich_kinds: list[str] | None = None
         period: str | None = None
         custom_since: str | None = None
         custom_until: str | None = None
@@ -390,7 +408,19 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 preset = result
-                step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "period"
+                step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "enrich"
+
+            elif step == "enrich":
+                # Only runs for analyze mode (single-chat path).
+                result = await _pick_enrich()
+                if result is BACK:
+                    step = "preset"
+                    continue
+                if result is None:
+                    console.print("[dim]Cancelled.[/]")
+                    return None
+                enrich_kinds = list(result) if isinstance(result, list) else None
+                step = "period"
 
             elif step == "period":
                 # Lazily fetch per-period counts once we know chat+thread.
@@ -409,7 +439,7 @@ async def _collect_answers(
                 )
                 if result is BACK:
                     if mode == "analyze":
-                        step = "preset"
+                        step = "enrich"
                     else:
                         step = "thread" if chat and chat["kind"] == "forum" else "chat"
                     continue
@@ -545,6 +575,7 @@ async def _collect_answers(
             mark_read=chosen_mark_read,
             output_path=chosen_output_path,
             run_on_all_unread=run_on_all,
+            enrich_kinds=enrich_kinds,
         )
 
 
@@ -1078,6 +1109,44 @@ async def _pick_output(*, default_path: Path | None):
     path = Path(raw).expanduser()
     _replace_last_line(f"[bold cyan]?[/] output: [bold]{path}[/]")
     return False, path
+
+
+async def _pick_enrich() -> list[str] | None | object:
+    """Pick which media kinds to enrich this run.
+
+    Returns a list of enabled kind names (possibly empty = "none"),
+    BACK to step back, or None to cancel. Pre-checks the current config
+    defaults so the common case is "hit Enter".
+    """
+    settings = get_settings()
+    cfg = settings.enrich
+    all_kinds = [
+        ("voice", "Voice messages — transcribe", cfg.voice),
+        ("videonote", "Video notes (round videos) — transcribe", cfg.videonote),
+        ("video", "Videos — transcribe audio track", cfg.video),
+        ("image", "Photos — describe via vision model (spendy)", cfg.image),
+        ("doc", "Documents (PDF / DOCX / text) — extract text", cfg.doc),
+        ("link", "External URLs — fetch and summarize (spendy)", cfg.link),
+    ]
+    choices = [
+        questionary.Choice(title=label, value=key, checked=default_on) for key, label, default_on in all_kinds
+    ]
+    picked = await _bind_escape(
+        questionary.checkbox(
+            "Enrich media? (space to toggle, Enter to accept — defaults from config)",
+            choices=choices,
+            style=LIST_STYLE,
+        ),
+        BACK,
+    ).ask_async()
+    if picked is None:
+        return None
+    if picked is BACK:
+        _replace_last_line("[dim]← Back[/]")
+        return BACK
+    summary = ",".join(picked) if picked else "none"
+    _replace_last_line(f"[bold cyan]?[/] enrich: [bold]{summary}[/]")
+    return picked
 
 
 async def _pick_mark_read(*, default: bool):

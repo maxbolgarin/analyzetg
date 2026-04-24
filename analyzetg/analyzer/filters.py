@@ -27,10 +27,28 @@ def _is_service(m: Message) -> bool:
 
 
 def effective_text(m: Message, opts: FilterOpts | None = None) -> str:
+    """Return the analyzable body: text + enrichments the caller wants.
+
+    With `include_transcripts=True` (default), transcripts, image descriptions,
+    extracted document text, and link summaries all count as "text" — the
+    whole point of enrichment is that a message with a transcribed voice note
+    or a described photo becomes analyzable.
+    """
     opts = opts or FilterOpts()
     if not opts.include_transcripts:
         return (m.text or "").strip()
-    return (m.text or m.transcript or "").strip()
+    parts: list[str] = []
+    if m.text:
+        parts.append(m.text)
+    if m.image_description:
+        parts.append(m.image_description)
+    if m.extracted_text:
+        parts.append(m.extracted_text)
+    if m.transcript:
+        parts.append(m.transcript)
+    if m.link_summaries:
+        parts.extend(s for _, s in m.link_summaries)
+    return "\n".join(p.strip() for p in parts if p).strip()
 
 
 def filter_messages(msgs: list[Message], opts: FilterOpts) -> list[Message]:
@@ -43,6 +61,9 @@ def filter_messages(msgs: list[Message], opts: FilterOpts) -> list[Message]:
             continue
         if len(body) < opts.min_msg_chars:
             continue
+        # `text_only` means "only keep messages with native text (drop media-only)".
+        # Enrichment doesn't bypass this — if the caller asked for text_only,
+        # they explicitly don't want described-photo or transcribed-voice rows.
         if opts.text_only and not m.text:
             continue
         out.append(m)

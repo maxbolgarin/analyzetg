@@ -36,6 +36,10 @@ class Preset:
     # the final answer budget.
     map_output_tokens: int = 1500
     options_keys: list[str] = field(default_factory=list)
+    # Media enrichments this preset wants turned on by default. Merged with
+    # CLI / config toggles — see enrich.EnrichOpts and analyzer.commands.
+    # Names match EnrichOpts fields: voice, videonote, video, image, doc, link.
+    enrich_kinds: list[str] = field(default_factory=list)
 
     def render_user(self, **kw: object) -> str:
         return self.user_template.format(**kw)
@@ -60,6 +64,17 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
 def _coerce_bool(v: str) -> bool:
     return v.lower() in ("true", "yes", "1", "on")
+
+
+def _coerce_list(v: str) -> list[str]:
+    """Parse a simple `[a, b, c]` or `a, b, c` list from preset frontmatter."""
+    s = v.strip()
+    if not s:
+        return []
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    parts = [p.strip().strip('"').strip("'") for p in s.split(",")]
+    return [p for p in parts if p]
 
 
 def _load_preset_file(path: Path) -> Preset:
@@ -90,6 +105,7 @@ def _load_preset_file(path: Path) -> Preset:
         final_model=meta.get("final_model", "gpt-5.4"),
         output_budget_tokens=int(meta.get("output_budget_tokens", "1500")),
         map_output_tokens=int(meta.get("map_output_tokens", "1500")),
+        enrich_kinds=_coerce_list(meta.get("enrich", "")),
     )
 
 
@@ -166,4 +182,5 @@ def load_custom_preset(prompt_file: Path) -> Preset:
         final_model=meta.get("final_model", "gpt-5.4"),
         output_budget_tokens=int(meta.get("output_budget_tokens", "1500")),
         map_output_tokens=int(meta.get("map_output_tokens", "1500")),
+        enrich_kinds=_coerce_list(meta.get("enrich", "")),
     )

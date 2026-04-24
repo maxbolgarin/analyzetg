@@ -48,15 +48,41 @@ def _reply_marker(m: Message, index: dict[int, Message]) -> str:
     return f"↩{_short_sender(target)} "
 
 
+_BODY_CAP = 4000  # Hard cap per-message body length so one huge doc can't crowd a chunk.
+
+
 def _body(m: Message) -> str:
-    body = (m.text or "").strip()
-    if body:
-        return body
+    """Compose the message's analyzable body from text + enrichments.
+
+    Order: text → image description → extracted doc text → transcript.
+    Each layer is included only if present; empty after composition means the
+    message has nothing analyzable and the caller drops it.
+    """
+    parts: list[str] = []
+    text = (m.text or "").strip()
+    if text:
+        parts.append(text)
+    if m.image_description:
+        parts.append(f"[image: {m.image_description.strip()}]")
+    if m.extracted_text:
+        parts.append(f"[doc: {m.extracted_text.strip()}]")
     if m.transcript:
-        return m.transcript.strip()
+        parts.append(m.transcript.strip())
+    if parts:
+        combined = "\n".join(parts)
+        if len(combined) > _BODY_CAP:
+            combined = combined[:_BODY_CAP] + "…"
+        return combined
     if m.media_type:
         return f"[{m.media_type} без транскрипта]"
     return ""
+
+
+def _link_summary_block(m: Message) -> str:
+    if not m.link_summaries:
+        return ""
+    lines = [f"  ↳ {url}: {summary.strip()}" for url, summary in m.link_summaries]
+    return "\n" + "\n".join(lines)
 
 
 def _dup_suffix(m: Message) -> str:
@@ -67,7 +93,10 @@ def _media_tag(m: Message) -> str:
     if m.media_type in {"voice", "videonote", "video"} and m.transcript:
         dur = _mmss(m.media_duration or 0)
         return f" [{m.media_type} {dur}]"
-    if m.media_type in {"photo"}:
+    # For photos: only emit the bare [photo] tag when no description is
+    # attached. With a description, the description goes into _body() as
+    # `[image: …]` and doesn't need the duplicative tag.
+    if m.media_type == "photo" and not m.image_description:
         return " [photo]"
     return ""
 
@@ -136,7 +165,7 @@ def format_messages(
             continue
         lines.append(
             f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}{_reactions_tag(m)}:"
-            f" {reply}{body}{_dup_suffix(m)}"
+            f" {reply}{body}{_dup_suffix(m)}{_link_summary_block(m)}"
         )
     return "\n".join(lines)
 

@@ -21,6 +21,8 @@ from analyzetg.analyzer.openai_client import build_messages, chat_complete, make
 from analyzetg.analyzer.prompts import PRESETS, REDUCE_PROMPT, Preset, load_custom_preset
 from analyzetg.config import get_settings
 from analyzetg.db.repo import Repo
+from analyzetg.enrich.base import EnrichOpts
+from analyzetg.enrich.pipeline import enrich_messages
 from analyzetg.util.logging import get_logger
 
 log = get_logger(__name__)
@@ -83,10 +85,12 @@ class AnalysisOptions:
     min_msg_id: int | None = None
     max_msg_id: int | None = None
     dedupe_forwards: bool | None = None
+    enrich: EnrichOpts | None = None  # None → resolved from config at run time.
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
         """Hash ingredients that must bust cache when toggled."""
         s = get_settings()
+        enrich_kinds = sorted(self.enrich.kinds_enabled()) if self.enrich else []
         return {
             "min_msg_chars": self.min_msg_chars
             if self.min_msg_chars is not None
@@ -99,6 +103,7 @@ class AnalysisOptions:
             "temperature": s.openai.temperature,
             "output_budget": preset.output_budget_tokens,
             "map_output": preset.map_output_tokens,
+            "enrich_kinds": enrich_kinds,
         }
 
 
@@ -171,14 +176,21 @@ async def run_analysis(
     opts: AnalysisOptions,
     chat_username: str | None = None,
     chat_internal_id: int | None = None,
+    client=None,
 ) -> AnalysisResult:
+    """Run the end-to-end analysis for a chat/thread/period.
+
+    `client` is required when `opts.enrich` requests media-based enrichment
+    (voice/video/image/doc). Callers that only want text analysis can pass
+    `client=None`.
+    """
     settings = get_settings()
     preset = _load_preset(opts)
 
     final_model = opts.model_override or preset.final_model or settings.openai.chat_model_default
     filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
 
-    # --- Load + filter + dedupe
+    # --- Load messages
     # thread_param (int) is used for DB records; thread_id (Optional) is
     # forwarded as-is so iter_messages skips the filter entirely on None.
     thread_param = thread_id if thread_id is not None else 0
@@ -190,6 +202,17 @@ async def run_analysis(
         min_msg_id=opts.min_msg_id,
         max_msg_id=opts.max_msg_id,
     )
+
+    # --- Enrichment (voice → text, image → description, etc.) runs BEFORE
+    # filtering so enrichment can rescue a photo-only or voice-only message
+    # from being dropped by min_msg_chars / text_only.
+    enrich_opts = opts.enrich
+    if enrich_opts is not None and enrich_opts.any_enabled() and msgs:
+        stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
+        summary = stats.summary()
+        if summary:
+            log.info("analyze.enrich", summary=summary)
+
     f_opts = FilterOpts(
         min_msg_chars=opts.min_msg_chars
         if opts.min_msg_chars is not None

@@ -61,16 +61,38 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (chat_id, thread_id)
 );
 
-CREATE TABLE IF NOT EXISTS media_transcripts (
-    doc_id       INTEGER PRIMARY KEY,
-    file_sha1    TEXT,
-    duration_sec INTEGER,
-    transcript   TEXT NOT NULL,
-    model        TEXT NOT NULL,
-    language     TEXT,
+-- Generalized enrichment cache: transcripts, image descriptions, doc extracts,
+-- etc. all share this table keyed by (doc_id, kind). `media_transcripts` is
+-- kept as a view for compat — see migrations/002_media_enrichments.sql.
+CREATE TABLE IF NOT EXISTS media_enrichments (
+    doc_id       INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    model        TEXT,
     cost_usd     REAL,
-    created_at   TIMESTAMP
+    duration_sec INTEGER,
+    language     TEXT,
+    file_sha1    TEXT,
+    extra_json   TEXT,
+    created_at   TIMESTAMP,
+    PRIMARY KEY (doc_id, kind)
 );
+
+CREATE INDEX IF NOT EXISTS idx_media_enrich_kind
+    ON media_enrichments(kind);
+
+CREATE TABLE IF NOT EXISTS link_enrichments (
+    url_hash    TEXT PRIMARY KEY,
+    url         TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    title       TEXT,
+    model       TEXT,
+    cost_usd    REAL,
+    fetched_at  TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_enrich_fetched
+    ON link_enrichments(fetched_at);
 
 CREATE TABLE IF NOT EXISTS analysis_cache (
     batch_hash        TEXT PRIMARY KEY,
