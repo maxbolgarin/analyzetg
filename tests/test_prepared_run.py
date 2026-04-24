@@ -156,3 +156,84 @@ async def test_prepare_chat_run_returns_full_shape(repo, monkeypatch):
     assert prepared.client is client
     assert prepared.repo is repo
     assert prepared.settings is settings
+
+
+async def test_prepare_chat_run_skip_filter_preserves_media_only_messages(repo, monkeypatch):
+    """Regression: download-media needs the raw message set (including
+    media-only rows with no text / transcript). Without skip_filter=True,
+    `filter_messages` drops every row where effective_text is empty,
+    leaving save_raw_media with zero candidates — which is exactly what
+    download-media would hit before the skip_filter knob existed.
+    """
+    from analyzetg.core.pipeline import prepare_chat_run
+
+    await repo.upsert_messages(
+        [
+            Message(
+                chat_id=-100,
+                msg_id=5,
+                date=datetime(2026, 4, 24, 12, 0),
+                thread_id=None,
+                sender_name="Alice",
+                text=None,
+                media_type="photo",
+                media_doc_id=500,
+            ),
+            Message(
+                chat_id=-100,
+                msg_id=6,
+                date=datetime(2026, 4, 24, 12, 1),
+                thread_id=None,
+                sender_name="Bob",
+                text=None,
+                media_type="voice",
+                media_doc_id=600,
+                media_duration=4,
+            ),
+        ]
+    )
+
+    async def _no_backfill(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+
+    client = MagicMock()
+    client.get_messages = AsyncMock()
+    settings = get_settings()
+
+    prepared_filtered = await prepare_chat_run(
+        client=client,
+        repo=repo,
+        settings=settings,
+        chat_id=-100,
+        thread_id=None,
+        chat_title="T",
+        since_dt=datetime(2026, 4, 24),
+        until_dt=datetime(2026, 4, 25),
+        enrich_opts=EnrichOpts(),
+        include_transcripts=False,
+        mark_read=False,
+    )
+    # Default path filters media-only (empty body) → zero messages.
+    assert prepared_filtered.messages == []
+    assert prepared_filtered.raw_msg_count == 2  # pre-filter count preserved
+
+    prepared_raw = await prepare_chat_run(
+        client=client,
+        repo=repo,
+        settings=settings,
+        chat_id=-100,
+        thread_id=None,
+        chat_title="T",
+        since_dt=datetime(2026, 4, 24),
+        until_dt=datetime(2026, 4, 25),
+        enrich_opts=EnrichOpts(),
+        include_transcripts=False,
+        mark_read=False,
+        skip_filter=True,
+    )
+    # skip_filter=True: download-media path preserves both media-only rows.
+    assert len(prepared_raw.messages) == 2
+    assert {m.msg_id for m in prepared_raw.messages} == {5, 6}
+    assert {m.media_type for m in prepared_raw.messages} == {"photo", "voice"}

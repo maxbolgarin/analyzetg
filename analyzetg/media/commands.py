@@ -270,6 +270,11 @@ async def cmd_download_media(
             enrich_opts=EnrichOpts(),  # raw bytes; no text enrichment
             include_transcripts=False,
             mark_read=False,
+            # Download-media archives bytes, not text. filter_messages
+            # would drop every media-only row (empty effective_text),
+            # leaving save_raw_media with nothing to save — the whole
+            # point of the command.
+            skip_filter=True,
         )
 
         if dry_run:
