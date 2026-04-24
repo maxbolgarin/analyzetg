@@ -223,6 +223,7 @@ async def prepare_chat_run(
     topic_titles: dict[int, str] | None = None,
     topic_markers: dict[int, int] | None = None,
     mark_read: bool = False,
+    skip_filter: bool = False,
 ) -> PreparedRun:
     """Prepare a single chat run: resolve → backfill → enrich → ready for consumer.
 
@@ -233,6 +234,10 @@ async def prepare_chat_run(
     `topic_titles` / `topic_markers` are the flat-forum knobs — caller
     precomputes them with `list_forum_topics`. For non-forum or
     single-topic, both stay None.
+
+    `skip_filter=True` bypasses filter_messages + dedupe. download-media
+    uses it: it wants raw media-only messages, which the text-filter
+    (min_msg_chars, empty effective_text) would otherwise drop.
     """
     from analyzetg.analyzer.filters import FilterOpts, dedupe, filter_messages
     from analyzetg.enrich.pipeline import enrich_messages
@@ -288,14 +293,15 @@ async def prepare_chat_run(
         if summary:
             console.print(f"[dim]→ {summary}[/]")
 
-    f_opts = FilterOpts(
-        min_msg_chars=min_msg_chars if min_msg_chars is not None else settings.analyze.min_msg_chars,
-        include_transcripts=include_transcripts,
-        text_only=not include_transcripts,
-    )
-    msgs = filter_messages(msgs, f_opts)
-    if settings.analyze.dedupe_forwards:
-        msgs = dedupe(msgs)
+    if not skip_filter:
+        f_opts = FilterOpts(
+            min_msg_chars=min_msg_chars if min_msg_chars is not None else settings.analyze.min_msg_chars,
+            include_transcripts=include_transcripts,
+            text_only=not include_transcripts,
+        )
+        msgs = filter_messages(msgs, f_opts)
+        if settings.analyze.dedupe_forwards:
+            msgs = dedupe(msgs)
 
     mark_read_fn = _build_mark_read_fn(
         client=client,
