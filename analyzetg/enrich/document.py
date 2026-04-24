@@ -27,6 +27,26 @@ from analyzetg.util.logging import get_logger
 if TYPE_CHECKING:
     from telethon import TelegramClient
 
+# pypdf + python-docx are soft deps: a user who's only enriching text/voice
+# shouldn't need them installed. Matches the bs4 pattern in enrich/link.py.
+# Missing libs disable their corresponding extract path with a clear log;
+# plain-text extraction keeps working regardless since it has no lib dep.
+try:
+    from pypdf import PdfReader
+
+    _HAS_PYPDF = True
+except ImportError:
+    _HAS_PYPDF = False
+    PdfReader = None  # type: ignore[assignment,misc]
+
+try:
+    from docx import Document
+
+    _HAS_DOCX = True
+except ImportError:
+    _HAS_DOCX = False
+    Document = None  # type: ignore[assignment,misc]
+
 log = get_logger(__name__)
 
 _TEXT_EXTS = {
@@ -88,8 +108,7 @@ def _ext_of(tel_msg) -> str:
 
 
 def _extract_pdf(path: Path, *, max_chars: int) -> str:
-    from pypdf import PdfReader
-
+    # _HAS_PYPDF has been validated by the caller before this runs.
     reader = PdfReader(str(path))
     parts: list[str] = []
     running = 0
@@ -110,8 +129,7 @@ def _extract_pdf(path: Path, *, max_chars: int) -> str:
 
 
 def _extract_docx(path: Path) -> str:
-    from docx import Document
-
+    # _HAS_DOCX has been validated by the caller before this runs.
     doc = Document(str(path))
     paras = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
     return "\n".join(paras)
@@ -158,6 +176,26 @@ async def enrich_document(
     if not ext or (ext not in {"pdf", "docx"} and ext not in _TEXT_EXTS):
         return None
 
+    # Soft-dependency check: skip cleanly if the extractor library isn't
+    # installed, rather than raising during extraction. Matches the
+    # FfmpegMissing handling in enrich/audio.py.
+    if ext == "pdf" and not _HAS_PYPDF:
+        log.warning(
+            "enrich.doc.lib_missing",
+            lib="pypdf",
+            ext=ext,
+            hint="run `uv tool install --editable . --reinstall`",
+        )
+        return None
+    if ext == "docx" and not _HAS_DOCX:
+        log.warning(
+            "enrich.doc.lib_missing",
+            lib="python-docx",
+            ext=ext,
+            hint="run `uv tool install --editable . --reinstall`",
+        )
+        return None
+
     # Enforce size cap before download to avoid pulling huge binaries.
     doc = getattr(tel_msg, "document", None) or getattr(getattr(tel_msg, "media", None), "document", None)
     size = int(getattr(doc, "size", 0) or 0)
@@ -166,8 +204,9 @@ async def enrich_document(
             "enrich.doc.too_large",
             chat_id=msg.chat_id,
             msg_id=msg.msg_id,
-            size=size,
-            max=settings.enrich.max_doc_bytes,
+            size_mb=round(size / 1_000_000, 1),
+            max_mb=round(settings.enrich.max_doc_bytes / 1_000_000, 1),
+            hint="raise [enrich].max_doc_bytes in config.toml to include this file",
         )
         return None
 

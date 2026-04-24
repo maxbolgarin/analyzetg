@@ -72,13 +72,25 @@ def test_all_builtin_presets_load() -> None:
             assert key in p.user_template, f"preset {name!r} missing placeholder {key}"
 
 
-def test_summary_preset_has_bumped_budget() -> None:
-    # Regression guard: we bumped summary to 4000 after a real truncation bug.
-    # Don't let it silently drop back to the old 1800 default.
+def test_summary_preset_has_adequate_budget() -> None:
+    # The distilled summary is intentionally tighter than the old recap-style
+    # one — but it still needs room for Главное + Идеи/решения + Стоит
+    # посмотреть sections. Dropping below ~2000 risks re-introducing the
+    # truncation bug that originally drove budgets up.
     p = PRESETS["summary"]
-    assert p.output_budget_tokens >= 4000, (
-        "summary budget was reduced — verify intentional before dropping the guard"
+    assert p.output_budget_tokens >= 2000, (
+        f"summary output_budget_tokens={p.output_budget_tokens} is cutting it close — "
+        "truncation will silently return partial results."
     )
+
+
+def test_broad_preset_preserves_original_summary_scope() -> None:
+    # The old `summary` moved to `broad` — it's the structured recap with
+    # Top-3 themes + bullet points + tone + key messages and wants a fatter
+    # budget. Tests pin it so a future tidy-up doesn't quietly shrink it.
+    p = PRESETS["broad"]
+    assert p.output_budget_tokens >= 4000
+    assert p.map_output_tokens >= 2000
 
 
 def test_custom_preset_from_file(tmp_path: Path) -> None:

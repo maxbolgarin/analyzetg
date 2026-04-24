@@ -75,7 +75,12 @@ class EnrichCfg(BaseModel):
     link_model: str | None = None  # None → falls back to filter_model
     max_images_per_run: int = 50
     max_link_fetches_per_run: int = 50
-    max_doc_bytes: int = 5_000_000
+    # 25 MB ceiling on document downloads. Matches the OpenAI audio cap we
+    # already use for voice/video, and covers the vast majority of real
+    # PDFs/DOCX files (a 50-page technical PDF typically runs 3-8 MB).
+    # The *text extract* from any doc is separately capped to `max_doc_chars`
+    # so a huge PDF can't flood the analysis prompt even if we download it.
+    max_doc_bytes: int = 25_000_000
     max_doc_chars: int = 20_000
     link_fetch_timeout_sec: int = 10
     skip_link_domains: list[str] = Field(default_factory=list)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -69,6 +69,15 @@ class AnalysisResult:
     cache_misses: int
     run_id: int | None = None
     truncated: bool = False  # any stage hit max_completion_tokens
+    # Metadata used by the file-writing layer to render a report header —
+    # all optional so direct callers (tests) can skip them.
+    prompt_version: str = ""
+    filter_model: str | None = None
+    period: tuple[datetime | None, datetime | None] | None = None
+    enrich_kinds: list[str] = field(default_factory=list)
+    enrich_cost_usd: float = 0.0
+    enrich_summary: str = ""
+    raw_msg_count: int = 0  # before filter / dedupe / enrich — shows filtering loss
 
 
 @dataclass(slots=True)
@@ -203,15 +212,22 @@ async def run_analysis(
         max_msg_id=opts.max_msg_id,
     )
 
+    raw_count = len(msgs)
+
     # --- Enrichment (voice → text, image → description, etc.) runs BEFORE
     # filtering so enrichment can rescue a photo-only or voice-only message
     # from being dropped by min_msg_chars / text_only.
     enrich_opts = opts.enrich
+    enrich_cost = 0.0
+    enrich_summary_str = ""
+    enrich_kinds_used: list[str] = []
     if enrich_opts is not None and enrich_opts.any_enabled() and msgs:
         stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
-        summary = stats.summary()
-        if summary:
-            log.info("analyze.enrich", summary=summary)
+        enrich_summary_str = stats.summary()
+        enrich_cost = float(stats.total_cost_usd)
+        enrich_kinds_used = list(enrich_opts.kinds_enabled())
+        if enrich_summary_str:
+            log.info("analyze.enrich", summary=enrich_summary_str)
 
     f_opts = FilterOpts(
         min_msg_chars=opts.min_msg_chars
@@ -237,6 +253,13 @@ async def run_analysis(
             total_cost_usd=0.0,
             cache_hits=0,
             cache_misses=0,
+            prompt_version=preset.prompt_version,
+            filter_model=filter_model,
+            period=(opts.since, opts.until),
+            enrich_kinds=enrich_kinds_used,
+            enrich_cost_usd=enrich_cost,
+            enrich_summary=enrich_summary_str,
+            raw_msg_count=raw_count,
         )
 
     period = (opts.since, opts.until)
@@ -333,6 +356,13 @@ async def run_analysis(
             cache_misses=cache_misses,
             run_id=run_id,
             truncated=any_truncated,
+            prompt_version=preset.prompt_version,
+            filter_model=filter_model,
+            period=(opts.since, opts.until),
+            enrich_kinds=enrich_kinds_used,
+            enrich_cost_usd=enrich_cost,
+            enrich_summary=enrich_summary_str,
+            raw_msg_count=raw_count,
         )
 
     # --- Map-reduce branch
@@ -454,6 +484,13 @@ async def run_analysis(
         cache_misses=cache_misses,
         run_id=run_id,
         truncated=any_truncated,
+        prompt_version=preset.prompt_version,
+        filter_model=filter_model,
+        period=(opts.since, opts.until),
+        enrich_kinds=enrich_kinds_used,
+        enrich_cost_usd=enrich_cost,
+        enrich_summary=enrich_summary_str,
+        raw_msg_count=raw_count,
     )
 
 

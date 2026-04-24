@@ -11,10 +11,21 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+
+# beautifulsoup4 is a soft dependency: if it isn't installed (common right
+# after an upgrade where the user hasn't run `uv tool install --editable .
+# --reinstall` yet), link enrichment degrades to a no-op with a warning
+# rather than breaking every `atg analyze` at import time.
+try:
+    from bs4 import BeautifulSoup
+
+    _HAS_BS4 = True
+except ImportError:
+    _HAS_BS4 = False
+    BeautifulSoup = None  # type: ignore[assignment,misc]
 
 from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
 from analyzetg.config import get_settings
@@ -22,9 +33,6 @@ from analyzetg.db.repo import Repo
 from analyzetg.enrich.base import EnrichResult
 from analyzetg.models import Message
 from analyzetg.util.logging import get_logger
-
-if TYPE_CHECKING:
-    pass
 
 log = get_logger(__name__)
 
@@ -88,8 +96,6 @@ def _url_hash(url: str) -> str:
 
 def _clean_fetched_text(html: str) -> tuple[str | None, str]:
     """Return (title, readable-ish text) from an HTML document."""
-    from bs4 import BeautifulSoup
-
     soup = BeautifulSoup(html, "html.parser")
     # Remove noise.
     for tag in soup(["script", "style", "nav", "footer", "aside", "noscript"]):
@@ -151,6 +157,16 @@ async def enrich_url(
         for d in skip_domains:
             if d.lower() in host:
                 return None
+
+    # Mirror the `FfmpegMissing` pattern: a missing optional library should
+    # skip this enricher with a clear log line, not take down the run.
+    if not _HAS_BS4:
+        log.warning(
+            "enrich.link.lib_missing",
+            lib="beautifulsoup4",
+            hint="run `uv tool install --editable . --reinstall`",
+        )
+        return None
 
     h = _url_hash(normalized)
     cached = await repo.get_link_enrichment(h)
