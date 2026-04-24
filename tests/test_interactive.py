@@ -1,8 +1,8 @@
-"""Tests for the interactive wizard's pure arg-builder."""
+"""Tests for the interactive wizard's pure arg-builders."""
 
 from __future__ import annotations
 
-from analyzetg.interactive import InteractiveAnswers, build_analyze_args
+from analyzetg.interactive import InteractiveAnswers, build_analyze_args, build_dump_args
 
 
 def _answers(**overrides) -> InteractiveAnswers:
@@ -126,3 +126,37 @@ def test_run_on_all_unread_field_defaults_false() -> None:
     a = _answers()
     a.run_on_all_unread = True
     assert a.run_on_all_unread is True
+
+
+# --- build_dump_args (new enrichment passthrough) ---------------------
+
+
+def _dump_kwargs() -> dict:
+    return {"fmt": "md", "with_transcribe": False, "include_transcripts": True}
+
+
+def test_dump_default_enrich_is_config_defaults() -> None:
+    # enrich_kinds=None (wizard not used / skipped) → cmd_dump sees
+    # enrich=None and no_enrich=False, which build_enrich_opts then
+    # resolves to config defaults.
+    kw = build_dump_args(_answers(), **_dump_kwargs())
+    assert kw["enrich"] is None
+    assert kw["enrich_all"] is False
+    assert kw["no_enrich"] is False
+
+
+def test_dump_explicit_empty_enrich_becomes_no_enrich() -> None:
+    # User opened the wizard's enrich step and unchecked everything.
+    # That intent should flow to cmd_dump as --no-enrich so config
+    # defaults don't quietly re-enable voice/videonote/link.
+    kw = build_dump_args(_answers(enrich_kinds=[]), **_dump_kwargs())
+    assert kw["enrich"] is None
+    assert kw["no_enrich"] is True
+
+
+def test_dump_populated_enrich_becomes_csv() -> None:
+    # Explicit selection: wizard → comma-separated string → cmd_dump
+    # parses it and runs exactly those kinds. Order preserves insertion.
+    kw = build_dump_args(_answers(enrich_kinds=["voice", "image", "link"]), **_dump_kwargs())
+    assert kw["enrich"] == "voice,image,link"
+    assert kw["no_enrich"] is False

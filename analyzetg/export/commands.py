@@ -92,6 +92,9 @@ async def cmd_dump(
     mark_read: bool | None = None,
     all_flat: bool = False,
     all_per_topic: bool = False,
+    enrich: str | None = None,
+    enrich_all: bool = False,
+    no_enrich: bool = False,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
 
@@ -102,7 +105,7 @@ async def cmd_dump(
     `--thread N`, `--all-flat` (whole forum, explicit period required), or
     `--all-per-topic` (one file per topic).
     """
-    # No ref → interactive wizard (pick chat → thread → period → run).
+    # No ref → interactive wizard (pick chat → thread → enrich → period → run).
     # Wizard opens its own tg_client; return before this function tries to.
     if ref is None:
         from analyzetg.interactive import run_interactive_dump
@@ -120,6 +123,17 @@ async def cmd_dump(
 
     # Direct path: treat mark_read=None as False (CLI tri-state default).
     mark_read_bool = bool(mark_read)
+
+    # Build EnrichOpts from CLI flags (analyzer/commands hosts the shared
+    # helper). No preset for dump mode, so preset.enrich_kinds is empty.
+    from analyzetg.analyzer.commands import build_enrich_opts
+
+    enrich_opts = build_enrich_opts(
+        cli_enrich=enrich,
+        cli_enrich_all=enrich_all,
+        cli_no_enrich=no_enrich,
+        preset=None,
+    )
 
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
@@ -166,6 +180,7 @@ async def cmd_dump(
                 include_transcripts=include_transcripts,
                 console_out=console_out,
                 mark_read=mark_read_bool,
+                enrich_opts=enrich_opts,
             )
             return
 
@@ -217,6 +232,7 @@ async def cmd_dump(
             include_transcripts=include_transcripts,
             console_out=console_out,
             mark_read=mark_read_bool,
+            enrich_opts=enrich_opts,
         )
 
 
@@ -247,8 +263,17 @@ async def _dump_single(
     include_transcripts: bool,
     console_out: bool,
     mark_read: bool,
+    enrich_opts=None,
 ) -> None:
-    """Dump one chat (or one thread, or flat-forum) to a file or console."""
+    """Dump one chat (or one thread, or flat-forum) to a file or console.
+
+    `enrich_opts` (EnrichOpts) enables the same media-to-text pipeline
+    the analyzer uses: voice/videonote/video → transcript, photo →
+    image description, doc → extract, links → fetched summaries. When
+    set, enrichment runs after backfill and before export, so the
+    written MD picks up enriched bodies via `format_messages` (JSONL /
+    CSV include the new fields explicitly).
+    """
     start_msg_id = await _determine_start(
         client=client,
         chat_id=chat_id,
@@ -269,7 +294,11 @@ async def _dump_single(
         full_history=full_history,
     )
 
-    if with_transcribe:
+    # --with-transcribe is the legacy audio-only path. Enrichment (new)
+    # is broader: voice/videonote/video + image + doc + link. When both
+    # are set, enrichment supersedes — audio transcription still runs
+    # via the enrich.audio enricher.
+    if with_transcribe and (enrich_opts is None or not enrich_opts.any_enabled()):
         await _transcribe_pending(
             client=client,
             repo=repo,
@@ -286,6 +315,18 @@ async def _dump_single(
         until=until_dt,
         min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
     )
+
+    # Enrichment runs before export so the MD formatter sees transcripts,
+    # image descriptions, extracted doc text, and link summaries on the
+    # in-memory Message objects. JSONL/CSV read the same attributes.
+    if enrich_opts is not None and enrich_opts.any_enabled() and msgs:
+        from analyzetg.enrich.pipeline import enrich_messages
+
+        stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
+        summary = stats.summary()
+        if summary:
+            console.print(f"[dim]→ {summary}[/]")
+
     if not include_transcripts:
         for m in msgs:
             if m.transcript and not m.text:
@@ -327,6 +368,7 @@ async def _dump_forum_per_topic(
     include_transcripts: bool,
     console_out: bool,
     mark_read: bool,
+    enrich_opts=None,
 ) -> None:
     console.print("[dim]→ Listing forum topics...[/]")
     topics = await list_forum_topics(client, chat_id)
@@ -388,6 +430,7 @@ async def _dump_forum_per_topic(
                 include_transcripts=include_transcripts,
                 console_out=console_out,
                 mark_read=mark_read,
+                enrich_opts=enrich_opts,
             )
         except typer.Exit:
             raise

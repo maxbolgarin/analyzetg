@@ -46,6 +46,17 @@ def export_jsonl(msgs: list[Message], output: Path) -> None:
                         "media_doc_id": m.media_doc_id,
                         "media_duration": m.media_duration,
                         "transcript": m.transcript,
+                        # Enrichment fields: always present (null when
+                        # that kind of enrichment didn't run or applied).
+                        # Keeps the JSONL schema stable across runs with
+                        # different --enrich sets.
+                        "image_description": m.image_description,
+                        "extracted_text": m.extracted_text,
+                        "link_summaries": (
+                            [[url, summary] for url, summary in m.link_summaries]
+                            if m.link_summaries
+                            else None
+                        ),
                     },
                     ensure_ascii=False,
                 )
@@ -72,9 +83,20 @@ def export_csv(msgs: list[Message], output: Path) -> None:
                 "media_doc_id",
                 "media_duration",
                 "transcript",
+                "image_description",
+                "extracted_text",
+                "link_summaries",
             ]
         )
         for m in msgs:
+            # CSV can't carry structured lists; flatten link_summaries to
+            # `"url1: summary1; url2: summary2"`. Newlines in summaries
+            # stay as-is — Python's csv handles quoting automatically.
+            links_flat = (
+                "; ".join(f"{url}: {summary}" for url, summary in m.link_summaries)
+                if m.link_summaries
+                else ""
+            )
             w.writerow(
                 [
                     m.chat_id,
@@ -90,5 +112,8 @@ def export_csv(msgs: list[Message], output: Path) -> None:
                     m.media_doc_id,
                     m.media_duration,
                     m.transcript,
+                    m.image_description,
+                    m.extracted_text,
+                    links_flat,
                 ]
             )
