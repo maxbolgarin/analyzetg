@@ -127,4 +127,19 @@ def resolve_folder(needle: str, folders: list[Folder]) -> Folder | None:
     return None
 
 
-__all__ = ["Folder", "list_folders", "resolve_folder"]
+async def chat_folder_index(client: TelegramClient) -> dict[int, list[str]]:
+    """Return `{chat_id: [folder_title, ...]}` for every explicitly-included chat.
+
+    Rule-based folders (contacts/groups/etc.) are not expanded — same caveat
+    as `list_folders`. Each chat may appear in multiple folders; titles are
+    returned in folder-iteration order. Empty dict if there are no folders.
+    """
+    folders = await list_folders(client)
+    out: dict[int, list[str]] = {}
+    for f in folders:
+        for cid in f.include_chat_ids:
+            out.setdefault(cid, []).append(f.title)
+    return out
+
+
+__all__ = ["Folder", "chat_folder_index", "list_folders", "resolve_folder"]

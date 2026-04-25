@@ -80,7 +80,10 @@ class EnrichCfg(_StrictCfg):
     video: bool = False
     image: bool = False
     doc: bool = False
-    link: bool = True
+    # Off by default — link summaries can fire one OpenAI call per unique URL,
+    # which surprises users on link-heavy chats. Opt in via --enrich=link, the
+    # `links` preset, or `link = true` in config.toml.
+    link: bool = False
     vision_model: str = "gpt-4o-mini"
     doc_model: str | None = None  # None → falls back to filter_model
     link_model: str | None = None  # None → falls back to filter_model

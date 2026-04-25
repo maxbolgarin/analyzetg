@@ -198,7 +198,10 @@ async def _describe_overview(
     limit: int | None,
     show_all: bool,
 ) -> None:
+    from analyzetg.tg.folders import chat_folder_index
+
     console.print("[dim]→ Listing dialogs...[/]")
+    folder_idx = await chat_folder_index(client)
     rows: list[tuple] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
         entity = d.entity
@@ -222,7 +225,8 @@ async def _describe_overview(
                 continue
 
         stats = await repo.chat_stats(eid)
-        rows.append((unread, eid, k, t or "", u or "", stats["count"], stats["date_max"]))
+        folders_str = ", ".join(folder_idx.get(eid, []))
+        rows.append((unread, eid, k, t or "", u or "", stats["count"], stats["date_max"], folders_str))
 
     rows.sort(key=lambda r: (-r[0], -r[5]))
     if limit:
@@ -243,9 +247,9 @@ async def _describe_overview(
     title = "Dialogs (" + ", ".join(desc_parts) + ")"
 
     table = Table(title=title)
-    for col in ("id", "kind", "title", "username", "unread", "stored", "last_msg"):
+    for col in ("id", "kind", "title", "username", "unread", "stored", "last_msg", "folder"):
         table.add_column(col)
-    for unread, eid, k, t, u, stored, dmax in rows:
+    for unread, eid, k, t, u, stored, dmax, folders_str in rows:
         table.add_row(
             str(eid),
             k,
@@ -254,6 +258,7 @@ async def _describe_overview(
             str(unread) if unread else "",
             str(stored) if stored else "",
             dmax.strftime("%Y-%m-%d %H:%M") if dmax else "",
+            folders_str,
         )
     console.print(table)
     hint_parts = [f"{len(rows)} row(s)"]
@@ -286,6 +291,17 @@ async def _describe_one(client, repo, ref: str) -> None:
 
     if resolved.username:
         _row("username", f"@{resolved.username} — https://t.me/{resolved.username}")
+    # Telegram folders the chat is explicitly listed in (rule-based folders
+    # are not expanded — see tg/folders.py).
+    try:
+        from analyzetg.tg.folders import chat_folder_index
+
+        idx = await chat_folder_index(client)
+        folders_for_chat = idx.get(chat_id, [])
+        if folders_for_chat:
+            _row("folder", ", ".join(folders_for_chat))
+    except Exception as e:
+        log.debug("describe.folder_lookup_failed", err=str(e)[:100])
     _row("unread", str(unread_count) if unread_count else None)
     _row(
         "read marker",

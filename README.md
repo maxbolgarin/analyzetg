@@ -261,13 +261,14 @@ into something the LLM can read:
 | **text** | Used as-is | always on |
 | **voice** (🎤) | Transcribed via OpenAI Audio (`gpt-4o-mini-transcribe`) | **on** |
 | **videonote** (round) | Audio extracted by ffmpeg → transcribed | **on** |
-| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | **on** |
+| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | off |
 | **video** | Audio extracted by ffmpeg → transcribed | off |
 | **photo** | Described via vision model (`gpt-4o-mini` by default) — short caption + OCR of any on-image text | off |
 | **doc** (PDF / DOCX / txt / md / code) | Text extracted locally (`pypdf` / `python-docx` / plain read); truncated to `max_doc_chars` | off |
 
-Everything except voice / videonote / link is **opt-in** — extra
-enrichments cost extra API calls. Three ways to turn them on:
+Only voice and videonote are on by default. Everything else is **opt-in**
+because each one fires its own OpenAI / network call (one per unique URL,
+photo, or document). Three ways to turn extras on:
 
 ```bash
 # Per-run, explicit set
@@ -296,10 +297,10 @@ without you remembering a flag.
 [enrich]
 voice = true
 videonote = true
-link = true
 video = false
 image = false
 doc = false
+link = false   # opt-in: one OpenAI call per unique URL
 vision_model = "gpt-4o-mini"
 # doc_model / link_model default to the preset's filter_model when null.
 max_images_per_run = 50

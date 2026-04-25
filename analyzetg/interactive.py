@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import math
+import string as _string
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,40 @@ from analyzetg.tg.dialogs import list_unread_dialogs
 from analyzetg.tg.topics import list_forum_topics
 from analyzetg.util.logging import get_logger
 from analyzetg.util.pricing import chat_cost
+
+
+def _expand_printable_for_search() -> None:
+    """Let questionary's `use_search_filter=True` accept non-ASCII input.
+
+    questionary registers a key binding per character in `string.printable`
+    (ASCII only — 100 chars) and silently drops everything else via a
+    catch-all `Keys.Any` no-op. We expand `string.printable` here so the
+    same registration loop covers Cyrillic, Latin Extended (accented
+    letters), Greek, Hebrew, and Arabic — i.e. type-to-filter just works
+    for chats whose titles aren't Latin.
+
+    CJK isn't included on purpose: tens of thousands of glyphs would
+    register tens of thousands of prompt_toolkit bindings per picker;
+    terminal IMEs for those scripts also interact poorly with single-key
+    filter bindings.
+    """
+    if any(ord(c) > 127 for c in _string.printable):
+        return
+    extra: list[str] = []
+    for start, end in (
+        (0x00A0, 0x024F),  # Latin-1 Supplement + Latin Extended-A/B (umlauts, accents)
+        (0x0370, 0x03FF),  # Greek
+        (0x0400, 0x052F),  # Cyrillic + Cyrillic Supplement
+        (0x0590, 0x06FF),  # Hebrew + Arabic
+    ):
+        for cp in range(start, end + 1):
+            ch = chr(cp)
+            if ch.isprintable():
+                extra.append(ch)
+    _string.printable = _string.printable + "".join(extra)
+
+
+_expand_printable_for_search()
 
 console = Console()
 log = get_logger(__name__)
@@ -112,11 +147,16 @@ def _bind_arrow_checkbox(question):
     bindings = question.application.key_bindings
 
     @bindings.add(Keys.Right, eager=True)
-    def _select(event):
+    def _toggle_right(event):
+        # → toggles: select if unchecked, deselect if checked. Mirrors how most
+        # users instinctively retry → after realizing they want to uncheck;
+        # forcing them to reach for ← or Space for that one row was friction.
         choice = ic.get_pointed_at()
         if choice is None:
             return
-        if choice.value not in ic.selected_options:
+        if choice.value in ic.selected_options:
+            ic.selected_options.remove(choice.value)
+        else:
             ic.selected_options.append(choice.value)
 
     @bindings.add(Keys.Left, eager=True)
@@ -399,7 +439,12 @@ async def _collect_answers(
     mark_read_forced = mark_read is not None
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path):
-        console.print("[bold cyan]analyzetg[/] — interactive mode")
+        # Make the action ("analyze" / "dump" / etc.) visible up-front; with
+        # only "atg dump" in the scrollback, it's easy to forget which command
+        # this wizard belongs to by the time you reach the confirm step.
+        console.print(
+            f"[bold cyan]analyzetg[/] — interactive mode  [dim](action:[/] [bold]{mode}[/][dim])[/]"
+        )
         # Show the immutable settings so the user knows what will happen.
         if output_forced:
             out_label = (
@@ -497,7 +542,32 @@ async def _collect_answers(
             elif step == "enrich":
                 # Runs for both analyze and dump so media-to-text
                 # conversion flows into either output path.
-                result = await _pick_enrich()
+                # Show per-kind counts so the user knows what enabling
+                # `image` / `link` will actually cost — DB-derived from
+                # already-synced messages. Backfill may add more.
+                media_counts: dict[str, int] = {}
+                if chat is not None:
+                    try:
+                        async with open_repo(get_settings().storage.data_path) as repo:
+                            media_counts = await repo.media_breakdown(
+                                int(chat["chat_id"]),
+                                thread_id=thread_id,
+                            )
+                    except Exception as e:
+                        log.debug("interactive.media_breakdown_failed", err=str(e)[:200])
+                if media_counts.get("total"):
+                    parts: list[str] = []
+                    if media_counts.get("any_media"):
+                        parts.append(f"{media_counts['any_media']} with media")
+                    if media_counts.get("links"):
+                        parts.append(f"{media_counts['links']} with URLs")
+                    extras = ", " + ", ".join(parts) if parts else ""
+                    console.print(
+                        f"[dim]→ Already synced for this chat: "
+                        f"{media_counts['total']} message(s){extras}. "
+                        "Backfill at run time may add more.[/]"
+                    )
+                result = await _pick_enrich(media_counts=media_counts)
                 if result is BACK:
                     # Go back to the step that preceded us: preset for
                     # analyze mode, thread (forum) or chat (non-forum)
@@ -619,7 +689,10 @@ async def _collect_answers(
                 )
                 if chosen_mark_read:
                     summary_bits.append("mark-read")
-                console.print("[bold]Plan:[/] " + " / ".join(summary_bits))
+                # Lead with the action (analyze / dump / …) so the confirm
+                # line is unambiguous on its own — the user shouldn't have to
+                # scroll up to remember which command they invoked.
+                console.print(f"[bold]Plan ([yellow]{mode}[/]):[/] " + " / ".join(summary_bits))
 
                 # Only show a cost estimate for the analyze flow (dump
                 # doesn't hit OpenAI for chat completion) and when we have
@@ -1052,6 +1125,22 @@ def _short_kind(kind: str) -> str:
 _COL_UNREAD = 6  # up to 999999 unread — plenty
 _COL_KIND = 7  # "channel" is the longest after shortening
 _COL_DATE = 12  # "Apr 23 09:14" is the longest short form
+_COL_FOLDER = 14  # truncated to keep the title column readable on 80-col terms
+
+
+def _fmt_folder(folders: list[str] | None) -> str:
+    """Render a chat's folder membership for the picker.
+
+    Multiple folders are joined with `+`; the whole field is truncated to
+    `_COL_FOLDER` so a chat in many folders doesn't push the title off
+    the right edge. Empty cell when the chat is in no folder (very common).
+    """
+    if not folders:
+        return ""
+    s = "+".join(folders)
+    if len(s) > _COL_FOLDER:
+        return s[: _COL_FOLDER - 1] + "…"
+    return s
 
 
 def _chat_row(
@@ -1060,6 +1149,7 @@ def _chat_row(
     kind: str,
     last_msg_date: datetime | None,
     title: str | int | None,
+    folders: list[str] | None = None,
 ) -> str:
     """One formatted row in the chat-picker table.
 
@@ -1071,12 +1161,19 @@ def _chat_row(
         f"{_fmt_count(unread)}  "
         f"{_short_kind(kind):<{_COL_KIND}}  "
         f"{_fmt_date(last_msg_date):<{_COL_DATE}}  "
+        f"{_fmt_folder(folders):<{_COL_FOLDER}}  "
         f"{title or ''}"
     )
 
 
 def _chat_header_row() -> str:
-    return f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'last msg':<{_COL_DATE}}  title"
+    return (
+        f"{'unread':>{_COL_UNREAD}}  "
+        f"{'kind':<{_COL_KIND}}  "
+        f"{'last msg':<{_COL_DATE}}  "
+        f"{'folder':<{_COL_FOLDER}}  "
+        f"title"
+    )
 
 
 async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None | object:
@@ -1087,14 +1184,33 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
       - ALL_UNREAD — user picked "Run on all N unread chats" (if offer_all_unread)
       - None — cancelled
     """
+    from analyzetg.tg.folders import chat_folder_index
+
     unread = await list_unread_dialogs(client)
 
     if not unread:
         console.print("[yellow]No chats with unread messages. Showing all dialogs.[/]")
         return await _pick_from_all(client)
 
-    # Column header as a non-selectable separator at the top.
+    # Folder index: empty dict if the user hasn't defined any folders or
+    # the lookup fails (we don't want to abort the picker over a side-info
+    # column).
+    try:
+        folder_idx = await chat_folder_index(client)
+    except Exception as e:
+        log.warning("interactive.folder_index_failed", err=str(e)[:200])
+        folder_idx = {}
+
+    # Top of the list: navigation actions (search-all, run-all-unread) so
+    # the highlight starts on the first one and user reaches them without
+    # scrolling. Per-chat rows follow under their column header.
     choices: list[Any] = []
+    choices.append(
+        questionary.Choice(
+            title="🔍  Search all dialogs (not just unread)",
+            value=("all", None),
+        )
+    )
     if offer_all_unread:
         total = sum(d.unread_count for d in unread)
         choices.append(
@@ -1103,7 +1219,7 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
                 value=("all_unread", None),
             )
         )
-        choices.append(questionary.Separator())
+    choices.append(questionary.Separator())
     choices.append(questionary.Separator(_chat_header_row()))
     for d in unread:
         choices.append(
@@ -1113,12 +1229,11 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
                     kind=d.kind,
                     last_msg_date=d.last_msg_date,
                     title=d.title or d.chat_id,
+                    folders=folder_idx.get(d.chat_id),
                 ),
                 value=("pick", d),
             )
         )
-    choices.append(questionary.Separator())
-    choices.append(questionary.Choice(title="🔍  Search all dialogs (not just unread)", value=("all", None)))
     # No "Back" on the first step — there's nowhere to go back to.
     # Ctrl-C cancels the whole wizard.
 
@@ -1158,36 +1273,72 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
 async def _pick_from_all(client) -> dict | None:
     """Scan every dialog and present a searchable list."""
     from analyzetg.tg.client import _chat_kind, entity_id, entity_title, entity_username
+    from analyzetg.tg.dialogs import UnreadDialog, correct_forum_unread
 
-    rows: list[dict] = []
+    # Build UnreadDialog rows so we can run the same forum-count correction
+    # the unread-only picker uses. Without this, forums show garbage like
+    # 99,755 unread (Telegram caps the dialog-level counter at 99,999 and
+    # rarely decrements it on partial mark-read).
+    snapshot: list[UnreadDialog] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
         entity = d.entity
-        rows.append(
-            {
-                "chat_id": entity_id(entity),
-                "kind": _chat_kind(entity),
-                "title": entity_title(entity),
-                "username": entity_username(entity),
-                "unread": int(getattr(d, "unread_count", 0) or 0),
-            }
+        snapshot.append(
+            UnreadDialog(
+                chat_id=entity_id(entity),
+                kind=_chat_kind(entity),
+                title=entity_title(entity),
+                username=entity_username(entity),
+                unread_count=int(getattr(d, "unread_count", 0) or 0),
+                read_inbox_max_id=int(getattr(d, "read_inbox_max_id", 0) or 0),
+            )
         )
+    await correct_forum_unread(client, snapshot)
+    from analyzetg.tg.folders import chat_folder_index
+
+    try:
+        folder_idx = await chat_folder_index(client)
+    except Exception as e:
+        log.warning("interactive.folder_index_failed", err=str(e)[:200])
+        folder_idx = {}
+    rows: list[dict] = [
+        {
+            "chat_id": d.chat_id,
+            "kind": d.kind,
+            "title": d.title,
+            "username": d.username,
+            "unread": d.unread_count,
+            "folders": folder_idx.get(d.chat_id, []),
+        }
+        for d in snapshot
+    ]
     if not rows:
         console.print("[yellow]No dialogs at all.[/]")
         return None
 
-    # Sort: unread desc, then alpha title.
-    rows.sort(key=lambda r: (-r["unread"], (r["title"] or "").lower()))
+    # Unread chats first (by count desc, then alpha) — keeps triage on top.
+    # Read chats below, grouped by kind (channel → group → forum → user)
+    # then alpha within each bucket — easier to scan a long list of already-
+    # read dialogs when bots/users aren't interleaved with channels.
+    _kind_order = {"channel": 0, "supergroup": 1, "group": 1, "forum": 2, "user": 3}
+    rows.sort(
+        key=lambda r: (
+            0 if r["unread"] > 0 else 1,
+            -r["unread"] if r["unread"] > 0 else _kind_order.get(r["kind"], 99),
+            (r["title"] or "").lower(),
+        )
+    )
 
     # Mirror the shape of _pick_chat's table so navigation between the two
     # pickers isn't visually jarring. Last-msg-date isn't available from
     # iter_dialogs here without extra fetches — leave it blank.
-    header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  title"
+    header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'folder':<{_COL_FOLDER}}  title"
     choices: list[Any] = [questionary.Separator(header_line)]
     choices.extend(
         questionary.Choice(
             title=(
                 f"{_fmt_count(r['unread'])}  "
                 f"{_short_kind(r['kind']):<{_COL_KIND}}  "
+                f"{_fmt_folder(r['folders']):<{_COL_FOLDER}}  "
                 f"{r['title'] or r['chat_id']}"
             ),
             value=r,
@@ -1386,27 +1537,48 @@ async def _pick_output(*, default_path: Path | None):
     return False, path
 
 
-async def _pick_enrich() -> list[str] | None | object:
+async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[str] | None | object:
     """Pick which media kinds to enrich this run.
 
     Returns a list of enabled kind names (possibly empty = "none"),
     BACK to step back, or None to cancel. Pre-checks the current config
     defaults so the common case is "hit Enter".
+
+    `media_counts` decorates each row with how many messages of that kind
+    are already in the local DB for this chat — gives the user a feel for
+    cost before committing to enrichment. Pass `None` to skip the
+    decoration (used by tests / first-run flows).
     """
     settings = get_settings()
     cfg = settings.enrich
-    # Order reflects default-on status: voice + videonote + link first
-    # (the three kinds that default to True in config), then the opt-in
-    # media enrichments. Keeping default-on items at the top means hitting
-    # Enter through the wizard mostly picks the pre-checked defaults and
-    # the user sees what's on without scrolling.
+    counts = media_counts or {}
+
+    def _suffix(kind_db_key: str) -> str:
+        # `link` doesn't map to a media_type — proxy via "messages with a
+        # URL substring" which media_breakdown precomputes.
+        n = counts.get(kind_db_key, 0)
+        return f"  ({n} in db)" if n else ""
+
+    # Order reflects default-on status: voice + videonote first (the two
+    # kinds that default to True in config), then the opt-in enrichments.
+    # Keeping default-on items at the top means hitting Enter through the
+    # wizard mostly picks the pre-checked defaults and the user sees what's
+    # on without scrolling.
     all_kinds = [
-        ("voice", "Voice messages — transcribe", cfg.voice),
-        ("videonote", "Video notes (round videos) — transcribe", cfg.videonote),
-        ("link", "External URLs — fetch and summarize", cfg.link),
-        ("video", "Videos — transcribe audio track", cfg.video),
-        ("image", "Photos — describe via vision model (spendy)", cfg.image),
-        ("doc", "Documents (PDF / DOCX / text) — extract text", cfg.doc),
+        ("voice", f"Voice messages — transcribe{_suffix('voice')}", cfg.voice),
+        (
+            "videonote",
+            f"Video notes (round videos) — transcribe{_suffix('videonote')}",
+            cfg.videonote,
+        ),
+        ("link", f"External URLs — fetch and summarize{_suffix('links')}", cfg.link),
+        ("video", f"Videos — transcribe audio track{_suffix('video')}", cfg.video),
+        (
+            "image",
+            f"Photos — describe via vision model (spendy){_suffix('photo')}",
+            cfg.image,
+        ),
+        ("doc", f"Documents (PDF / DOCX / text) — extract text{_suffix('doc')}", cfg.doc),
     ]
     choices = [
         questionary.Choice(title=label, value=key, checked=default_on) for key, label, default_on in all_kinds
@@ -1414,7 +1586,7 @@ async def _pick_enrich() -> list[str] | None | object:
     picked = await _bind_escape(
         _bind_arrow_checkbox(
             questionary.checkbox(
-                "Enrich media? (→ check, ← uncheck, space to toggle, Enter to accept)",
+                "Enrich media? (→ / space to toggle, ← to uncheck, Enter to accept)",
                 choices=choices,
                 style=LIST_STYLE,
             )

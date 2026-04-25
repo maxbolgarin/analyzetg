@@ -100,6 +100,73 @@ async def mark_as_read(
         return False
 
 
+async def correct_forum_unread(
+    client: TelegramClient,
+    dialogs: list[UnreadDialog],
+    *,
+    concurrency: int = 5,
+) -> None:
+    """Replace unreliable dialog-level forum unread counts with per-topic sums.
+
+    Mutates each candidate `UnreadDialog` in place: sets `unread_count` to
+    the sum of per-topic `unread_count` from `GetForumTopicsRequest` and,
+    when a misclassified supergroup turns out to be a forum, upgrades
+    `kind="forum"`.
+
+    Telegram's dialog-level unread for forums is unreliable in both
+    directions:
+    - **Too high:** counter is capped at 99,999 and isn't always
+      decremented when topics are read elsewhere — you can see 24k or 99k
+      on a forum that actually has < 100 unread per topic.
+    - **Too low (zero):** after a partial mark-read, the dialog count can
+      sit at 0 while per-topic counters are still non-zero.
+    - **Misclassified:** Telethon sometimes returns a Channel entity
+      without the `forum` flag set (stale cache), so `_chat_kind` calls
+      it `supergroup` even when it's a forum.
+
+    We probe every `kind='forum'` AND every `kind='supergroup'` (the
+    cache-stale case). Supergroups that aren't forums raise from
+    `GetForumTopicsRequest`; we silently swallow those — their count
+    stays whatever the dialog said.
+
+    Cost: one `GetForumTopicsRequest` per probe target, `concurrency`-way
+    parallel. Typically 20–50 RPCs total when called over a full
+    `iter_dialogs` snapshot, completing in ~100–500 ms.
+    """
+    import asyncio as _asyncio
+
+    targets = [d for d in dialogs if d.kind in {"forum", "supergroup"}]
+    if not targets:
+        return
+
+    from analyzetg.tg.topics import list_forum_topics
+    from analyzetg.util.logging import get_logger as _get_logger
+
+    log = _get_logger(__name__)
+    sem = _asyncio.Semaphore(concurrency)
+
+    async def _probe(d: UnreadDialog) -> None:
+        async with sem:
+            try:
+                topics = await list_forum_topics(client, d.chat_id)
+            except Exception as e:
+                # Non-forum supergroup: GetForumTopicsRequest rejects the peer.
+                # Expected for the probe path. Only WARN for kind='forum',
+                # where a failure is actually surprising.
+                if d.kind == "forum":
+                    log.warning(
+                        "correct_forum_unread.probe_failed",
+                        chat_id=d.chat_id,
+                        err=str(e)[:200],
+                    )
+                return
+            d.unread_count = sum(t.unread_count for t in topics)
+            if d.kind == "supergroup" and topics:
+                d.kind = "forum"
+
+    await _asyncio.gather(*[_probe(d) for d in targets])
+
+
 async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
     """All dialogs with unread messages, sorted by unread_count descending.
 
@@ -124,13 +191,11 @@ async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
     which we quietly swallow — they stay at count=0 and get dropped by
     the final filter.
 
-    Cost: roughly one `GetForumTopicsRequest` per (forum + zero-unread
-    supergroup) in your dialog list, 5-way parallel. Users with many
-    read supergroups pay a one-time latency hit (~100-300ms total) when
+    Cost: roughly one `GetForumTopicsRequest` per (forum + supergroup)
+    in your dialog list, 5-way parallel. Users with many read
+    supergroups pay a one-time latency hit (~100-300ms total) when
     opening the picker.
     """
-    import asyncio as _asyncio
-
     out: list[UnreadDialog] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
         entity = d.entity
@@ -161,46 +226,9 @@ async def list_unread_dialogs(client: TelegramClient) -> list[UnreadDialog]:
             )
         )
 
-    # Fix potentially-forum counts: replace the unreliable dialog-level
-    # number with the sum of per-topic `unread_count`. We probe both
-    # kind='forum' (trusted case) AND kind='supergroup' with count=0
-    # (the cache-stale case that misclassified UNION for a real user).
-    # If GetForumTopicsRequest fails for a non-forum supergroup, we
-    # leave count=0 and the final filter drops it.
-    probe_targets = [d for d in out if d.kind == "forum" or (d.kind == "supergroup" and d.unread_count == 0)]
-    if probe_targets:
-        from analyzetg.util.logging import get_logger as _get_logger
-
-        log = _get_logger(__name__)
-        from analyzetg.tg.topics import list_forum_topics
-
-        sem = _asyncio.Semaphore(5)
-
-        async def _probe(d: UnreadDialog) -> None:
-            async with sem:
-                try:
-                    topics = await list_forum_topics(client, d.chat_id)
-                except Exception as e:
-                    # Non-forum supergroup: GetForumTopicsRequest rejects
-                    # the peer. Expected for the probe path. Log at DEBUG
-                    # only for kind='forum' — those SHOULD succeed; a
-                    # failure there is genuinely surprising.
-                    if d.kind == "forum":
-                        log.warning(
-                            "list_unread_dialogs.forum_probe_failed",
-                            chat_id=d.chat_id,
-                            err=str(e)[:200],
-                        )
-                    return
-                real = sum(t.unread_count for t in topics)
-                d.unread_count = real
-                # If we probed a supergroup and it WAS a forum, upgrade
-                # the kind so downstream (picker, analyze routing) sees
-                # the right category.
-                if d.kind == "supergroup" and topics:
-                    d.kind = "forum"
-
-        await _asyncio.gather(*[_probe(d) for d in probe_targets])
+    # Fix unreliable dialog-level forum counts (capped at 99k, not always
+    # decremented, sometimes misclassified as supergroup).
+    await correct_forum_unread(client, out)
 
     # Drop any dialog whose real count is 0 (forums that looked unread at
     # the dialog level but were empty per-topic, supergroups that turned

@@ -159,6 +159,7 @@ async def enrich_image(
                 "doc_id": msg.media_doc_id,
                 "chat_id": msg.chat_id,
                 "msg_id": msg.msg_id,
+                "msg_date": msg.date.isoformat() if msg.date else None,
             },
         )
         log.info(
@@ -170,6 +171,9 @@ async def enrich_image(
             completion=completion_tokens,
             cost=float(cost),
             doc_id=msg.media_doc_id,
+            chat_id=msg.chat_id,
+            msg_id=msg.msg_id,
+            msg_date=msg.date.isoformat() if msg.date else None,
         )
         msg.image_description = description
         return EnrichResult(

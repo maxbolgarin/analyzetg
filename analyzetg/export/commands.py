@@ -90,6 +90,7 @@ async def cmd_dump(
     no_enrich: bool = False,
     save_media: bool = False,
     save_media_types: str | None = None,
+    folder: str | None = None,
     yes: bool = False,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
@@ -99,8 +100,50 @@ async def cmd_dump(
     override. When <ref> is omitted, iterates every dialog with unread
     messages after a confirmation prompt. Forum chats support
     `--thread N`, `--all-flat` (whole forum, explicit period required), or
-    `--all-per-topic` (one file per topic).
+    `--all-per-topic` (one file per topic). Without <ref> and with
+    `--folder NAME`, batch-dumps every chat in that folder with unread
+    messages.
     """
+    # No ref + --folder → batch-dump unread chats in the folder.
+    if ref is None and folder:
+        rejected = [
+            flag
+            for flag, present in (
+                ("--full-history", full_history),
+                ("--since", bool(since)),
+                ("--until", bool(until)),
+                ("--last-days", last_days is not None),
+                ("--from-msg", bool(from_msg)),
+            )
+            if present
+        ]
+        if rejected:
+            raise typer.BadParameter(
+                f"--folder is unread-only and does not support {', '.join(rejected)}. "
+                "Run per-chat with `atg dump <ref> <flag>` for a specific window."
+            )
+        if output and output.suffix and not (output.exists() and output.is_dir()):
+            raise typer.BadParameter(
+                f"--output {output} looks like a file but --folder batch needs a directory "
+                "(one report per chat). Pass a directory path or drop --output."
+            )
+        await run_all_unread_dump(
+            fmt=fmt,
+            output=output,
+            console_out=console_out,
+            with_transcribe=with_transcribe,
+            include_transcripts=include_transcripts,
+            mark_read=mark_read,
+            enrich=enrich,
+            enrich_all=enrich_all,
+            no_enrich=no_enrich,
+            save_media=save_media,
+            save_media_types=save_media_types,
+            folder=folder,
+            yes=yes,
+        )
+        return
+
     # No ref → interactive wizard (pick chat → thread → enrich → period → run).
     # Wizard opens its own tg_client; return before this function tries to.
     if ref is None:
@@ -583,13 +626,20 @@ async def run_all_unread_dump(
     with_transcribe: bool = False,
     include_transcripts: bool = True,
     console_out: bool = False,
-    mark_read: bool = False,
+    mark_read: bool | None = False,
     enrich: str | None = None,
     enrich_all: bool = False,
     no_enrich: bool = False,
+    save_media: bool = False,
+    save_media_types: str | None = None,
+    folder: str | None = None,
     yes: bool = False,
 ) -> None:
-    """Public: dump every unread chat in one batch (was the old no-ref default)."""
+    """Public: dump every unread chat in one batch (was the old no-ref default).
+
+    Pass `folder="Alpha"` (or any case-insensitive substring of a folder
+    title) to restrict the batch to chats in that Telegram folder.
+    """
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _dump_no_ref(
@@ -604,6 +654,9 @@ async def run_all_unread_dump(
             enrich=enrich,
             enrich_all=enrich_all,
             no_enrich=no_enrich,
+            save_media=save_media,
+            save_media_types=save_media_types,
+            folder=folder,
             yes=yes,
         )
 
@@ -617,14 +670,32 @@ async def _dump_no_ref(
     with_transcribe: bool,
     include_transcripts: bool,
     console_out: bool,
-    mark_read: bool,
+    mark_read: bool | None,
     enrich: str | None,
     enrich_all: bool,
     no_enrich: bool,
-    yes: bool,
+    save_media: bool = False,
+    save_media_types: str | None = None,
+    folder: str | None = None,
+    yes: bool = False,
 ) -> None:
+    # Tri-state: ask once unless --yes was passed (default: keep unread).
+    import sys as _sys
+
     from analyzetg.core.pipeline import prepare_all_unread_runs
     from analyzetg.enrich.base import EnrichOpts
+
+    mark_read_effective: bool
+    if mark_read is None:
+        if yes or not _sys.stdin.isatty():
+            mark_read_effective = False
+        else:
+            mark_read_effective = typer.confirm(
+                "Mark messages as read in Telegram after each chat is dumped?",
+                default=False,
+            )
+    else:
+        mark_read_effective = mark_read
 
     if console_out:
         out_dir = None
@@ -647,18 +718,36 @@ async def _dump_no_ref(
     if with_transcribe and not enrich_opts.any_enabled():
         enrich_opts = EnrichOpts(voice=True, videonote=True, video=True)
 
+    save_media_kinds: set[str] | None = None
+    if save_media_types:
+        save_media_kinds = {k.strip() for k in save_media_types.split(",") if k.strip()}
+
+    successes = 0
+    failures: list[tuple[int, str | None, str]] = []
+
     async for prepared in prepare_all_unread_runs(
         client=client,
         repo=repo,
         settings=settings,
         enrich_opts=enrich_opts,
         include_transcripts=include_transcripts,
-        mark_read=mark_read,
+        mark_read=mark_read_effective,
+        folder=folder,
         yes=yes,
     ):
         msgs = prepared.messages
         title = prepared.chat_title
         try:
+            if save_media and msgs:
+                from analyzetg.media.commands import save_raw_media
+
+                await save_raw_media(
+                    prepared,
+                    types=save_media_kinds,
+                    output_dir=None,
+                    limit=None,
+                    overwrite=False,
+                )
             if out_dir is None:
                 _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
             else:
@@ -668,7 +757,16 @@ async def _dump_no_ref(
                 _write(msgs, fmt=fmt, output=path, title=title)
                 console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {path}")
             if prepared.mark_read_fn and msgs:
-                await prepared.mark_read_fn()
+                try:
+                    await prepared.mark_read_fn()
+                except Exception as e:
+                    log.warning(
+                        "dump.no_ref.mark_read_failed",
+                        chat_id=prepared.chat_id,
+                        err=str(e)[:200],
+                    )
+                    console.print(f"[yellow]⚠ Could not mark as read:[/] {e}")
+            successes += 1
         except Exception as e:
             log.error(
                 "dump.no_ref.chat_error",
@@ -676,6 +774,19 @@ async def _dump_no_ref(
                 err=str(e)[:200],
             )
             console.print(f"[red]Failed:[/] {e}")
+            failures.append((prepared.chat_id, prepared.chat_title, str(e)[:200]))
+
+    total = successes + len(failures)
+    if total == 0:
+        return
+    if failures:
+        console.print(
+            f"\n[bold]Batch complete:[/] {successes}/{total} chats succeeded, [red]{len(failures)} failed[/]."
+        )
+        for cid, ctitle, err in failures:
+            console.print(f"  [red]×[/] {ctitle or cid}: {err}")
+        raise typer.Exit(1)
+    console.print(f"\n[bold green]Batch complete:[/] {successes}/{total} chats succeeded.")
 
 
 def _print_unread_table(dialogs: list[UnreadDialog]) -> None:
