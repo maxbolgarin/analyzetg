@@ -3,7 +3,7 @@ name: links
 prompt_version: v3
 needs_reduce: true
 filter_model: gpt-5.4-nano
-final_model: gpt-5.4
+final_model: gpt-5.4-mini
 output_budget_tokens: 2500
 map_output_tokens: 1500
 enrich: [link]

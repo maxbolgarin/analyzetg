@@ -109,6 +109,183 @@ async def cmd_init() -> None:
         console.print(f"[yellow]OpenAI check failed:[/] {e}")
 
 
+# --------------------------------------------------------------------- doctor
+
+
+async def cmd_doctor() -> None:
+    """Run a battery of health checks and print a per-line status report.
+
+    No mutations, no expensive calls: each check has a hard cap on time/cost.
+    Designed so a user pasting the output into a bug report is enough for
+    triage.
+    """
+    import os
+    import shutil
+    from pathlib import Path as _Path
+
+    settings = get_settings()
+    ok = "[green]OK[/]"
+    warn = "[yellow]WARN[/]"
+    fail = "[red]FAIL[/]"
+    statuses: list[str] = []
+
+    def _line(status: str, label: str, detail: str = "") -> None:
+        console.print(f"  {status:<24} {label}{(' — ' + detail) if detail else ''}")
+        statuses.append(status)
+
+    console.print("[bold]analyzetg doctor[/]")
+
+    # 1. Config files
+    cwd = _Path.cwd()
+    env_path = cwd / ".env"
+    cfg_path = _Path(os.environ.get("ANALYZETG_CONFIG_PATH", "config.toml"))
+    if env_path.exists():
+        _line(ok, ".env present", str(env_path))
+    else:
+        _line(warn, ".env missing", f"expected at {env_path}")
+    if cfg_path.exists():
+        _line(ok, "config.toml present", str(cfg_path))
+    else:
+        _line(warn, "config.toml missing", f"expected at {cfg_path}")
+
+    # 2. Secrets resolved
+    if settings.telegram.api_id and settings.telegram.api_hash:
+        _line(ok, "telegram credentials", f"api_id={settings.telegram.api_id}")
+    else:
+        _line(fail, "telegram credentials missing", "set TELEGRAM_API_ID / TELEGRAM_API_HASH in .env")
+    if settings.openai.api_key:
+        _line(ok, "OPENAI_API_KEY present")
+    else:
+        _line(fail, "OPENAI_API_KEY missing", "set in .env")
+
+    # 3. ffmpeg
+    ffmpeg_path = shutil.which(settings.media.ffmpeg_path) or shutil.which("ffmpeg")
+    if ffmpeg_path:
+        _line(ok, "ffmpeg on PATH", ffmpeg_path)
+    else:
+        _line(
+            warn,
+            "ffmpeg not found",
+            "voice/videonote/video enrichment will skip; install ffmpeg or set [media] ffmpeg_path",
+        )
+
+    # 4. Storage paths + disk
+    storage_dir = settings.storage.data_path.parent
+    if storage_dir.exists():
+        try:
+            usage = shutil.disk_usage(storage_dir)
+            free_gb = usage.free / 1024**3
+            if free_gb < 0.5:
+                _line(fail, "disk free", f"{free_gb:.2f} GB at {storage_dir}")
+            elif free_gb < 5.0:
+                _line(warn, "disk free", f"{free_gb:.2f} GB at {storage_dir}")
+            else:
+                _line(ok, "disk free", f"{free_gb:.2f} GB at {storage_dir}")
+        except OSError as e:
+            _line(warn, "disk usage check failed", str(e)[:100])
+    else:
+        _line(warn, "storage dir missing", f"will be created on first write: {storage_dir}")
+
+    # 5. DB integrity + size
+    db_path = settings.storage.data_path
+    if db_path.exists():
+        try:
+            from analyzetg.db.repo import open_repo as _open_repo
+
+            async with _open_repo(db_path) as repo:
+                cur = await repo._conn.execute("PRAGMA integrity_check")
+                row = await cur.fetchone()
+                await cur.close()
+                verdict = (row["integrity_check"] if row else "?") if row is not None else "?"
+            size_mb = db_path.stat().st_size / 1024**2
+            if verdict == "ok":
+                _line(ok, "DB integrity", f"{db_path} ({size_mb:.1f} MB)")
+            else:
+                _line(fail, "DB integrity check failed", str(verdict)[:200])
+        except Exception as e:
+            _line(fail, "DB open failed", str(e)[:200])
+    else:
+        _line(warn, "DB not yet created", str(db_path))
+
+    # 6. Telegram session liveness
+    session_path = settings.telegram.session_path
+    # Telethon appends `.session` when the configured path doesn't already
+    # end with it, so check both forms before declaring the file missing.
+    session_with_suffix = session_path.with_name(session_path.name + ".session")
+    session_present = session_path.exists() or session_with_suffix.exists()
+    actual_session = session_path if session_path.exists() else session_with_suffix
+    if not session_present:
+        _line(warn, "Telegram session missing", f"run `atg init` (expected {session_path})")
+    elif settings.telegram.api_id and settings.telegram.api_hash:
+        try:
+            client = build_client(settings)
+            await asyncio.wait_for(client.connect(), timeout=10)
+            try:
+                authorized = await client.is_user_authorized()
+            finally:
+                await client.disconnect()
+            if authorized:
+                _line(ok, "Telegram session", f"authorized ({actual_session})")
+            else:
+                _line(fail, "Telegram session", "not authorized — run `atg init`")
+        except Exception as e:
+            _line(warn, "Telegram session check failed", str(e)[:200])
+
+    # 7. OpenAI key liveness
+    if settings.openai.api_key:
+        try:
+            from openai import AsyncOpenAI
+
+            oai = AsyncOpenAI(
+                api_key=settings.openai.api_key,
+                timeout=settings.openai.request_timeout_sec,
+            )
+            await asyncio.wait_for(oai.models.list(), timeout=10)
+            _line(ok, "OpenAI API reachable")
+        except Exception as e:
+            _line(warn, "OpenAI API check failed", str(e)[:200])
+
+    # 8. Presets
+    try:
+        from analyzetg.analyzer.prompts import PRESETS
+
+        if PRESETS:
+            _line(ok, "presets loaded", f"{len(PRESETS)} ({', '.join(sorted(PRESETS))})")
+        else:
+            _line(warn, "no presets loaded", "expected presets/*.md")
+    except Exception as e:
+        _line(fail, "preset load failed", str(e)[:200])
+
+    # 9. Pricing coverage
+    pricing = settings.pricing
+    referenced = {
+        settings.openai.chat_model_default,
+        settings.openai.filter_model_default,
+        settings.enrich.vision_model,
+    }
+    referenced.discard(None)
+    missing = [m for m in referenced if m and m not in pricing.chat]
+    if missing:
+        _line(
+            warn,
+            "pricing entries missing",
+            f'add [pricing.chat."{missing[0]}"] to config.toml; cost stats will under-report',
+        )
+    else:
+        _line(ok, "pricing covers default models")
+
+    # Summary
+    fails = sum(1 for s in statuses if "FAIL" in s)
+    warns = sum(1 for s in statuses if "WARN" in s)
+    if fails:
+        console.print(f"[bold red]{fails} failure(s), {warns} warning(s).[/]")
+        raise typer.Exit(1)
+    if warns:
+        console.print(f"[bold yellow]{warns} warning(s).[/] Some features may be limited.")
+    else:
+        console.print("[bold green]All checks passed.[/]")
+
+
 # ------------------------------------------------------------------- dialogs
 
 

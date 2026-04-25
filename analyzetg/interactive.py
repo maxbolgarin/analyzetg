@@ -9,7 +9,6 @@ a Telegram client.
 from __future__ import annotations
 
 import asyncio as _asyncio
-import math
 import string as _string
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,7 +19,6 @@ import questionary
 from prompt_toolkit.keys import Keys
 from rich.console import Console
 
-from analyzetg.analyzer.chunker import model_context_window
 from analyzetg.analyzer.prompts import PRESETS, Preset
 from analyzetg.config import get_settings
 from analyzetg.db.repo import open_repo
@@ -28,7 +26,6 @@ from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import list_unread_dialogs
 from analyzetg.tg.topics import list_forum_topics
 from analyzetg.util.logging import get_logger
-from analyzetg.util.pricing import chat_cost
 
 
 def _expand_printable_for_search() -> None:
@@ -210,6 +207,52 @@ class InteractiveAnswers:
     custom_from_msg: str | None = None
 
 
+def _period_to_db_filters(
+    *,
+    period: str | None,
+    custom_since: str | None,
+    custom_until: str | None,
+    custom_from_msg: str | None,
+    chat: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Translate the wizard's period choice into `Repo.media_breakdown` kwargs.
+
+    "unread" maps to `min_msg_id = chat.read_inbox_max_id` (matching the
+    invariant that unread is `msg_id > read_inbox_max_id`). last7/last30
+    map to a since-cutoff. "full" returns no filter. "from_msg" parses the
+    user's link/id. Empty kwargs are filtered out so `media_breakdown` sees
+    only the dimensions the user actually chose.
+    """
+    out: dict[str, Any] = {}
+    if period == "unread" and chat:
+        marker = int(chat.get("read_inbox_max_id") or 0)
+        if marker > 0:
+            out["min_msg_id"] = marker
+    elif period == "last7":
+        out["since"] = datetime.now(UTC) - timedelta(days=7)
+    elif period == "last30":
+        out["since"] = datetime.now(UTC) - timedelta(days=30)
+    elif period == "custom":
+        if custom_since:
+            out["since"] = datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
+        if custom_until:
+            out["until"] = datetime.strptime(custom_until, "%Y-%m-%d").replace(tzinfo=UTC)
+    elif period == "from_msg" and custom_from_msg:
+        from analyzetg.tg.links import parse as _parse_link
+
+        try:
+            if custom_from_msg.lstrip("-").isdigit():
+                out["min_msg_id"] = int(custom_from_msg) - 1  # exclusive lower bound
+            else:
+                msg_id = _parse_link(custom_from_msg).msg_id
+                if msg_id is not None:
+                    out["min_msg_id"] = msg_id - 1
+        except Exception:
+            pass  # fall through to no filter; counts will over-estimate
+    # period == "full" → no filter.
+    return out
+
+
 def _build_period_kwargs(answers: InteractiveAnswers, *, include_from_msg: bool) -> dict[str, Any]:
     """Map the wizard's `period` choice to CLI kwargs.
 
@@ -318,8 +361,16 @@ async def run_interactive_analyze(
     output: Path | None = None,
     save_default: bool = False,
     mark_read: bool | None = None,
+    post_saved: bool = False,
+    max_cost: float | None = None,
 ) -> None:
-    """Default UX for `analyzetg analyze` (no ref). Walk wizard, then run."""
+    """Default UX for `analyzetg analyze` (no ref). Walk wizard, then run.
+
+    `post_saved` and `max_cost` are honored as immutable CLI flags — the
+    wizard doesn't expose them as steps yet, but if the user passed
+    `atg analyze --post-saved --max-cost 0.50`, both are forwarded to the
+    final cmd_analyze call so the wizard path matches the direct path.
+    """
     answers = await _collect_answers(
         mode="analyze",
         console_out=console_out,
@@ -345,7 +396,10 @@ async def run_interactive_analyze(
 
     from analyzetg.analyzer.commands import cmd_analyze
 
-    await cmd_analyze(**build_analyze_args(answers))
+    args = build_analyze_args(answers)
+    args["post_saved"] = post_saved
+    args["max_cost"] = max_cost
+    await cmd_analyze(**args)
 
 
 async def run_interactive_dump(
@@ -537,53 +591,7 @@ async def _collect_answers(
                     console.print("[dim]Cancelled.[/]")
                     return None
                 preset = result
-                step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "enrich"
-
-            elif step == "enrich":
-                # Runs for both analyze and dump so media-to-text
-                # conversion flows into either output path.
-                # Show per-kind counts so the user knows what enabling
-                # `image` / `link` will actually cost — DB-derived from
-                # already-synced messages. Backfill may add more.
-                media_counts: dict[str, int] = {}
-                if chat is not None:
-                    try:
-                        async with open_repo(get_settings().storage.data_path) as repo:
-                            media_counts = await repo.media_breakdown(
-                                int(chat["chat_id"]),
-                                thread_id=thread_id,
-                            )
-                    except Exception as e:
-                        log.debug("interactive.media_breakdown_failed", err=str(e)[:200])
-                if media_counts.get("total"):
-                    parts: list[str] = []
-                    if media_counts.get("any_media"):
-                        parts.append(f"{media_counts['any_media']} with media")
-                    if media_counts.get("links"):
-                        parts.append(f"{media_counts['links']} with URLs")
-                    extras = ", " + ", ".join(parts) if parts else ""
-                    console.print(
-                        f"[dim]→ Already synced for this chat: "
-                        f"{media_counts['total']} message(s){extras}. "
-                        "Backfill at run time may add more.[/]"
-                    )
-                result = await _pick_enrich(media_counts=media_counts)
-                if result is BACK:
-                    # Go back to the step that preceded us: preset for
-                    # analyze mode, thread (forum) or chat (non-forum)
-                    # for dump mode.
-                    if mode == "analyze":
-                        step = "preset"
-                    elif chat and chat["kind"] == "forum":
-                        step = "thread"
-                    else:
-                        step = "chat"
-                    continue
-                if result is None:
-                    console.print("[dim]Cancelled.[/]")
-                    return None
-                enrich_kinds = list(result) if isinstance(result, list) else None
-                step = "period"
+                step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "period"
 
             elif step == "period":
                 # Lazily fetch per-period counts once we know chat+thread.
@@ -598,9 +606,15 @@ async def _collect_answers(
                     )
                 result = await _pick_period(counts=period_counts)
                 if result is BACK:
-                    # Both modes run through `enrich` → `period`, so
-                    # Back from period lands on enrich regardless.
-                    step = "enrich"
+                    # Period sits between `preset` (analyze) / chat-or-thread
+                    # (dump) and `enrich`. Mirror the pre-existing back-step
+                    # logic that used to live on the enrich block.
+                    if mode == "analyze":
+                        step = "preset"
+                    elif chat and chat["kind"] == "forum":
+                        step = "thread"
+                    else:
+                        step = "chat"
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
@@ -618,6 +632,52 @@ async def _collect_answers(
                         since=datetime.strptime(custom_since, "%Y-%m-%d") if custom_since else None,
                         until=datetime.strptime(custom_until, "%Y-%m-%d") if custom_until else None,
                     )
+                step = "enrich"
+
+            elif step == "enrich":
+                # Runs for both analyze and dump so media-to-text
+                # conversion flows into either output path. Counts are
+                # period-scoped: filter the local DB by the time/msg-id
+                # window the user just picked so "(N in db)" reflects
+                # what the run will actually process.
+                media_counts: dict[str, int] = {}
+                if chat is not None:
+                    breakdown_kwargs = _period_to_db_filters(
+                        period=period,
+                        custom_since=custom_since,
+                        custom_until=custom_until,
+                        custom_from_msg=custom_from_msg,
+                        chat=chat,
+                    )
+                    try:
+                        async with open_repo(get_settings().storage.data_path) as repo:
+                            media_counts = await repo.media_breakdown(
+                                int(chat["chat_id"]),
+                                thread_id=thread_id,
+                                **breakdown_kwargs,
+                            )
+                    except Exception as e:
+                        log.debug("interactive.media_breakdown_failed", err=str(e)[:200])
+                if media_counts.get("total"):
+                    parts: list[str] = []
+                    if media_counts.get("any_media"):
+                        parts.append(f"{media_counts['any_media']} with media")
+                    if media_counts.get("links"):
+                        parts.append(f"{media_counts['links']} with URLs")
+                    extras = ", " + ", ".join(parts) if parts else ""
+                    console.print(
+                        f"[dim]→ For the chosen period: "
+                        f"{media_counts['total']} message(s) already synced{extras}. "
+                        "Backfill at run time may add more.[/]"
+                    )
+                result = await _pick_enrich(media_counts=media_counts)
+                if result is BACK:
+                    step = "period"
+                    continue
+                if result is None:
+                    console.print("[dim]Cancelled.[/]")
+                    return None
+                enrich_kinds = list(result) if isinstance(result, list) else None
                 # Output step is next unless the user already set it via CLI.
                 step = "mark_read" if output_forced else "output"
 
@@ -626,7 +686,10 @@ async def _collect_answers(
                     default_path=output,
                 )
                 if result is BACK:
-                    step = "period" if not run_on_all else ("preset" if mode == "analyze" else "chat")
+                    # Order: chat → thread → preset → period → enrich → output
+                    # Run-on-all skips period+enrich, so it backs to preset
+                    # (analyze) or chat (dump).
+                    step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
@@ -638,8 +701,9 @@ async def _collect_answers(
                 result = await _pick_mark_read(default=chosen_mark_read)
                 if result is BACK:
                     if output_forced:
-                        # No output step → go back to period / preset.
-                        step = "period" if not run_on_all else ("preset" if mode == "analyze" else "chat")
+                        # No output step → go back to enrich (or preset/chat
+                        # for run-on-all where period+enrich are skipped).
+                        step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
                     else:
                         step = "output"
                     continue
@@ -964,64 +1028,15 @@ def _estimate_cost(
     preset: Preset,
     settings,
 ) -> tuple[float | None, float | None]:
-    """Return (lower, upper) cost estimate in USD for the map-reduce pipeline.
+    """Wizard-side wrapper for `analyzer.pipeline.estimate_cost`.
 
-    Approximations:
-      - ~60 tokens / formatted message (Cyrillic-heavy middle ground).
-      - Chunk budget mirrors `chunker.build_chunks`: context − system/user
-        overhead − per-chunk output cap − safety margin.
-      - Every chunk re-sends the system prompt (pipeline's actual behaviour).
-      - Reduce input = Σ map-output tokens; reduce output ≤ output_budget_tokens.
-
-    Returns (None, None) if pricing for either model is missing.
+    Kept as a private alias so the legacy call sites in this module
+    don't churn; the canonical implementation lives in pipeline so
+    `cmd_analyze`'s `--max-cost` guard can reuse it.
     """
-    from analyzetg.util.tokens import count_tokens as _ct
+    from analyzetg.analyzer.pipeline import estimate_cost as _est
 
-    total_input_body = max(1, int(n_messages * _AVG_TOKENS_PER_MSG))
-
-    filter_model = preset.filter_model
-    final_model = preset.final_model
-    filter_row = settings.pricing.chat.get(filter_model)
-    final_row = settings.pricing.chat.get(final_model)
-    if filter_row is None or final_row is None:
-        return None, None
-
-    system_tokens = _ct(preset.system, filter_model)
-    user_overhead_tokens = _ct(preset.user_template, filter_model)
-    per_chunk_overhead = system_tokens + user_overhead_tokens
-
-    context = model_context_window(filter_model)
-    safety = int(getattr(settings.analyze, "safety_margin_tokens", 4000))
-    map_out_cap = preset.map_output_tokens
-    budget = max(500, context - per_chunk_overhead - map_out_cap - safety)
-
-    chunks = max(1, math.ceil(total_input_body / budget))
-
-    # Map phase (filter model): every chunk re-sends system + user overhead.
-    map_input_tokens = total_input_body + chunks * per_chunk_overhead
-    # Map completion: cap per chunk; lower bound ≈ 40% of cap.
-    map_out_lo = int(chunks * map_out_cap * 0.4)
-    map_out_hi = int(chunks * map_out_cap)
-
-    # Reduce phase (final model) — only if we built more than one chunk.
-    if chunks > 1 and preset.needs_reduce:
-        # Reduce prompt = aggregated map outputs + small final-prompt overhead.
-        reduce_overhead = _ct(preset.system, final_model) + _ct(preset.user_template, final_model)
-        reduce_out = preset.output_budget_tokens
-        reduce_input_lo = map_out_lo + reduce_overhead
-        reduce_input_hi = map_out_hi + reduce_overhead
-    else:
-        reduce_input_lo = reduce_input_hi = 0
-        reduce_out = 0
-
-    def _cost(prompt: int, completion: int, model: str) -> float:
-        return float(chat_cost(model, prompt, 0, completion, settings=settings) or 0.0)
-
-    lo = _cost(map_input_tokens, map_out_lo, filter_model) + _cost(
-        reduce_input_lo, int(reduce_out * 0.4), final_model
-    )
-    hi = _cost(map_input_tokens, map_out_hi, filter_model) + _cost(reduce_input_hi, reduce_out, final_model)
-    return lo, hi
+    return _est(n_messages=n_messages, preset=preset, settings=settings)
 
 
 def _fmt_count(n: int) -> str:
@@ -1266,6 +1281,7 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
         "kind": d.kind,
         "title": d.title,
         "username": d.username,
+        "read_inbox_max_id": d.read_inbox_max_id,
         "unread": d.unread_count,
     }
 
@@ -1307,6 +1323,7 @@ async def _pick_from_all(client) -> dict | None:
             "title": d.title,
             "username": d.username,
             "unread": d.unread_count,
+            "read_inbox_max_id": d.read_inbox_max_id,
             "folders": folder_idx.get(d.chat_id, []),
         }
         for d in snapshot

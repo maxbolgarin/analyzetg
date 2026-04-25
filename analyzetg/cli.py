@@ -414,6 +414,25 @@ def analyze(
             "Only meaningful without <ref>."
         ),
     ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        help=(
+            "Abort if the upper-bound estimated USD cost of this run exceeds "
+            "N (estimate uses preset models, message count, and your pricing "
+            "table). Pass with --yes to abort silently; without --yes you'll "
+            "be asked to confirm an over-budget run."
+        ),
+    ),
+    post_saved: bool = typer.Option(
+        False,
+        "--post-saved",
+        help=(
+            "After analysis finishes, also post the result to your Telegram "
+            "Saved Messages chat (split into 4096-char chunks if needed). "
+            "Markdown-friendly: rendered as monospace by Telegram."
+        ),
+    ),
 ) -> None:
     """Analyze a chat. Default window = messages since your Telegram read marker.
 
@@ -454,6 +473,8 @@ def analyze(
             all_flat=all_flat,
             all_per_topic=all_per_topic,
             folder=folder,
+            max_cost=max_cost,
+            post_saved=post_saved,
         )
     )
 
@@ -812,6 +833,195 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
             f"[green]Redacted[/] {redacted} messages older than {days} days"
             f"{' (transcripts kept)' if keep_transcripts else ''}."
         )
+
+
+@app.command(rich_help_panel=PANEL_MAIN)
+def ask(
+    question: str = typer.Argument(..., help="Free-form question, in any language."),
+    chat: str | None = typer.Option(
+        None,
+        "--chat",
+        help="Restrict search to one chat (@user / link / fuzzy title / numeric id).",
+    ),
+    thread: int | None = typer.Option(
+        None,
+        "--thread",
+        help="Forum-topic id (only meaningful with --chat).",
+    ),
+    folder: str | None = typer.Option(
+        None,
+        "--folder",
+        help="Restrict search to chats in this Telegram folder (case-insensitive substring).",
+    ),
+    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
+    until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
+    last_days: int | None = typer.Option(None, "--last-days"),
+    limit: int = typer.Option(
+        200,
+        "--limit",
+        help="Max messages to retrieve. Higher = better recall, more cost.",
+    ),
+    model: str | None = typer.Option(None, "--model", help="Override the answering model."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Save the answer to a file (markdown). Without --output the answer prints to terminal.",
+    ),
+    console_out: bool = typer.Option(
+        False,
+        "--console",
+        "-c",
+        help="Force terminal rendering even when --output is also set.",
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help=(
+            "Pull new messages from Telegram (incremental from each chat's local "
+            "max msg_id) before retrieval. Requires --chat or --folder."
+        ),
+    ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        help=(
+            "Abort if the estimated USD cost exceeds N. The estimate counts the "
+            "exact prompt tokens (no _AVG_TOKENS_PER_MSG rounding) so it tracks "
+            "media-heavy chats. Pass with --yes to abort silently."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the over-budget confirmation prompt (combined with --max-cost).",
+    ),
+) -> None:
+    """Answer a question about your synced Telegram archive.
+
+    Retrieves the top relevant messages from the local DB by keyword match
+    (no embeddings; no Telegram or OpenAI calls during retrieval), then
+    asks one LLM call to answer with citations. Scope defaults to every
+    synced chat — narrow with `--chat`, `--folder`, `--thread`, or a
+    period flag for sharper answers (and lower cost).
+
+    Examples:
+      atg ask "what did Bob say about migration?"
+      atg ask "any open questions on the API?" --folder Work --last-days 7
+      atg ask "когда дедлайн по проекту?" --chat @somegroup --refresh
+    """
+    from analyzetg.ask.commands import cmd_ask
+
+    _run(
+        cmd_ask(
+            question=question,
+            chat=chat,
+            thread=thread,
+            folder=folder,
+            since=since,
+            until=until,
+            last_days=last_days,
+            limit=limit,
+            model=model,
+            output=output,
+            console_out=console_out,
+            refresh=refresh,
+            max_cost=max_cost,
+            yes=yes,
+        )
+    )
+
+
+@app.command(rich_help_panel=PANEL_MAINT)
+def doctor() -> None:
+    """Preflight check: Telegram session, OpenAI key, ffmpeg, DB integrity, presets, disk."""
+    from analyzetg.tg.commands import cmd_doctor
+
+    _run(cmd_doctor())
+
+
+@app.command(rich_help_panel=PANEL_MAINT)
+def backup(
+    output: Path | None = typer.Argument(
+        None,
+        help="Destination file (default: storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite).",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace the destination file if it already exists.",
+    ),
+) -> None:
+    """Snapshot storage/data.sqlite to a single compact file (uses VACUUM INTO).
+
+    Safe to run while atg is in the middle of a sync — SQLite makes the
+    copy consistent without blocking the writer for more than a moment.
+    Restore with `atg restore <file>`.
+    """
+    _run(_backup(output, overwrite))
+
+
+async def _backup(output: Path | None, overwrite: bool) -> None:
+    settings = get_settings()
+    src = settings.storage.data_path
+    if not src.exists():
+        console.print(f"[red]No DB at {src} — nothing to back up.[/]")
+        raise typer.Exit(1)
+    if output is None:
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output = Path("storage/backups") / f"data-{stamp}.sqlite"
+    output = output.resolve()
+    if output.exists():
+        if not overwrite:
+            console.print(f"[red]{output} already exists.[/] Pass --overwrite or pick a different path.")
+            raise typer.Exit(2)
+        output.unlink()
+    async with open_repo(src) as repo:
+        size = await repo.backup_to(output)
+    console.print(f"[green]Backed up[/] {src} → {output} [dim]({_fmt_bytes(size)})[/]")
+
+
+@app.command(rich_help_panel=PANEL_MAINT)
+def restore(
+    backup_file: Path = typer.Argument(..., help="Path to a previously-created backup file."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the destructive-action prompt."),
+) -> None:
+    """Replace storage/data.sqlite with a backup. The current DB is moved aside.
+
+    The current DB is renamed to `data-replaced-YYYY-MM-DD_HHMMSS.sqlite`
+    next to the original — undo by swapping the names back.
+    """
+    _run(_restore(backup_file, yes))
+
+
+async def _restore(backup_file: Path, yes: bool) -> None:
+    import shutil
+
+    settings = get_settings()
+    dst = settings.storage.data_path
+    if not backup_file.exists():
+        console.print(f"[red]Backup not found:[/] {backup_file}")
+        raise typer.Exit(2)
+    if not yes and not typer.confirm(
+        f"Replace {dst} with {backup_file}? Current DB will be moved aside.",
+        default=False,
+    ):
+        console.print("[yellow]Aborted.[/]")
+        raise typer.Exit(0)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        moved = dst.with_name(f"{dst.stem}-replaced-{stamp}{dst.suffix}")
+        dst.rename(moved)
+        console.print(f"[dim]Moved current DB to {moved}[/]")
+    # Also clear -wal / -shm sidecars so the restored DB doesn't pick up
+    # transactions from the replaced DB on next open.
+    for sidecar in (dst.with_suffix(dst.suffix + "-wal"), dst.with_suffix(dst.suffix + "-shm")):
+        if sidecar.exists():
+            sidecar.unlink()
+    shutil.copy2(backup_file, dst)
+    console.print(f"[green]Restored[/] {backup_file} → {dst}")
 
 
 @app.command(hidden=True)

@@ -3,7 +3,7 @@ name: highlights
 prompt_version: v2
 needs_reduce: true
 filter_model: gpt-5.4-nano
-final_model: gpt-5.4
+final_model: gpt-5.4-mini
 output_budget_tokens: 3000
 map_output_tokens: 2000
 ---

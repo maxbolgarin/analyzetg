@@ -35,6 +35,76 @@ from analyzetg.util.logging import get_logger
 log = get_logger(__name__)
 
 
+# Rough token estimate per formatted message line (sender + timestamp + body).
+# Used for up-front cost previews; the real pipeline counts exactly via
+# tiktoken. Cyrillic runs ~1.5x the English rate — this is a middle ground.
+AVG_TOKENS_PER_MSG = 60
+
+
+def estimate_cost(
+    *,
+    n_messages: int,
+    preset: Preset,
+    settings: Any,
+) -> tuple[float | None, float | None]:
+    """Return (lower, upper) cost estimate in USD for an analyze run.
+
+    Mirrors what `run_analysis` will actually do: builds chunks under the
+    same budget formula as `chunker.build_chunks`, charges every chunk for
+    the system+user overhead (the pipeline re-sends those), bounds the map
+    completion at the preset's `map_output_tokens`, and adds a reduce pass
+    only when there's more than one chunk.
+
+    Returns `(None, None)` if pricing is missing for either model — caller
+    should treat that as "can't enforce a budget" (used by `--max-cost`).
+    """
+    import math as _math
+
+    from analyzetg.analyzer.chunker import model_context_window
+    from analyzetg.util.pricing import chat_cost
+    from analyzetg.util.tokens import count_tokens as _ct
+
+    total_input_body = max(1, int(n_messages * AVG_TOKENS_PER_MSG))
+
+    filter_model = preset.filter_model
+    final_model = preset.final_model
+    if settings.pricing.chat.get(filter_model) is None or settings.pricing.chat.get(final_model) is None:
+        return None, None
+
+    system_tokens = _ct(preset.system, filter_model)
+    user_overhead_tokens = _ct(preset.user_template, filter_model)
+    per_chunk_overhead = system_tokens + user_overhead_tokens
+
+    context = model_context_window(filter_model)
+    safety = int(getattr(settings.analyze, "safety_margin_tokens", 4000))
+    map_out_cap = preset.map_output_tokens
+    budget = max(500, context - per_chunk_overhead - map_out_cap - safety)
+
+    chunks = max(1, _math.ceil(total_input_body / budget))
+
+    map_input_tokens = total_input_body + chunks * per_chunk_overhead
+    map_out_lo = int(chunks * map_out_cap * 0.4)
+    map_out_hi = int(chunks * map_out_cap)
+
+    if chunks > 1 and preset.needs_reduce:
+        reduce_overhead = _ct(preset.system, final_model) + _ct(preset.user_template, final_model)
+        reduce_out = preset.output_budget_tokens
+        reduce_input_lo = map_out_lo + reduce_overhead
+        reduce_input_hi = map_out_hi + reduce_overhead
+    else:
+        reduce_input_lo = reduce_input_hi = 0
+        reduce_out = 0
+
+    def _cost(prompt: int, completion: int, model: str) -> float:
+        return float(chat_cost(model, prompt, 0, completion, settings=settings) or 0.0)
+
+    lo = _cost(map_input_tokens, map_out_lo, filter_model) + _cost(
+        reduce_input_lo, int(reduce_out * 0.4), final_model
+    )
+    hi = _cost(map_input_tokens, map_out_hi, filter_model) + _cost(reduce_input_hi, reduce_out, final_model)
+    return lo, hi
+
+
 def _pipeline_console():
     """Shared Rich Console for progress displays in this module."""
     from rich.console import Console
