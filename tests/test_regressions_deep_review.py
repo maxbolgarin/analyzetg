@@ -369,6 +369,66 @@ async def test_media_breakdown_groups_by_kind(tmp_path: Path) -> None:
         await repo.close()
 
 
+# --- ask retrieval ------------------------------------------------------
+
+
+def test_tokenize_question_drops_stop_words_and_short_tokens() -> None:
+    from analyzetg.ask.retrieval import tokenize_question
+
+    tokens = tokenize_question("What did Bob say about migration?")
+    assert "bob" in tokens
+    assert "migration" in tokens
+    # Stop words and short tokens are filtered.
+    assert "what" not in tokens
+    assert "did" not in tokens
+    assert "is" not in tokens
+    # Russian works too.
+    ru = tokenize_question("Когда дедлайн по проекту?")
+    assert "дедлайн" in ru
+    assert "проекту" in ru
+    assert "по" not in ru
+
+
+async def test_ask_retrieval_scores_by_token_hits(tmp_path: Path) -> None:
+    from datetime import datetime as _dt
+
+    from analyzetg.ask.retrieval import retrieve_messages
+    from analyzetg.models import Message
+
+    repo = await Repo.open(tmp_path / "t.sqlite")
+    try:
+        now = _dt.now(UTC)
+        msgs = [
+            # Two-token hit — should win.
+            Message(chat_id=1, msg_id=1, date=now, text="we picked Postgres for the migration"),
+            # One-token hit.
+            Message(chat_id=1, msg_id=2, date=now, text="general chat about postgres tuning"),
+            # Zero hits — must be excluded.
+            Message(chat_id=1, msg_id=3, date=now, text="weather is nice today"),
+            # Transcript-only match (transcript is written via the dedicated
+            # setter, not through upsert_messages).
+            Message(chat_id=1, msg_id=4, date=now, text=None),
+        ]
+        await repo.upsert_messages(msgs)
+        await repo.set_message_transcript(1, 4, "postgres migration is done", "test-model")
+
+        out = await retrieve_messages(
+            repo=repo,
+            question="postgres migration plan",
+            limit=10,
+        )
+        ids = [m.msg_id for m in out]
+        assert 3 not in ids  # no-hit message dropped
+        # Top hits include the multi-token match (#1) and the transcript (#4).
+        assert 1 in ids
+        assert 4 in ids
+        # Result is chronologically sorted — for same-timestamp msgs that's
+        # by msg_id within chat. We just sanity-check ordering is stable.
+        assert ids == sorted(ids)
+    finally:
+        await repo.close()
+
+
 async def test_stats_by_includes_unpriced_calls(tmp_path: Path) -> None:
     repo = await Repo.open(tmp_path / "t.sqlite")
     try:

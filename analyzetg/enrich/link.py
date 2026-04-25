@@ -202,7 +202,15 @@ async def enrich_url(
         model=used_model,
         messages=messages,
         max_tokens=200,
-        context={"phase": "enrich_link", "url_hash": h},
+        # `url` lets the live log show "phase=enrich_link url=https://arxiv.org/…"
+        # instead of an opaque hash. `url_host` is a short readable backup; `url_hash`
+        # stays in the usage_log for cross-run dedup analysis.
+        context={
+            "phase": "enrich_link",
+            "url": normalized,
+            "url_host": host,
+            "url_hash": h,
+        },
     )
     summary = (res.text or "").strip()
     if not summary:

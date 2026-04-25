@@ -93,13 +93,26 @@ async def _one_call(
         context={**(context or {}), "finish_reason": finish} if finish else (context or {}),
     )
     # Surface a few identifying keys from `context` so the log tells you
-    # *what* each call was for (e.g. phase=enrich_link with url_hash, vs
+    # *what* each call was for (e.g. phase=enrich_link with the URL itself,
     # phase=map with batch_hash). Without this, 53 link summaries and 3
-    # analysis chunks all look identical in the log stream.
+    # analysis chunks all look identical in the log stream. `url_hash` is
+    # intentionally omitted — it's opaque to a human; `url` / `url_host`
+    # carry the same identity in a readable form.
     ctx_fields = {
         k: v
         for k, v in (context or {}).items()
-        if k in {"phase", "url_hash", "batch_hash", "doc_id", "chat_id", "msg_id", "retry_of_truncated"}
+        if k
+        in {
+            "phase",
+            "url",
+            "url_host",
+            "batch_hash",
+            "doc_id",
+            "chat_id",
+            "msg_id",
+            "msg_date",
+            "retry_of_truncated",
+        }
         and v is not None
     }
     log.info(

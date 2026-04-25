@@ -172,6 +172,8 @@ async def cmd_analyze(
     all_flat: bool = False,
     all_per_topic: bool = False,
     folder: str | None = None,
+    max_cost: float | None = None,
+    post_saved: bool = False,
     yes: bool = False,
 ) -> None:
     # Default preset — overridden later for single-msg mode.
@@ -240,6 +242,8 @@ async def cmd_analyze(
             output=output,
             save_default=save_default,
             mark_read=mark_read,
+            post_saved=post_saved,
+            max_cost=max_cost,
         )
         return
     # Direct path: treat mark_read=None as False (CLI tri-state default).
@@ -462,6 +466,9 @@ async def cmd_analyze(
             console_out=console_out,
             mark_read=mark_read_bool,
             no_cache=no_cache,
+            max_cost=max_cost,
+            post_saved=post_saved,
+            yes=yes,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
             enrich_opts=enrich_opts,
@@ -612,6 +619,9 @@ async def _run_single(
     thread_title: str | None = None,
     topic_titles: dict[int, str] | None = None,
     topic_markers: dict[int, int] | None = None,
+    max_cost: float | None = None,
+    post_saved: bool = False,
+    yes: bool = False,
 ) -> None:
     """Analyze one chat or one thread via the shared pipeline."""
     from analyzetg.core.pipeline import prepare_chat_run
@@ -640,6 +650,37 @@ async def _run_single(
         topic_markers=topic_markers,
         mark_read=mark_read,
     )
+
+    # Budget guard: refuse (or confirm) before any LLM call when the
+    # estimated upper-bound cost exceeds the user's --max-cost. The
+    # estimator only covers the analysis itself (map+reduce); enrichment
+    # spend is not folded in — caveat is in the help text.
+    if max_cost is not None and prepared.messages:
+        loaded_preset = _load_preset_for_commands(preset, prompt_file)
+        if loaded_preset is not None:
+            from analyzetg.analyzer.pipeline import estimate_cost as _estimate_cost
+
+            lo, hi = _estimate_cost(
+                n_messages=len(prepared.messages),
+                preset=loaded_preset,
+                settings=get_settings(),
+            )
+            if hi is not None and hi > max_cost:
+                console.print(
+                    f"[bold yellow]⚠ Estimated cost ${lo:.4f}–${hi:.4f} "
+                    f"exceeds --max-cost ${max_cost:.4f}[/] "
+                    f"({len(prepared.messages)} messages, preset={preset})."
+                )
+                if yes:
+                    console.print("[red]Aborting (--yes set, no confirmation possible).[/]")
+                    raise typer.Exit(2)
+                if not typer.confirm("Run anyway?", default=False):
+                    console.print("[yellow]Aborted.[/]")
+                    raise typer.Exit(0)
+            elif hi is None:
+                console.print(
+                    "[dim]→ --max-cost not enforced: pricing missing for one of the run's models.[/]"
+                )
 
     console.print("[dim]→ Running analysis...[/]")
     opts = AnalysisOptions(
@@ -675,6 +716,13 @@ async def _run_single(
         thread_title=thread_title,
         console_out=console_out,
     )
+
+    if post_saved and result.msg_count > 0:
+        try:
+            await _post_to_saved_messages(client, result, title=title)
+        except Exception as e:
+            log.warning("analyze.post_saved_failed", chat_id=chat_id, err=str(e)[:200])
+            console.print(f"[yellow]⚠ Could not post to Saved Messages:[/] {e}")
 
     if prepared.mark_read_fn and result.msg_count > 0:
         # Report is already on disk; a mark-read failure (permission denied,
@@ -1164,6 +1212,71 @@ def _print_and_write(
     output = _unique_path(output)
     output.write_text(body, encoding="utf-8")
     console.print(f"[green]Written:[/] {output}")
+
+
+# Telegram caps a single message at 4096 chars (UTF-16 code units, but
+# 4096 chars is the practical safe ceiling for plain text).
+_TG_MSG_LIMIT = 4000  # leave headroom for any wrapping markdown we add
+
+
+async def _post_to_saved_messages(client, result, *, title: str | None) -> None:
+    """Send the rendered analysis to the user's Saved Messages chat.
+
+    Splits on paragraph boundaries first (`\\n\\n`), then on lines, then
+    on hard cuts as a last resort, so multi-message output stays readable.
+    Uses Telethon's high-level `send_message`; no parse_mode (plain text)
+    so the LLM's stray `*` / `_` don't blow up Telegram's markdown
+    interpreter.
+    """
+    header = f"📊 analyzetg — {title or result.chat_id}\npreset: {result.preset}\n"
+    body = header + "\n" + _with_truncation_banner(result)
+    chunks = _split_for_telegram(body, _TG_MSG_LIMIT)
+    me = await client.get_me()
+    for chunk in chunks:
+        await client.send_message(me, chunk)
+    console.print(f"[green]Posted[/] to Saved Messages ({len(chunks)} message(s)).")
+
+
+def _split_for_telegram(text: str, limit: int) -> list[str]:
+    """Split text into ≤ limit-char chunks on the friendliest boundary."""
+    if len(text) <= limit:
+        return [text]
+    out: list[str] = []
+    paragraphs = text.split("\n\n")
+    buf = ""
+    for para in paragraphs:
+        candidate = (buf + "\n\n" + para) if buf else para
+        if len(candidate) <= limit:
+            buf = candidate
+            continue
+        # Flush the buffer; then the paragraph itself may need further split.
+        if buf:
+            out.append(buf)
+            buf = ""
+        if len(para) <= limit:
+            buf = para
+            continue
+        # Paragraph alone is too long: split on lines.
+        lines = para.split("\n")
+        line_buf = ""
+        for raw_line in lines:
+            cand = (line_buf + "\n" + raw_line) if line_buf else raw_line
+            if len(cand) <= limit:
+                line_buf = cand
+                continue
+            if line_buf:
+                out.append(line_buf)
+            # If the line itself is too long, hard-cut.
+            tail = raw_line
+            while len(tail) > limit:
+                out.append(tail[:limit])
+                tail = tail[limit:]
+            line_buf = tail
+        if line_buf:
+            buf = line_buf
+    if buf:
+        out.append(buf)
+    return out
 
 
 def _with_truncation_banner(result) -> str:

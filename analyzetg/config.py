@@ -31,7 +31,7 @@ class TelegramCfg(_StrictCfg):
 
 class OpenAICfg(_StrictCfg):
     api_key: str = ""
-    chat_model_default: str = "gpt-5.4"
+    chat_model_default: str = "gpt-5.4-mini"
     filter_model_default: str = "gpt-5.4-nano"
     audio_model_default: str = "gpt-4o-mini-transcribe"
     audio_language: str = "ru"

@@ -14,7 +14,7 @@
 
 [openai]
 # What you'll usually tune:
-chat_model_default = "gpt-5.4"
+chat_model_default = "gpt-5.4-mini"
 filter_model_default = "gpt-5.4-nano"
 audio_language = "ru"
 
@@ -82,10 +82,10 @@ vision_model = "gpt-4o-mini"
 # Keep entries for every model you actually use.
 # Rates last pulled from platform.openai.com/docs/pricing — update manually.
 
-[pricing.chat."gpt-5.4"]
-input = 2.50
-cached_input = 0.25
-output = 15.00
+[pricing.chat."gpt-5.4-mini"]
+input = 0.75
+cached_input = 0.075
+output = 4.50
 
 [pricing.chat."gpt-5.4-nano"]
 input = 0.20
@@ -97,10 +97,11 @@ input = 0.15
 cached_input = 0.075
 output = 0.60
 
-# [pricing.chat."gpt-5.4-mini"]
-# input = 0.75
-# cached_input = 0.075
-# output = 4.50
+# Flagship — uncomment if you bump chat_model_default back to "gpt-5.4".
+# [pricing.chat."gpt-5.4"]
+# input = 2.50
+# cached_input = 0.25
+# output = 15.00
 #
 # [pricing.chat."gpt-4o"]
 # input = 2.50

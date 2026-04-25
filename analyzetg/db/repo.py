@@ -1006,6 +1006,22 @@ class Repo:
         after = self._path.stat().st_size if self._path.exists() else 0
         return max(0, before - after)
 
+    async def backup_to(self, dest: Path) -> int:
+        """Write a consistent point-in-time copy to `dest` and return its size.
+
+        Uses SQLite's `VACUUM INTO` — atomic from the writer's perspective, and
+        the result is itself a freshly compacted DB (no WAL leftovers, no
+        free pages). Safe to run while other connections write to the source;
+        the new file is opened only after the copy finishes.
+        """
+        await self._conn.commit()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # SQLite refuses VACUUM INTO if the target exists. Quote the path
+        # for safety (escape single quotes by doubling per SQL convention).
+        target = str(dest).replace("'", "''")
+        await self._conn.execute(f"VACUUM INTO '{target}'")
+        return dest.stat().st_size if dest.exists() else 0
+
     async def record_run(
         self,
         chat_id: int,

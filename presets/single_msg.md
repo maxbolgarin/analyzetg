@@ -3,7 +3,7 @@ name: single_msg
 prompt_version: v1
 needs_reduce: false
 filter_model: gpt-5.4-nano
-final_model: gpt-5.4
+final_model: gpt-5.4-mini
 output_budget_tokens: 2000
 map_output_tokens: 800
 ---
