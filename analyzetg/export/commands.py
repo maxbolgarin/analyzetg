@@ -91,6 +91,7 @@ async def cmd_dump(
     save_media: bool = False,
     save_media_types: str | None = None,
     folder: str | None = None,
+    with_comments: bool = False,
     yes: bool = False,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
@@ -99,8 +100,8 @@ async def cmd_dump(
     `--last-days`, `--from-msg`, `--full-history`, or `--since/--until` to
     override. When <ref> is omitted, iterates every dialog with unread
     messages after a confirmation prompt. Forum chats support
-    `--thread N`, `--all-flat` (whole forum, explicit period required), or
-    `--all-per-topic` (one file per topic). Without <ref> and with
+    `--thread N`, `--all-flat` (whole forum), or `--all-per-topic` (one
+    file per topic). Without <ref> and with
     `--folder NAME`, batch-dumps every chat in that folder with unread
     messages.
     """
@@ -177,11 +178,6 @@ async def cmd_dump(
     settings = get_settings()
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
-    if all_flat and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history):
-        raise typer.BadParameter(
-            "--all-flat requires an explicit period: pass --last-days, --since/--until, "
-            "--from-msg, or --full-history."
-        )
 
     # Parse save_media_types CSV once; None → all kinds.
     save_media_kinds: set[str] | None = None
@@ -321,6 +317,7 @@ async def cmd_dump(
             topic_markers=topic_markers,
             save_media=save_media,
             save_media_types=save_media_kinds,
+            with_comments=with_comments,
         )
 
 
@@ -350,6 +347,7 @@ async def _dump_single(
     topic_markers: dict[int, int] | None = None,
     save_media: bool = False,
     save_media_types: set[str] | None = None,
+    with_comments: bool = False,
 ) -> None:
     """Dump one chat / thread / flat-forum using the shared pipeline."""
     from analyzetg.core.pipeline import prepare_chat_run
@@ -381,6 +379,7 @@ async def _dump_single(
         topic_titles=topic_titles,
         topic_markers=topic_markers,
         mark_read=mark_read,
+        with_comments=with_comments,
     )
 
     if save_media and prepared.messages:
@@ -541,7 +540,7 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
             "\n[red]This is a forum — pick one of:[/]\n"
             "  --thread <id>       single topic\n"
             "  --all-per-topic     one file per topic\n"
-            "  --all-flat          whole forum as one dump (needs a period flag)\n"
+            "  --all-flat          whole forum as one dump (defaults to per-topic unread)\n"
         )
         raise typer.Exit(2)
 

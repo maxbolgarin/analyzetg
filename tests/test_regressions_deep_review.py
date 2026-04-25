@@ -6,7 +6,7 @@ regression can't quietly sneak back in.
 Covered:
 - `schema.sql` is idempotent across repeated `Repo.open()` calls
 - `--folder` batch rejects period flags (analyzer.commands cmd_analyze)
-- `--all-flat` requires explicit period
+- `--all-flat` unread default reaches per-topic-marker fallback (not rejected at parse)
 - `.env` loader strips UTF-8 BOM
 - `compute_window` is timezone-aware (UTC)
 - `analysis_cache` truncated flag persists + re-runs on hit
@@ -286,11 +286,35 @@ async def test_folder_rejects_period_flags() -> None:
         )
 
 
-async def test_all_flat_requires_period() -> None:
-    """`--all-flat` alone (no period flag) must raise, not fall back to unread."""
-    import typer as _typer
+class _SentinelClient(Exception):
+    """Stubbed tg_client raises this to short-circuit the run after validation."""
 
-    with pytest.raises(_typer.BadParameter, match="--all-flat requires"):
+
+def _fake_tg_client_factory():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_tg_client(*_args, **_kwargs):
+        raise _SentinelClient
+        yield  # pragma: no cover
+
+    return _fake_tg_client
+
+
+async def test_all_flat_unread_default_reaches_run_path(monkeypatch) -> None:
+    """`--all-flat` with no period must reach the run path (per-topic unread fallback).
+
+    The wizard's chat picker offers `unread` for forum all-flat mode and
+    `_run_single` handles the per-topic-marker floor. The validator that
+    rejected this combination at parse time has been removed; if it sneaks
+    back in, this test fails because BadParameter would fire before the
+    stubbed client.
+    """
+    from analyzetg.analyzer import commands as analyzer_commands
+
+    monkeypatch.setattr(analyzer_commands, "tg_client", _fake_tg_client_factory())
+
+    with pytest.raises(_SentinelClient):
         await cmd_analyze(
             ref="@somechat",
             thread=None,
@@ -308,11 +332,13 @@ async def test_all_flat_requires_period() -> None:
         )
 
 
-async def test_dump_all_flat_requires_period() -> None:
-    """`atg dump --all-flat` must match analyze: explicit period required."""
-    import typer as _typer
+async def test_dump_all_flat_unread_default_reaches_run_path(monkeypatch) -> None:
+    """`atg dump --all-flat` mirrors analyze: unread default no longer rejected."""
+    from analyzetg.export import commands as export_commands
 
-    with pytest.raises(_typer.BadParameter, match="--all-flat requires"):
+    monkeypatch.setattr(export_commands, "tg_client", _fake_tg_client_factory())
+
+    with pytest.raises(_SentinelClient):
         await cmd_dump(
             ref="@somechat",
             output=None,

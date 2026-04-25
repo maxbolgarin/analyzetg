@@ -305,6 +305,7 @@ async def cmd_analyze(
     by: str | None = None,
     post_to: str | None = None,
     repeat_last: bool = False,
+    with_comments: bool = False,
     yes: bool = False,
 ) -> None:
     # Default preset — overridden later for single-msg mode.
@@ -375,6 +376,13 @@ async def cmd_analyze(
             mark_read=mark_read,
             post_saved=post_saved,
             max_cost=max_cost,
+            self_check=self_check,
+            cite_context=cite_context,
+            no_cache=no_cache,
+            dry_run=dry_run,
+            by=by,
+            post_to=post_to,
+            with_comments=with_comments,
         )
         return
     # Direct path: treat mark_read=None as False (CLI tri-state default).
@@ -384,21 +392,6 @@ async def cmd_analyze(
     since_dt, until_dt = _compute_window(since, until, last_days)
     from_msg_id = _parse_from_msg(from_msg)
     msg_id = _parse_from_msg(msg)
-
-    # --all-flat is documented as "needs an explicit period flag". Enforce
-    # that contract at argument parse time so the code path behaves the
-    # same regardless of per-topic read-marker state (fresh account vs.
-    # long-running user). msg_id is treated as a period here too —
-    # single-msg mode is its own world and exits below.
-    if (
-        all_flat
-        and msg_id is None
-        and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
-    ):
-        raise typer.BadParameter(
-            "--all-flat requires an explicit period: "
-            "--full-history, --last-days N, --since/--until, or --from-msg."
-        )
 
     # If --msg is a full link with a chat identifier, it's authoritative —
     # use it as the ref so an ambiguous/stale text ref can't misdirect us.
@@ -453,6 +446,8 @@ async def cmd_analyze(
                 full_history = True
             if not by and saved.get("by"):
                 by = saved["by"]
+            if not with_comments and saved.get("with_comments"):
+                with_comments = True
             if not post_to and saved.get("post_to"):
                 post_to = saved["post_to"]
             if not post_saved and saved.get("post_saved"):
@@ -651,6 +646,7 @@ async def cmd_analyze(
             self_check=self_check,
             by=by,
             post_to=post_to,
+            with_comments=with_comments,
             yes=yes,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -809,6 +805,7 @@ async def _run_single(
     self_check: bool = False,
     by: str | None = None,
     post_to: str | None = None,
+    with_comments: bool = False,
     yes: bool = False,
 ) -> None:
     """Analyze one chat or one thread via the shared pipeline."""
@@ -837,6 +834,7 @@ async def _run_single(
         topic_titles=topic_titles,
         topic_markers=topic_markers,
         mark_read=mark_read,
+        with_comments=with_comments,
     )
 
     # --dry-run: print the cost estimate and exit before any LLM call.
@@ -915,7 +913,34 @@ async def _run_single(
         enrich=effective_enrich,
         sender_substring=sender_substring_arg,
         sender_id=sender_id_arg,
+        with_comments=with_comments and prepared.comments_chat_id is not None,
+        comments_chat_id=prepared.comments_chat_id,
     )
+    # Build chat_groups when comments were included so the formatter
+    # emits a per-chat header + link template per section. Each msg keeps
+    # its original chat_id; rendering groups them automatically.
+    chat_groups: dict[int, dict] | None = None
+    if prepared.comments_chat_id is not None:
+        from analyzetg.analyzer.formatter import build_link_template as _build_lt
+
+        chat_groups = {
+            chat_id: {
+                "title": title or str(chat_id),
+                "link_template": _build_lt(
+                    chat_username=chat_username,
+                    chat_internal_id=chat_internal_id,
+                    thread_id=thread_id,
+                ),
+            },
+            prepared.comments_chat_id: {
+                "title": prepared.comments_chat_title or f"Comments {prepared.comments_chat_id}",
+                "link_template": _build_lt(
+                    chat_username=prepared.comments_chat_username,
+                    chat_internal_id=prepared.comments_chat_internal_id,
+                    thread_id=None,
+                ),
+            },
+        }
     result = await run_analysis(
         repo=repo,
         chat_id=chat_id,
@@ -928,6 +953,7 @@ async def _run_single(
         topic_titles=topic_titles,
         topic_markers=topic_markers,
         messages=prepared.messages,
+        chat_groups=chat_groups,
     )
 
     if self_check and result.final_result and prepared.messages:
@@ -974,6 +1000,7 @@ async def _run_single(
                     "cite_context": cite_context,
                     "self_check": bool(self_check),
                     "by": by,
+                    "with_comments": bool(with_comments),
                     "thread": int(thread_id) if thread_id else None,
                 },
             )
@@ -1141,7 +1168,7 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
             "\n[red]This is a forum — pick one of:[/]\n"
             "  --thread <id>       single topic\n"
             "  --all-per-topic     one analysis per topic\n"
-            "  --all-flat          whole forum as one chat (needs a period flag)\n"
+            "  --all-flat          whole forum as one chat (defaults to per-topic unread)\n"
             "Or run without flags in a terminal for an interactive picker."
         )
         raise typer.Exit(2)

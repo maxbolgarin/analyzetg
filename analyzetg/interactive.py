@@ -205,6 +205,9 @@ class InteractiveAnswers:
     # msg_id string. Passed through to cmd_analyze's --from-msg unchanged
     # (cmd_analyze does the link parsing).
     custom_from_msg: str | None = None
+    # Channel + comments toggle. Asked only when the picked chat is a
+    # channel that has a linked discussion group; default False otherwise.
+    with_comments: bool = False
 
 
 def _period_to_db_filters(
@@ -351,6 +354,7 @@ def build_dump_args(
         "mark_read": answers.mark_read,
         "all_flat": answers.forum_all_flat,
         "all_per_topic": answers.forum_all_per_topic,
+        "with_comments": bool(answers.with_comments),
         **_build_enrich_kwargs(answers),
     }
 
@@ -363,13 +367,20 @@ async def run_interactive_analyze(
     mark_read: bool | None = None,
     post_saved: bool = False,
     max_cost: float | None = None,
+    self_check: bool = False,
+    cite_context: bool = False,
+    no_cache: bool = False,
+    dry_run: bool = False,
+    by: str | None = None,
+    post_to: str | None = None,
+    with_comments: bool = False,
 ) -> None:
     """Default UX for `analyzetg analyze` (no ref). Walk wizard, then run.
 
-    `post_saved` and `max_cost` are honored as immutable CLI flags — the
-    wizard doesn't expose them as steps yet, but if the user passed
-    `atg analyze --post-saved --max-cost 0.50`, both are forwarded to the
-    final cmd_analyze call so the wizard path matches the direct path.
+    CLI flags that have no wizard step (`--post-saved`, `--max-cost`,
+    `--self-check`, `--cite-context`, `--no-cache`, `--dry-run`, `--by`,
+    `--post-to`) are forwarded as-is so the wizard path matches the direct
+    path when the user typed `atg analyze --self-check --post-saved`.
     """
     answers = await _collect_answers(
         mode="analyze",
@@ -399,6 +410,14 @@ async def run_interactive_analyze(
     args = build_analyze_args(answers)
     args["post_saved"] = post_saved
     args["max_cost"] = max_cost
+    args["self_check"] = self_check
+    args["cite_context"] = cite_context
+    args["no_cache"] = no_cache
+    args["dry_run"] = dry_run
+    args["by"] = by
+    args["post_to"] = post_to
+    # CLI explicit value wins; wizard answer fills in when CLI didn't set it.
+    args["with_comments"] = with_comments or bool(answers.with_comments)
     await cmd_analyze(**args)
 
 
@@ -525,6 +544,10 @@ async def _collect_answers(
         custom_since: str | None = None
         custom_until: str | None = None
         custom_from_msg: str | None = None
+        with_comments: bool = False
+        # Resolved linked-chat id for the picked channel, cached so a
+        # back-step doesn't refetch from Telegram.
+        linked_chat_id: int | None = None
         # Local, step-level state for output + mark_read — start from CLI
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
@@ -559,14 +582,70 @@ async def _collect_answers(
                     )
                     continue
                 chat = result
+                # Channels can carry a linked discussion group (comments).
+                # Detect once now so the next step ("comments") can offer
+                # the toggle. Look up from DB first; fall back to Telegram
+                # only if the row hasn't recorded the link yet. Best-effort:
+                # any failure leaves linked_chat_id=None and the comments
+                # step is skipped.
+                linked_chat_id = None
+                if chat["kind"] == "channel":
+                    try:
+                        from analyzetg.tg.topics import get_linked_chat_id
+
+                        async with open_repo(get_settings().storage.data_path) as _r:
+                            row = await _r.get_chat(int(chat["chat_id"]))
+                        linked_chat_id = (row or {}).get("linked_chat_id")
+                        if linked_chat_id is None:
+                            linked_chat_id = await get_linked_chat_id(client, int(chat["chat_id"]))
+                            if linked_chat_id is not None:
+                                async with open_repo(get_settings().storage.data_path) as _r:
+                                    await _r.upsert_chat(
+                                        int(chat["chat_id"]),
+                                        "channel",
+                                        title=chat.get("title"),
+                                        username=chat.get("username"),
+                                        linked_chat_id=linked_chat_id,
+                                    )
+                    except Exception as e:
+                        log.debug("interactive.linked_lookup_failed", err=str(e)[:200])
+                        linked_chat_id = None
                 if chat["kind"] == "forum":
                     step = "thread"
+                elif chat["kind"] == "channel" and linked_chat_id is not None:
+                    step = "comments"
                 elif mode == "analyze":
                     step = "preset"
                 else:
                     # Dump: skip preset (no preset for dump), go straight
                     # to enrich since media enrichment applies here too.
                     step = "enrich"
+
+            elif step == "comments":
+                # Channel-only step: include the linked discussion group's
+                # messages? Asked once per chat selection. Default Yes
+                # (the user opted into a channel — comments are usually
+                # the more interesting part).
+                result = await _bind_escape(
+                    questionary.select(
+                        "Канал имеет привязанные комментарии. Включить их в анализ?",
+                        choices=[
+                            questionary.Choice("Да — канал + комментарии", value=True),
+                            questionary.Choice("Нет — только посты канала", value=False),
+                            questionary.Choice("← Назад", value=BACK),
+                        ],
+                        style=LIST_STYLE,
+                    ),
+                    BACK,
+                ).ask_async()
+                if result is BACK:
+                    step = "chat"
+                    continue
+                if result is None:
+                    console.print("[dim]Cancelled.[/]")
+                    return None
+                with_comments = bool(result)
+                step = "preset" if mode == "analyze" else "enrich"
 
             elif step == "thread":
                 result = await _pick_thread(client, chat["chat_id"])
@@ -583,9 +662,14 @@ async def _collect_answers(
                 # Only runs for analyze mode.
                 result = await _pick_preset()
                 if result is BACK:
-                    step = (
-                        "chat" if run_on_all else ("thread" if chat and chat["kind"] == "forum" else "chat")
-                    )
+                    if run_on_all:
+                        step = "chat"
+                    elif chat and chat["kind"] == "forum":
+                        step = "thread"
+                    elif chat and chat["kind"] == "channel" and linked_chat_id is not None:
+                        step = "comments"
+                    else:
+                        step = "chat"
                     continue
                 if result is None:
                     console.print("[dim]Cancelled.[/]")
@@ -843,6 +927,7 @@ async def _collect_answers(
             run_on_all_unread=run_on_all,
             enrich_kinds=enrich_kinds,
             custom_from_msg=custom_from_msg,
+            with_comments=with_comments,
         )
 
 
@@ -1165,34 +1250,52 @@ def _chat_row(
     last_msg_date: datetime | None,
     title: str | int | None,
     folders: list[str] | None = None,
+    subscribed: bool = False,
 ) -> str:
     """One formatted row in the chat-picker table.
 
     Two spaces between columns (not `·`) — the aligned whitespace reads
     as columns on its own, and dots just add visual noise at typical
     terminal widths. Title is unpadded (trails everything).
+
+    `subscribed=True` prefixes the title with a star so users browsing
+    `atg chats add` see at a glance which dialogs they've already
+    subscribed to (and avoid duplicate-adding).
     """
+    star = "★ " if subscribed else "  "
     return (
         f"{_fmt_count(unread)}  "
         f"{_short_kind(kind):<{_COL_KIND}}  "
         f"{_fmt_date(last_msg_date):<{_COL_DATE}}  "
         f"{_fmt_folder(folders):<{_COL_FOLDER}}  "
-        f"{title or ''}"
+        f"{star}{title or ''}"
     )
 
 
 def _chat_header_row() -> str:
+    # The 2-char gap before the title matches the `★ `/`  ` slot rows
+    # carry so the header label still lines up over the title column.
     return (
         f"{'unread':>{_COL_UNREAD}}  "
         f"{'kind':<{_COL_KIND}}  "
         f"{'last msg':<{_COL_DATE}}  "
         f"{'folder':<{_COL_FOLDER}}  "
-        f"title"
+        f"  title"
     )
 
 
-async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None | object:
+async def _pick_chat(
+    client,
+    *,
+    offer_all_unread: bool = False,
+    subscribed_ids: set[int] | None = None,
+) -> dict | None | object:
     """Show dialogs with unread (sorted by count desc), offer all-dialogs fallback.
+
+    `subscribed_ids`, when provided, prefixes each row whose chat_id is
+    in the set with a `★` so the user can see what's already in
+    `atg chats list` without leaving the picker. Empty set / None
+    behaves like before.
 
     Returns one of:
       - dict (picked chat) — a resolved entry
@@ -1202,10 +1305,11 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
     from analyzetg.tg.folders import chat_folder_index
 
     unread = await list_unread_dialogs(client)
+    sub_set = subscribed_ids or set()
 
     if not unread:
         console.print("[yellow]No chats with unread messages. Showing all dialogs.[/]")
-        return await _pick_from_all(client)
+        return await _pick_from_all(client, subscribed_ids=sub_set)
 
     # Folder index: empty dict if the user hasn't defined any folders or
     # the lookup fails (we don't want to abort the picker over a side-info
@@ -1245,6 +1349,7 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
                     last_msg_date=d.last_msg_date,
                     title=d.title or d.chat_id,
                     folders=folder_idx.get(d.chat_id),
+                    subscribed=d.chat_id in sub_set,
                 ),
                 value=("pick", d),
             )
@@ -1271,7 +1376,7 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
         return ALL_UNREAD
     if action == "all":
         _replace_last_line("[bold cyan]?[/] chat: [dim](searching all dialogs)[/]")
-        return await _pick_from_all(client)
+        return await _pick_from_all(client, subscribed_ids=sub_set)
     d = payload
     _replace_last_line(
         f"[bold cyan]?[/] chat: [bold]{d.title or d.chat_id}[/] [dim]({d.kind}, {d.unread_count} unread)[/]"
@@ -1286,8 +1391,12 @@ async def _pick_chat(client, *, offer_all_unread: bool = False) -> dict | None |
     }
 
 
-async def _pick_from_all(client) -> dict | None:
-    """Scan every dialog and present a searchable list."""
+async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> dict | None:
+    """Scan every dialog and present a searchable list.
+
+    `subscribed_ids` prefixes each subscribed row with a `★` so the
+    `atg chats add` flow shows what's already on the subscription list.
+    """
     from analyzetg.tg.client import _chat_kind, entity_id, entity_title, entity_username
     from analyzetg.tg.dialogs import UnreadDialog, correct_forum_unread
 
@@ -1348,7 +1457,8 @@ async def _pick_from_all(client) -> dict | None:
     # Mirror the shape of _pick_chat's table so navigation between the two
     # pickers isn't visually jarring. Last-msg-date isn't available from
     # iter_dialogs here without extra fetches — leave it blank.
-    header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'folder':<{_COL_FOLDER}}  title"
+    sub_set = subscribed_ids or set()
+    header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'folder':<{_COL_FOLDER}}    title"
     choices: list[Any] = [questionary.Separator(header_line)]
     choices.extend(
         questionary.Choice(
@@ -1356,6 +1466,7 @@ async def _pick_from_all(client) -> dict | None:
                 f"{_fmt_count(r['unread'])}  "
                 f"{_short_kind(r['kind']):<{_COL_KIND}}  "
                 f"{_fmt_folder(r['folders']):<{_COL_FOLDER}}  "
+                f"{'★ ' if r['chat_id'] in sub_set else '  '}"
                 f"{r['title'] or r['chat_id']}"
             ),
             value=r,
@@ -1697,6 +1808,7 @@ async def _pick_mark_read(*, default: bool):
 async def _pick_period(
     *,
     counts: dict[str, int | None] | None = None,
+    static_only: bool = False,
 ):
     """Returns (period_key, since, until, from_msg), BACK, or None.
 
@@ -1704,6 +1816,12 @@ async def _pick_period(
     choice is annotated with the count so the user can see how much work
     they're about to buy. `from_msg` is populated only when the user picks
     "From message" — otherwise it's None.
+
+    `static_only=True` hides "Custom date range…" and "From a specific
+    message…". Used by `atg chats add` where the persisted `period`
+    field has to be a static key (unread/last7/last30/full) — a
+    one-shot date range or msg id can't be the recurring default for
+    `atg chats run`.
 
     "Unread" is always available — including for all-flat forum mode, where
     it resolves to "since the forum's dialog-level read marker" (the same
@@ -1723,18 +1841,15 @@ async def _pick_period(
             title=_label("Unread (default) — since Telegram read marker", "unread"),
             value="unread",
         ),
+        questionary.Choice(title=_label("Last 7 days", "last7"), value="last7"),
+        questionary.Choice(title=_label("Last 30 days", "last30"), value="last30"),
+        questionary.Choice(title=_label("Full history", "full"), value="full"),
     ]
-    options.extend(
-        [
-            questionary.Choice(title=_label("Last 7 days", "last7"), value="last7"),
-            questionary.Choice(title=_label("Last 30 days", "last30"), value="last30"),
-            questionary.Choice(title=_label("Full history", "full"), value="full"),
-            questionary.Choice(title="From a specific message (link or id)…", value="from_msg"),
-            questionary.Choice(title="Custom date range…", value="custom"),
-            questionary.Separator(),
-            questionary.Choice(title="← Back", value=BACK),
-        ]
-    )
+    if not static_only:
+        options.append(questionary.Choice(title="From a specific message (link or id)…", value="from_msg"))
+        options.append(questionary.Choice(title="Custom date range…", value="custom"))
+    options.append(questionary.Separator())
+    options.append(questionary.Choice(title="← Back", value=BACK))
     key = await _bind_escape(
         questionary.select(
             "Pick a period",

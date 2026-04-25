@@ -72,3 +72,14 @@ class PreparedRun:
     client: TelegramClient
     repo: Repo
     settings: Settings
+
+    # --- Linked discussion (channel + comments) ---
+    # Populated when prepare_chat_run is called with `with_comments=True`
+    # and the primary chat is a channel that has a linked discussion
+    # group. `messages` then contains rows from BOTH chat_ids; consumers
+    # build a multi-chat link template index from these fields and pass
+    # it to the formatter. None when comments aren't being included.
+    comments_chat_id: int | None = None
+    comments_chat_title: str | None = None
+    comments_chat_username: str | None = None
+    comments_chat_internal_id: int | None = None

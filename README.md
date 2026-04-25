@@ -278,7 +278,7 @@ Precedence (first match wins): `--full-history` > `--from-msg` > `--since/--unti
 | Flag | Meaning |
 |---|---|
 | `--thread N` | One specific topic |
-| `--all-flat` | Whole forum as one analysis (needs an explicit period) |
+| `--all-flat` | Whole forum as one analysis (defaults to per-topic unread; honors `--last-days` / `--since` / `--full-history`) |
 | `--all-per-topic` | One report per topic |
 
 ### Cost / safety
@@ -312,6 +312,7 @@ Precedence (first match wins): `--full-history` > `--from-msg` > `--since/--unti
 | `--folder NAME` | Without `<ref>`: batch-analyze every chat in this Telegram folder with unread messages. |
 | `--repeat-last` | Reuse the saved flags from the last successful analyze on `<ref>`. Explicit CLI flags still win. |
 | `--preset NAME` / `--prompt-file path.md` | Pick a preset; `custom` + `--prompt-file` for ad-hoc. |
+| `--with-comments` | For a Telegram channel: also pull messages from its **linked discussion group** (comments) over the same period and run them through the same enrichment toggles. The report renders channel posts and comments as two sections with their own citation links. The wizard asks interactively when the picked chat is a channel with a linked group. Available on `analyze`, `ask`, and `dump`. |
 | `--model M` / `--filter-model M` | Override per-run model picks. |
 | `--min-msg-chars N` | Drop messages shorter than N chars (after enrichment). |
 | `--yes` / `-y` | Skip interactive confirmations (per-topic Y/n, batch Y/n, over-budget Y/n). |

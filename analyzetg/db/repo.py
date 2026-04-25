@@ -144,6 +144,11 @@ class Repo:
                 "transcribe_voice": "INTEGER DEFAULT 1",
                 "transcribe_videonote": "INTEGER DEFAULT 1",
                 "transcribe_video": "INTEGER DEFAULT 0",
+                "preset": "TEXT DEFAULT 'summary'",
+                "period": "TEXT DEFAULT 'unread'",
+                "enrich_kinds": "TEXT",
+                "mark_read": "INTEGER DEFAULT 1",
+                "post_to": "TEXT",
             },
         )
         await self._add_missing_columns(
@@ -216,8 +221,9 @@ class Repo:
             """
             INSERT INTO subscriptions(chat_id, thread_id, title, source_kind, enabled,
                 start_from_msg_id, start_from_date, transcribe_voice, transcribe_videonote,
-                transcribe_video, added_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                transcribe_video, preset, period, enrich_kinds, mark_read, post_to,
+                added_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET
                 title=excluded.title,
                 source_kind=excluded.source_kind,
@@ -226,7 +232,12 @@ class Repo:
                 start_from_date=COALESCE(excluded.start_from_date, subscriptions.start_from_date),
                 transcribe_voice=excluded.transcribe_voice,
                 transcribe_videonote=excluded.transcribe_videonote,
-                transcribe_video=excluded.transcribe_video
+                transcribe_video=excluded.transcribe_video,
+                preset=excluded.preset,
+                period=excluded.period,
+                enrich_kinds=excluded.enrich_kinds,
+                mark_read=excluded.mark_read,
+                post_to=excluded.post_to
             """,
             (
                 sub.chat_id,
@@ -239,6 +250,11 @@ class Repo:
                 int(sub.transcribe_voice),
                 int(sub.transcribe_videonote),
                 int(sub.transcribe_video),
+                sub.preset or "summary",
+                sub.period or "unread",
+                sub.enrich_kinds,
+                int(sub.mark_read),
+                sub.post_to,
                 (sub.added_at or datetime.now(UTC)).isoformat(),
             ),
         )
@@ -291,6 +307,7 @@ class Repo:
 
     @staticmethod
     def _row_to_sub(row: aiosqlite.Row) -> Subscription:
+        keys = row.keys()
         return Subscription(
             chat_id=row["chat_id"],
             thread_id=row["thread_id"],
@@ -302,6 +319,13 @@ class Repo:
             transcribe_voice=bool(row["transcribe_voice"]),
             transcribe_videonote=bool(row["transcribe_videonote"]),
             transcribe_video=bool(row["transcribe_video"]),
+            preset=(row["preset"] if "preset" in keys and row["preset"] is not None else "summary"),
+            period=(row["period"] if "period" in keys and row["period"] is not None else "unread"),
+            enrich_kinds=(row["enrich_kinds"] if "enrich_kinds" in keys else None),
+            mark_read=(
+                bool(row["mark_read"]) if "mark_read" in keys and row["mark_read"] is not None else True
+            ),
+            post_to=(row["post_to"] if "post_to" in keys else None),
             added_at=_from_ts(row["added_at"]),
         )
 

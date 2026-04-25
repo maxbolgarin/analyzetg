@@ -670,7 +670,7 @@ async def cmd_channel_info(ref: str) -> None:
 
 async def cmd_chats_add(
     *,
-    ref: str,
+    ref: str | None,
     from_date: str | None,
     from_msg: str | None,
     last: int | None,
@@ -680,9 +680,164 @@ async def cmd_chats_add(
     with_comments: bool,
     join: bool,
     no_transcribe: bool,
+    preset: str | None = None,
+    period: str | None = None,
+    enrich: str | None = None,
+    no_mark_read: bool = False,
+    post_to: str | None = None,
 ) -> None:
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
+        # No ref → interactive picker (any dialog, not just unread). After
+        # picking, ask the kind-specific questions inline so a user with
+        # no flags ends up with a sensible subscription.
+        if ref is None:
+            import questionary
+
+            from analyzetg.interactive import _pick_chat as _picker
+
+            # Pre-load the set of already-subscribed chat ids so the
+            # picker can flag them with a `★`. Helps the user see at a
+            # glance which dialogs are already in `atg chats list`.
+            existing_subs = await repo.list_subscriptions(enabled_only=False)
+            subscribed_ids = {int(s.chat_id) for s in existing_subs}
+
+            picked = await _picker(
+                client,
+                offer_all_unread=False,
+                subscribed_ids=subscribed_ids,
+            )
+            if picked is None or not isinstance(picked, dict):
+                console.print("[dim]Cancelled.[/]")
+                return
+            ref = str(picked["chat_id"])
+            if int(picked["chat_id"]) in subscribed_ids:
+                console.print(
+                    f"[yellow]→ {picked.get('title') or picked['chat_id']} is already "
+                    "subscribed.[/] Continuing — re-running `add` is idempotent and lets "
+                    "you bolt on extras (e.g. comments / topics) without removing the existing sub."
+                )
+            # Forum / channel toggles get asked here unless the CLI
+            # already set them. Use `questionary.confirm` (prompt_toolkit
+            # under the hood) instead of `typer.confirm` — typer's
+            # blocking input() leaves the terminal in raw mode after a
+            # prior questionary picker, so Enter shows up as `^M` and
+            # never submits.
+            kind = picked.get("kind")
+            if kind == "channel" and not with_comments:
+                # Brief explainer so the choice is informed: comments
+                # live in a separate Telegram chat (the linked discussion
+                # group). Saying yes here creates a SECOND subscription
+                # for that group. `atg chats run` then folds the comments
+                # into the same report as the channel — one analysis per
+                # channel, not two — see `--with-comments` semantics.
+                console.print(
+                    "[dim]→ Channels store posts; user comments live in a "
+                    "linked discussion group (a separate Telegram chat). "
+                    "Saying yes adds a sibling subscription for that group; "
+                    "`atg chats run` will merge channel posts + comments "
+                    "into ONE report (not two).[/]"
+                )
+                with_comments = bool(
+                    await questionary.confirm(
+                        "Also subscribe to this channel's linked discussion group (comments)?",
+                        default=True,
+                    ).ask_async()
+                )
+            if kind == "forum" and not all_topics and thread is None:
+                all_topics = bool(
+                    await questionary.confirm(
+                        "Forum: subscribe to every topic (recommended)?",
+                        default=True,
+                    ).ask_async()
+                )
+            # `atg chats run` settings: preset, period, enrich, mark_read.
+            # These get persisted on the subscription so `atg chats run`
+            # can walk every enabled sub and analyze each one with
+            # its own settings without re-prompting. Each step skips
+            # itself when the matching CLI flag was set.
+            #
+            # Reuse the analyze wizard's pickers wholesale — same
+            # labels, same keybindings (arrow-toggle, Enter, ESC),
+            # same defaults — so users don't have to relearn anything
+            # between `atg analyze` and `atg chats add`.
+            from analyzetg.interactive import BACK as _BACK
+            from analyzetg.interactive import (
+                _pick_enrich,
+                _pick_mark_read,
+                _pick_period,
+                _pick_preset,
+            )
+
+            def _bail() -> None:
+                console.print("[dim]Cancelled.[/]")
+
+            if preset is None:
+                picked_preset = await _pick_preset()
+                if picked_preset is None or picked_preset is _BACK:
+                    _bail()
+                    return
+                preset = picked_preset
+            if period is None:
+                # `static_only=True` hides custom-range / from-msg —
+                # neither makes sense as a persisted recurring period.
+                period_result = await _pick_period(static_only=True)
+                if period_result is None or period_result is _BACK:
+                    _bail()
+                    return
+                period = period_result[0]
+            if enrich is None:
+                enrich_pick = await _pick_enrich()
+                if enrich_pick is None or enrich_pick is _BACK:
+                    _bail()
+                    return
+                # Empty list = explicitly "no enrichment". The persisted
+                # column is a CSV; "" represents "off everywhere".
+                enrich = ",".join(enrich_pick)
+                # Legacy `--no-transcribe` keeps mirroring the
+                # voice/videonote choice so older log lines stay
+                # consistent with the new picker's outcome.
+                no_transcribe = "voice" not in enrich_pick and "videonote" not in enrich_pick
+            if not no_mark_read:
+                mr_result = await _pick_mark_read(default=True)
+                if mr_result is None or mr_result is _BACK:
+                    _bail()
+                    return
+                no_mark_read = not bool(mr_result)
+            # post_to: where to deliver the report after `atg chats run`
+            # analyzes this sub. Three sensible defaults:
+            #   - "No"          → save to reports/<chat>/ only
+            #   - "Saved Msgs"  → send to your own Telegram Saved Messages
+            #   - "Custom"      → text-input for any chat ref (@channel,
+            #                     numeric id, t.me link, fuzzy title)
+            # Resolution happens at run time via tg/resolver, so any
+            # form `--post-to` accepts works here too.
+            if post_to is None:
+                post_choice = await questionary.select(
+                    "After analyze, post the report to a Telegram chat?",
+                    choices=[
+                        questionary.Choice("No — save to reports/ only", value="no"),
+                        questionary.Choice("Saved Messages (recommended for personal digests)", value="me"),
+                        questionary.Choice("Custom chat / channel…", value="custom"),
+                    ],
+                    default="no",
+                ).ask_async()
+                if post_choice is None:
+                    _bail()
+                    return
+                if post_choice == "me":
+                    post_to = "me"
+                elif post_choice == "custom":
+                    post_ref = await questionary.text(
+                        "Post-to ref (@channel, t.me link, numeric id, or fuzzy title — blank to skip)",
+                        default="",
+                    ).ask_async()
+                    if post_ref is None:
+                        _bail()
+                        return
+                    post_ref = post_ref.strip()
+                    post_to = post_ref or None
+
         resolved = await resolve(client, repo, ref, join=join, prompt_choice=_tui_choose)
 
         from_msg_id = _parse_from_msg(from_msg)
@@ -690,6 +845,17 @@ async def cmd_chats_add(
         if full_history:
             from_dt = datetime(1970, 1, 1)
             from_msg_id = None
+
+        # Settings that apply to every Subscription built below — keep
+        # them DRY so adding a new field doesn't require touching three
+        # constructors.
+        run_settings = {
+            "preset": preset or "summary",
+            "period": period or "unread",
+            "enrich_kinds": enrich,  # None = config defaults; "" = no enrichment
+            "mark_read": not no_mark_read,
+            "post_to": post_to,
+        }
 
         # Base subscription for the chat timeline
         subs_to_add: list[Subscription] = []
@@ -705,6 +871,7 @@ async def cmd_chats_add(
             transcribe_voice=not no_transcribe,
             transcribe_videonote=not no_transcribe,
             transcribe_video=False,
+            **run_settings,
         )
         subs_to_add.append(base)
 
@@ -722,6 +889,7 @@ async def cmd_chats_add(
                         transcribe_voice=not no_transcribe,
                         transcribe_videonote=not no_transcribe,
                         transcribe_video=False,
+                        **run_settings,
                     )
                 )
 
@@ -743,6 +911,12 @@ async def cmd_chats_add(
                     linked_title = entity_title(linked_entity)
                 except Exception:
                     linked_title = None
+                # Comments sub piggybacks on the channel's settings; the
+                # channel's analyze run pulls comments inline via
+                # `--with-comments` so the comments sub itself isn't
+                # analyzed independently. Storing matching settings keeps
+                # the row self-consistent if the user later disables the
+                # parent and runs the comments group on its own.
                 subs_to_add.append(
                     Subscription(
                         chat_id=linked,
@@ -753,6 +927,7 @@ async def cmd_chats_add(
                         transcribe_voice=not no_transcribe,
                         transcribe_videonote=not no_transcribe,
                         transcribe_video=False,
+                        **run_settings,
                     )
                 )
 
@@ -797,39 +972,69 @@ def _parse_from_msg(value: str | None) -> int | None:
     return p.msg_id
 
 
-async def cmd_chats_list(enabled_only: bool) -> None:
-    settings = get_settings()
-    async with open_repo(settings.storage.data_path) as repo:
-        subs = await repo.list_subscriptions(enabled_only=enabled_only)
-        t = Table(title="Subscriptions")
-        for col in ("chat_id", "thread", "kind", "title", "enabled", "transcribe", "start"):
-            t.add_column(col)
-        for s in subs:
-            transcribe = ",".join(
-                k
-                for k, v in [
-                    ("voice", s.transcribe_voice),
-                    ("vnote", s.transcribe_videonote),
-                    ("video", s.transcribe_video),
-                ]
-                if v
-            )
-            start = ""
-            if s.start_from_msg_id is not None:
-                start = f"msg≥{s.start_from_msg_id}"
-            elif s.start_from_date is not None:
-                start = s.start_from_date.strftime("%Y-%m-%d")
-            t.add_row(
-                str(s.chat_id),
-                str(s.thread_id),
-                s.source_kind,
-                s.title or "",
-                "yes" if s.enabled else "no",
-                transcribe or "-",
-                start,
-            )
-        console.print(t)
-        console.print(f"[dim]{len(subs)} subscription(s)[/]")
+async def _comments_index(repo, subs: list[Subscription]) -> dict[int, dict]:
+    """Return per-(channel chat_id) info about its linked comments sub.
+
+    Output keys per channel chat_id (when applicable):
+      - "linked_chat_id": int (the discussion group's id)
+      - "linked_sub": Subscription | None — the sub for that group, or
+        None if the channel has a linked group but the user hasn't
+        subscribed to comments yet.
+
+    For a comments sub (source_kind == "comments"), returns a separate
+    "comments_for" map keyed by the comments sub's chat_id pointing back
+    at the channel chat_id. Both keyspaces are merged in the caller.
+    """
+    # Map subscription chat_ids → Subscription so we can look up siblings.
+    by_chat = {int(s.chat_id): s for s in subs}
+    # Pull the channel rows we care about so we know each channel's
+    # linked_chat_id without round-tripping Telegram.
+    channel_ids = [int(s.chat_id) for s in subs if s.source_kind == "channel"]
+    info: dict[int, dict] = {}
+    for cid in channel_ids:
+        row = await repo.get_chat(cid)
+        linked = (row or {}).get("linked_chat_id")
+        if linked is None:
+            continue
+        info[cid] = {
+            "linked_chat_id": int(linked),
+            "linked_sub": by_chat.get(int(linked))
+            if by_chat.get(int(linked)) and by_chat[int(linked)].source_kind == "comments"
+            else None,
+        }
+    # Reverse map so a comments-row can render a back-reference.
+    reverse: dict[int, int] = {}
+    for cid, meta in info.items():
+        if meta.get("linked_sub") is not None:
+            reverse[int(meta["linked_chat_id"])] = cid
+    return {"by_channel": info, "by_comments": reverse}
+
+
+def _comments_label(s: Subscription, idx: dict) -> str:
+    """Render the value for the `comments` column for one subscription.
+
+    - Channel sub: "✓ <linked title>" if its discussion group is also
+      subscribed; "available" if the channel has a linked group but the
+      user hasn't subscribed yet; "—" if the channel has no linked group.
+    - Comments sub: "↑ for <channel title>" (back-reference).
+    - Other kinds: "—".
+    """
+    by_channel: dict = idx.get("by_channel", {})
+    by_comments: dict = idx.get("by_comments", {})
+    if s.source_kind == "channel":
+        meta = by_channel.get(int(s.chat_id))
+        if meta is None:
+            return "—"
+        linked_sub = meta.get("linked_sub")
+        if linked_sub is not None:
+            return f"✓ {(linked_sub.title or '').strip() or 'comments'}"
+        return "available"
+    if s.source_kind == "comments":
+        parent_id = by_comments.get(int(s.chat_id))
+        if parent_id is None:
+            return "↑ (orphan)"
+        return f"↑ for {parent_id}"
+    return "—"
 
 
 # ----------------------------------------------------------- sync / backfill
@@ -885,3 +1090,158 @@ def _tui_choose(candidates: list) -> int | None:
         return int(raw)
     except (ValueError, EOFError):
         return None
+
+
+def _sub_detail_panel(sub: Subscription, comments: str) -> Table:
+    """Build a vertical key/value table summarizing one subscription.
+
+    Shown after the user picks a subscription in `cmd_chats_manage` so
+    they see the full state (preset, period, enrich, mark-read, post-to,
+    transcribe flags, start cursor, comments link) before deciding what
+    to do with it. Far easier to scan than the wide multi-column list.
+    """
+    enrich_display = sub.enrich_kinds if sub.enrich_kinds is not None else "(config defaults)"
+    if enrich_display == "":
+        enrich_display = "none"
+    transcribe = ",".join(
+        k
+        for k, v in [
+            ("voice", sub.transcribe_voice),
+            ("vnote", sub.transcribe_videonote),
+            ("video", sub.transcribe_video),
+        ]
+        if v
+    )
+    if sub.start_from_msg_id is not None:
+        start = f"msg≥{sub.start_from_msg_id}"
+    elif sub.start_from_date is not None:
+        start = sub.start_from_date.strftime("%Y-%m-%d")
+    else:
+        start = "—"
+    rows = [
+        ("title", sub.title or "—"),
+        ("chat_id", str(sub.chat_id)),
+        ("thread_id", str(sub.thread_id)),
+        ("kind", sub.source_kind),
+        ("enabled", "yes" if sub.enabled else "no"),
+        ("preset", sub.preset or "summary"),
+        ("period", sub.period or "unread"),
+        ("enrich", enrich_display),
+        ("mark_read", "yes" if sub.mark_read else "no"),
+        ("post_to", sub.post_to or "—"),
+        ("comments", comments),
+        ("transcribe", transcribe or "—"),
+        ("start", start),
+        ("added_at", sub.added_at.strftime("%Y-%m-%d %H:%M") if sub.added_at else "—"),
+    ]
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_column(style="dim", justify="right")
+    t.add_column()
+    for k, v in rows:
+        t.add_row(k, v)
+    return t
+
+
+async def cmd_chats_manage() -> None:
+    """Single interactive panel: pick a sub, view its details, act on it.
+
+    Opens with just the subscription picker (one line per sub showing
+    state + title + kind + comments link). Picking one prints a vertical
+    detail panel for that subscription and then offers the action menu
+    (toggle on/off, remove keeping messages, remove + purge). Loops
+    until `← Done` / Ctrl-C / ESC. The only `chats` subcommands today
+    are `add`, `manage`, and `run`.
+    """
+    import questionary
+
+    from analyzetg.interactive import LIST_STYLE, _expand_printable_for_search
+
+    _expand_printable_for_search()
+
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        while True:
+            subs = await repo.list_subscriptions(enabled_only=False)
+            if not subs:
+                console.print("[yellow]No subscriptions yet.[/] Use [cyan]atg chats add[/] to create one.")
+                return
+            idx = await _comments_index(repo, subs)
+
+            def _label(s: Subscription, _idx: dict = idx) -> str:
+                state = "[on]" if s.enabled else "[off]"
+                title = s.title or str(s.chat_id)
+                kind_bit = s.source_kind
+                if s.thread_id:
+                    kind_bit += f" thread={s.thread_id}"
+                comments = _comments_label(s, _idx)
+                comments_bit = f"  {comments}" if comments and comments != "—" else ""
+                return f"{state}  {title}  ({kind_bit}){comments_bit}"
+
+            # Sentinel for the "← Done" choice. We can't use `value=None`
+            # — questionary then falls back to using the choice title as
+            # the picked value, which would make the unpack below explode
+            # (`too many values to unpack`). A unique object survives the
+            # round-trip cleanly.
+            _DONE = object()
+            choices = [questionary.Choice(_label(s), value=(int(s.chat_id), int(s.thread_id))) for s in subs]
+            choices.append(questionary.Choice("← Done", value=_DONE))
+
+            picked = await questionary.select(
+                f"Manage subscriptions ({len(subs)} total) — pick one:",
+                choices=choices,
+                style=LIST_STYLE,
+                use_search_filter=True,
+                use_jk_keys=False,
+            ).ask_async()
+            # Ctrl-C / ESC → questionary returns None. "← Done" → _DONE.
+            if picked is None or picked is _DONE:
+                return
+            chat_id, thread_id = picked
+            sub = await repo.get_subscription(chat_id, thread_id)
+            if not sub:
+                console.print(f"[red]Subscription gone:[/] chat={chat_id} thread={thread_id}")
+                continue
+
+            # Show the per-sub detail panel before the action menu so
+            # the user has the full picture (preset / period / enrich /
+            # transcribe / start cursor / etc.) instead of squinting at
+            # a wide table row.
+            console.print()
+            console.print(_sub_detail_panel(sub, _comments_label(sub, idx)))
+            console.print()
+
+            # Per-sub action menu. Toggle label flips with current state
+            # so the choice reads as the verb the user is invoking.
+            # `value="back"` (not None) for the back row — same questionary
+            # gotcha as above.
+            toggle_label = "Disable" if sub.enabled else "Enable"
+            action = await questionary.select(
+                f"{sub.title or sub.chat_id} — what next?",
+                choices=[
+                    questionary.Choice(toggle_label, value="toggle"),
+                    questionary.Choice("Remove (keep messages)", value="remove_keep"),
+                    questionary.Choice("Remove + delete stored messages", value="remove_purge"),
+                    questionary.Choice("← Back", value="back"),
+                ],
+                style=LIST_STYLE,
+            ).ask_async()
+            if action is None or action == "back":
+                continue
+            if action == "toggle":
+                await repo.set_subscription_enabled(chat_id, thread_id, not sub.enabled)
+                console.print(f"[green]→ {toggle_label}d[/] chat={chat_id} thread={thread_id}")
+            elif action in ("remove_keep", "remove_purge"):
+                purge = action == "remove_purge"
+                # Confirmation guard for purge — irreversible.
+                if purge:
+                    confirmed = bool(
+                        await questionary.confirm(
+                            f"Delete ALL stored messages for chat={chat_id}? Cannot be undone.",
+                            default=False,
+                        ).ask_async()
+                    )
+                    if not confirmed:
+                        console.print("[dim]Skipped — kept the subscription.[/]")
+                        continue
+                await repo.remove_subscription(chat_id, thread_id, purge_messages=purge)
+                console.print(f"[green]→ Removed[/] chat={chat_id} thread={thread_id} (purged={purge})")

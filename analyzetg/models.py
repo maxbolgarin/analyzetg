@@ -51,6 +51,13 @@ class Subscription:
     transcribe_voice: bool = True
     transcribe_videonote: bool = True
     transcribe_video: bool = False
+    # Per-subscription analyze defaults consumed by `atg chats run`. NULL /
+    # empty values fall back to config / CLI defaults.
+    preset: str = "summary"
+    period: str = "unread"  # unread | last7 | last30 | full
+    enrich_kinds: str | None = None  # CSV: voice,videonote,video,image,doc,link
+    mark_read: bool = True
+    post_to: str | None = None
     added_at: datetime | None = None
 
 

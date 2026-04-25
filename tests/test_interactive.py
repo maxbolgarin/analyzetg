@@ -163,6 +163,44 @@ def test_dump_populated_enrich_becomes_csv() -> None:
     assert kw["no_enrich"] is False
 
 
+async def test_analyze_wizard_forwards_immutable_cli_flags(monkeypatch) -> None:
+    """`atg analyze --self-check --post-saved` → wizard → cmd_analyze must
+    receive `self_check=True, post_saved=True`. Earlier code dropped every
+    flag that wasn't `post_saved` / `max_cost` on the floor, so the wizard
+    path silently skipped the verification audit.
+    """
+    answers = _answers(forum_all_per_topic=False)
+    captured = {}
+
+    async def fake_collect_answers(**kwargs):
+        return answers
+
+    async def fake_cmd_analyze(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(interactive, "_collect_answers", fake_collect_answers)
+    monkeypatch.setattr("analyzetg.analyzer.commands.cmd_analyze", fake_cmd_analyze)
+
+    await interactive.run_interactive_analyze(
+        post_saved=True,
+        max_cost=0.5,
+        self_check=True,
+        cite_context=True,
+        no_cache=True,
+        dry_run=False,
+        by="topic",
+        post_to="me",
+    )
+
+    assert captured["post_saved"] is True
+    assert captured["max_cost"] == 0.5
+    assert captured["self_check"] is True
+    assert captured["cite_context"] is True
+    assert captured["no_cache"] is True
+    assert captured["by"] == "topic"
+    assert captured["post_to"] == "me"
+
+
 async def test_dump_all_unread_wizard_skips_second_confirm_and_forwards_enrich(monkeypatch) -> None:
     answers = _answers(run_on_all_unread=True, enrich_kinds=["image"], mark_read=True)
     captured = {}
