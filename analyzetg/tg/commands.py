@@ -256,20 +256,29 @@ async def cmd_doctor() -> None:
     except Exception as e:
         _line(fail, "preset load failed", str(e)[:200])
 
-    # 9. Pricing coverage
+    # 9. Pricing coverage — chat AND audio. Missing the audio entry was
+    # invisible until now: voice transcription would silently drop cost
+    # accounting on `atg stats`.
     pricing = settings.pricing
-    referenced = {
+    chat_referenced = {
         settings.openai.chat_model_default,
         settings.openai.filter_model_default,
         settings.enrich.vision_model,
     }
-    referenced.discard(None)
-    missing = [m for m in referenced if m and m not in pricing.chat]
-    if missing:
+    chat_referenced.discard(None)
+    chat_missing = [m for m in chat_referenced if m and m not in pricing.chat]
+    audio_model = settings.openai.audio_model_default
+    audio_missing = bool(audio_model and audio_model not in pricing.audio)
+    if chat_missing or audio_missing:
+        bits: list[str] = []
+        if chat_missing:
+            bits.append(f'[pricing.chat."{chat_missing[0]}"]')
+        if audio_missing:
+            bits.append(f'[pricing.audio]."{audio_model}"')
         _line(
             warn,
             "pricing entries missing",
-            f'add [pricing.chat."{missing[0]}"] to config.toml; cost stats will under-report',
+            f"add {' / '.join(bits)} to config.toml; cost stats will under-report",
         )
     else:
         _line(ok, "pricing covers default models")

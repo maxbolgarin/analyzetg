@@ -150,6 +150,36 @@ def _topic_header(thread_id: int | None, topic_titles: dict[int, str] | None) ->
     return f"=== Топик: {name} (id={thread_id}) ==="
 
 
+def _high_impact_threshold() -> int:
+    """Lazy lookup so tests / batch flows that override settings see the
+    current value rather than capturing one at import time."""
+    try:
+        from analyzetg.config import get_settings
+
+        return int(get_settings().analyze.high_impact_reactions)
+    except Exception:
+        return 3
+
+
+def _high_impact_marker(m: Message) -> str:
+    """Prefix `[high-impact]` for messages with `>= threshold` reactions.
+
+    Surfaces "what people reacted to" to the LLM without breaking
+    chronological order. Threshold from `[analyze].high_impact_reactions`
+    in config (default 3); 0 disables the marker entirely. Soft signal —
+    presets are free to ignore it.
+    """
+    if not m.reactions:
+        return ""
+    threshold = _high_impact_threshold()
+    if threshold <= 0:
+        return ""
+    total = sum(int(v) for v in m.reactions.values() if isinstance(v, int))
+    if total < threshold:
+        return ""
+    return "[high-impact] "
+
+
 def _emit_msg_line(m: Message, idx: dict[int, Message], date_fmt: str) -> str | None:
     """Render a single message line, or None if it has no analyzable body."""
     body = _body(m)
@@ -160,7 +190,7 @@ def _emit_msg_line(m: Message, idx: dict[int, Message], date_fmt: str) -> str | 
     reply = _reply_marker(m, idx)
     return (
         f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}{_reactions_tag(m)}:"
-        f" {reply}{body}{_dup_suffix(m)}{_link_summary_block(m)}"
+        f" {_high_impact_marker(m)}{reply}{body}{_dup_suffix(m)}{_link_summary_block(m)}"
     )
 
 

@@ -172,6 +172,10 @@ class AnalysisOptions:
     max_msg_id: int | None = None
     dedupe_forwards: bool | None = None
     enrich: EnrichOpts | None = None  # None → resolved from config at run time.
+    # `--by` filter: substring match on sender_name (case-insensitive) OR an
+    # exact sender_id. Mutually exclusive at CLI parse time.
+    sender_substring: str | None = None
+    sender_id: int | None = None
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
         """Hash ingredients that must bust cache when toggled."""
@@ -190,6 +194,10 @@ class AnalysisOptions:
             "output_budget": preset.output_budget_tokens,
             "map_output": preset.map_output_tokens,
             "enrich_kinds": enrich_kinds,
+            # Sender filter is part of the cache key — toggling it must
+            # produce different cached results for the same message set.
+            "sender_substring": (self.sender_substring or "").casefold() or None,
+            "sender_id": self.sender_id,
         }
         if self.enrich:
             payload["enrich_options"] = {
@@ -398,6 +406,8 @@ async def run_analysis(
             else settings.analyze.min_msg_chars,
             include_transcripts=opts.include_transcripts,
             text_only=not opts.include_transcripts,
+            sender_substring=opts.sender_substring,
+            sender_id=opts.sender_id,
         )
         msgs = filter_messages(msgs, f_opts)
         if opts.dedupe_forwards if opts.dedupe_forwards is not None else settings.analyze.dedupe_forwards:

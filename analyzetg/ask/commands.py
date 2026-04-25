@@ -23,7 +23,7 @@ import typer
 from rich.console import Console
 
 from analyzetg.analyzer.formatter import build_link_template, format_messages
-from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
+from analyzetg.analyzer.openai_client import chat_complete, make_client
 from analyzetg.ask.retrieval import retrieve_messages, tokenize_question
 from analyzetg.config import get_settings
 from analyzetg.core.paths import compute_window
@@ -65,7 +65,12 @@ async def cmd_ask(
     output: Path | None = None,
     console_out: bool = False,
     refresh: bool = False,
+    show_retrieved: bool = False,
+    rerank: bool | None = None,
+    semantic: bool = False,
+    build_index: bool = False,
     max_cost: float | None = None,
+    interactive: bool = False,
     yes: bool = False,
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
@@ -79,20 +84,29 @@ async def cmd_ask(
     so we don't accidentally hit Telegram for every dialog you've ever
     synced.
     """
-    if not question.strip():
-        console.print("[red]Empty question.[/]")
-        raise typer.Exit(2)
-    tokens = tokenize_question(question)
-    if not tokens:
-        console.print(
-            "[yellow]No useful keywords in your question.[/] Add a noun, name, or topic — "
-            "stop words and short tokens are filtered."
-        )
-        raise typer.Exit(2)
+    # `--build-index` doesn't need a question; everything else does.
+    if not build_index:
+        if not question.strip():
+            console.print("[red]Empty question.[/]")
+            raise typer.Exit(2)
+        if not semantic:
+            tokens = tokenize_question(question)
+            if not tokens:
+                console.print(
+                    "[yellow]No useful keywords in your question.[/] Add a noun, name, or "
+                    "topic — stop words and short tokens are filtered. (Or pass --semantic, "
+                    "which doesn't need keyword tokens.)"
+                )
+                raise typer.Exit(2)
     if refresh and not chat and not folder:
         raise typer.BadParameter(
             "--refresh needs --chat or --folder; refusing to backfill every "
             "synced dialog (potentially hundreds of Telegram round-trips)."
+        )
+    if build_index and not chat and not folder:
+        raise typer.BadParameter(
+            "--build-index needs --chat or --folder; refusing to embed every "
+            "synced dialog at once (could be a lot of OpenAI calls)."
         )
 
     settings = get_settings()
@@ -127,125 +141,371 @@ async def cmd_ask(
         if refresh and chat_ids:
             await _refresh_chats(client, repo, chat_ids, thread_id=thread)
 
+        # --build-index → fill the message_embeddings table for the scoped
+        # chats and exit. Idempotent. The flagship answer path is skipped.
+        if build_index:
+            from analyzetg.ask.embeddings import build_index as _build_index
+            from analyzetg.ask.embeddings import default_model as _default_embed_model
+
+            assert chat_ids is not None  # validated above
+            embed_model = _default_embed_model()
+            console.print(
+                f"[dim]→ Building embeddings index for {len(chat_ids)} chat(s) "
+                f"with[/] [bold]{embed_model}[/]..."
+            )
+            written = await _build_index(
+                repo=repo,
+                oai=make_client(),
+                chat_ids=chat_ids,
+                model=embed_model,
+            )
+            if written:
+                console.print(f"[green]Indexed[/] {written} new message(s).")
+            else:
+                console.print("[dim]Nothing new to index — already up to date.[/]")
+            return
+
+        # Rerank decision: explicit CLI flag wins, else config default.
+        ask_cfg = settings.ask
+        rerank_on = ask_cfg.rerank_enabled if rerank is None else rerank
+        # Rerank composes with semantic (semantic produces the pool, rerank
+        # prunes it). For pure semantic without rerank, skip rerank.
+        oai = make_client()
+        used_model = model or settings.openai.chat_model_default
+        # Conversation history for --interactive mode. Each turn appends
+        # (question, answer) so follow-ups have prior context.
+        history: list[tuple[str, str]] = []
+
+        async def _answer_one(q: str, *, is_followup: bool) -> str:
+            """One full Q→A iteration: retrieve → rerank → format → answer.
+
+            Returns the assistant's answer text. Mutates `history` only
+            after a successful turn.
+            """
+            return await _run_single_turn(
+                question=q,
+                history=history,
+                client=client,
+                repo=repo,
+                settings=settings,
+                ask_cfg=ask_cfg,
+                oai=oai,
+                used_model=used_model,
+                chat_ids=chat_ids,
+                chat_titles=chat_titles,
+                thread=thread,
+                folder=folder,
+                since_dt=since_dt,
+                until_dt=until_dt,
+                limit=limit,
+                rerank_on=rerank_on,
+                semantic=semantic,
+                show_retrieved=show_retrieved,
+                output=output if not is_followup else None,
+                console_out=console_out or is_followup,
+                max_cost=max_cost,
+                yes=yes,
+            )
+
+        # First turn — same shape as before --interactive existed.
+        first_answer = await _answer_one(question, is_followup=False)
+        history.append((question, first_answer))
+
+        if not interactive:
+            return
+
+        # Interactive loop: prompt for follow-ups until blank line / EOF.
         console.print(
-            f"[dim]→ Searching local corpus[/] (tokens: {', '.join(tokens)}; "
-            f"limit={limit}{', chat=' + chat if chat else ''}"
-            f"{', folder=' + folder if folder else ''})"
+            "\n[bold cyan]Interactive mode[/] — type a follow-up question (blank or Ctrl-D to exit)."
         )
-        msgs = await retrieve_messages(
+
+        while True:
+            try:
+                follow = input("\n> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                break
+            if not follow:
+                break
+            try:
+                ans = await _answer_one(follow, is_followup=True)
+            except typer.Exit as e:
+                # Budget guard fires raise; in interactive mode that means
+                # "skip this turn", not "kill the session".
+                if e.exit_code == 0:
+                    continue
+                raise
+            history.append((follow, ans))
+
+
+async def _run_single_turn(
+    *,
+    question: str,
+    history: list[tuple[str, str]],
+    client,
+    repo,
+    settings,
+    ask_cfg,
+    oai,
+    used_model: str,
+    chat_ids: list[int] | None,
+    chat_titles: dict[int, str],
+    thread: int | None,
+    folder: str | None,
+    since_dt,
+    until_dt,
+    limit: int,
+    rerank_on: bool,
+    semantic: bool,
+    show_retrieved: bool,
+    output,
+    console_out: bool,
+    max_cost: float | None,
+    yes: bool,
+) -> str:
+    """Retrieve → rerank → format → preview → answer for one question.
+
+    Returns the assistant's answer text (caller appends to history).
+    Raises typer.Exit(0) on retrieval miss or budget abort, Exit(2) on
+    --yes-driven over-budget abort, Exit(1) on empty model output.
+    Prints / saves the answer using the same UX as the original single-
+    shot path.
+    """
+    from analyzetg.core.paths import derive_internal_id
+    from analyzetg.util.pricing import chat_cost
+    from analyzetg.util.tokens import count_tokens
+
+    tokens = tokenize_question(question)
+    candidate_limit = max(limit, ask_cfg.rerank_top_k) if rerank_on else limit
+
+    if semantic:
+        from analyzetg.ask.embeddings import default_model as _embed_model_name
+        from analyzetg.ask.embeddings import semantic_search
+
+        embed_model = _embed_model_name()
+        if chat_ids is None:
+            console.print(
+                "[red]--semantic needs --chat or --folder.[/] Cosine over every "
+                "synced chat would be slow without an ANN index."
+            )
+            raise typer.Exit(2)
+        console.print(
+            f"[dim]→ Semantic retrieval[/] ({embed_model}; "
+            f"pool={candidate_limit}"
+            f"{', rerank→' + str(min(limit, ask_cfg.rerank_keep)) if rerank_on else ''})"
+        )
+        sem_scored = await semantic_search(
+            repo=repo,
+            oai=oai,
+            question=question,
+            chat_ids=chat_ids,
+            model=embed_model,
+            limit=candidate_limit,
+        )
+        if not sem_scored:
+            console.print(
+                "[yellow]No embeddings indexed for this scope.[/] "
+                "Run `atg ask --build-index --chat <ref>` (or `--folder`) first."
+            )
+            raise typer.Exit(0)
+        # Map cosine [-1,1] → [0,100] int for the (Message, score) tuple
+        # shape the rest of the pipeline expects from keyword retrieval.
+        # Affine transform `(s + 1) * 50` keeps the score non-negative so
+        # rerank's "missing rating defaults to 0" sorting trick still works.
+        # Negative cosines (semantically opposite) map to [0, 50);
+        # neutral → 50; closely related → (50, 100].
+        scored = [(m, max(0, min(100, round((s + 1) * 50)))) for m, s in sem_scored]
+    else:
+        console.print(
+            f"[dim]→ Searching local corpus[/] (tokens: {', '.join(tokens) or '(none)'}; "
+            f"pool={candidate_limit}"
+            f"{', rerank→' + str(min(limit, ask_cfg.rerank_keep)) if rerank_on else ''})"
+        )
+        scored = await retrieve_messages(
             repo=repo,
             question=question,
             chat_ids=chat_ids,
             thread_id=thread,
             since=since_dt,
             until=until_dt,
-            limit=limit,
-        )
-        if not msgs:
-            console.print(
-                "[yellow]No matching messages.[/] Try `atg sync <chat>` first if "
-                "the chat hasn't been backfilled, or broaden your scope (drop --chat / --since)."
-            )
-            raise typer.Exit(0)
-
-        # Backfill chat titles for any chats we didn't already resolve.
-        for m in msgs:
-            if m.chat_id in chat_titles:
-                continue
-            row = await repo.get_chat(m.chat_id)
-            chat_titles[m.chat_id] = (row or {}).get("title") or str(m.chat_id)
-
-        # Citation links: each chat needs its own t.me/... template
-        # (different username / internal_id / thread). Pre-fetch chat
-        # rows so the formatter can emit a `[#msg_id](url)`-friendly
-        # template. Without this the LLM has no link pattern and writes
-        # bare `#msg_id`, which is what the answer in this run showed.
-        from analyzetg.core.paths import derive_internal_id
-
-        chat_links: dict[int, str | None] = {}
-        for cid in {m.chat_id for m in msgs}:
-            row = await repo.get_chat(cid)
-            chat_links[cid] = build_link_template(
-                chat_username=(row or {}).get("username"),
-                chat_internal_id=derive_internal_id(cid),
-                thread_id=thread,
-            )
-
-        if chat_ids is not None and len(chat_ids) == 1:
-            single_chat_id = chat_ids[0]
-            formatted = format_messages(msgs, link_template=chat_links.get(single_chat_id))
-            scope_label = chat_titles[single_chat_id]
-        else:
-            formatted = _format_multi_chat(msgs, chat_titles, chat_links)
-            scope_label = f"folder '{folder}'" if folder else "all synced chats"
-
-        oai = make_client()
-        used_model = model or settings.openai.chat_model_default
-        user_text = (
-            f"Вопрос: {question.strip()}\n\n"
-            f"Контекст ({len(msgs)} сообщ. из {scope_label}):\n\n"
-            f"{formatted}\n\n"
-            "Ответ (с цитатами):"
+            limit=candidate_limit,
+            return_scores=True,
         )
 
-        # Cost preview / --max-cost guard. Unlike analyze (which estimates
-        # via _AVG_TOKENS_PER_MSG ≈ 60), ask has the actual prompt body in
-        # hand — count tokens precisely so the user sees the real number
-        # before $0.30 lands on their bill.
-        from analyzetg.util.pricing import chat_cost
-        from analyzetg.util.tokens import count_tokens
+    if rerank_on and len(scored) > min(limit, ask_cfg.rerank_keep):
+        from analyzetg.ask.rerank import rerank as _rerank_fn
 
-        prompt_tokens = count_tokens(_SYSTEM_PROMPT, used_model) + count_tokens(user_text, used_model)
-        # 2000 = max_tokens passed to chat_complete below.
-        est_cost = chat_cost(used_model, prompt_tokens, 0, 2000, settings=settings)
-        if est_cost is not None:
-            console.print(
-                f"[dim]→ Estimated cost: ~${est_cost:.4f}[/] "
-                f"({prompt_tokens:,} prompt tokens × {used_model}; output capped at 2000)"
-            )
-            if max_cost is not None and est_cost > max_cost:
-                console.print(f"[bold yellow]⚠ Estimated ${est_cost:.4f} > --max-cost ${max_cost:.4f}[/]")
-                if yes:
-                    console.print("[red]Aborting (--yes set, no confirmation possible).[/]")
-                    raise typer.Exit(2)
-                if not typer.confirm("Run anyway?", default=False):
-                    console.print("[yellow]Aborted.[/]")
-                    raise typer.Exit(0)
-        elif max_cost is not None:
-            console.print(f"[dim]→ --max-cost not enforced: pricing missing for {used_model}.[/]")
-
-        messages = build_messages(_SYSTEM_PROMPT, "", user_text)
-        console.print(f"[dim]→ Asking[/] [bold]{used_model}[/] over {len(msgs)} message(s)...")
-        res = await chat_complete(
-            oai,
+        keep_n = min(limit, ask_cfg.rerank_keep)
+        rerank_model = ask_cfg.rerank_model or settings.openai.filter_model_default
+        console.print(
+            f"[dim]→ Reranking {len(scored)} candidates with[/] [bold]{rerank_model}[/]"
+            f"[dim] → keep top-{keep_n}...[/]"
+        )
+        scored = await _rerank_fn(
             repo=repo,
-            model=used_model,
-            messages=messages,
-            max_tokens=2000,
-            context={"phase": "ask", "scope": scope_label, "tokens": tokens[:10]},
+            pool=scored,
+            question=question,
+            model=rerank_model,
+            keep=keep_n,
+            batch_size=ask_cfg.rerank_batch_size,
         )
-        answer = (res.text or "").strip()
-        if not answer:
-            console.print("[red]Model returned empty answer.[/]")
-            raise typer.Exit(1)
+        scored.sort(key=lambda p: (p[0].chat_id, p[0].date or datetime.min, p[0].msg_id))
 
-        body = (
-            f"# {question.strip()}\n\n"
-            f"_{len(msgs)} message(s) from {scope_label}, "
-            f"model {used_model}, ${float(res.cost_usd or 0):.4f}_\n\n"
-            f"{answer}\n"
+    msgs = [m for m, _ in scored]
+    if not msgs:
+        console.print(
+            "[yellow]No matching messages.[/] Try `atg sync <chat>` first if "
+            "the chat hasn't been backfilled, or broaden your scope."
         )
-        if console_out or output is None:
-            from rich.markdown import Markdown
-            from rich.rule import Rule
+        raise typer.Exit(0)
 
-            console.print(Rule("answer", style="cyan"))
-            console.print(Markdown(body))
-            console.print(Rule(style="cyan"))
-        if output is not None:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(body, encoding="utf-8")
-            console.print(f"[green]Saved[/] {output}")
+    # Title backfill for cross-chat answers.
+    for m in msgs:
+        if m.chat_id in chat_titles:
+            continue
+        row = await repo.get_chat(m.chat_id)
+        chat_titles[m.chat_id] = (row or {}).get("title") or str(m.chat_id)
+
+    if show_retrieved:
+        _print_retrieved_table(scored, chat_titles)
+
+    chat_links: dict[int, str | None] = {}
+    for cid in {m.chat_id for m in msgs}:
+        row = await repo.get_chat(cid)
+        chat_links[cid] = build_link_template(
+            chat_username=(row or {}).get("username"),
+            chat_internal_id=derive_internal_id(cid),
+            thread_id=thread,
+        )
+
+    if chat_ids is not None and len(chat_ids) == 1:
+        single_chat_id = chat_ids[0]
+        formatted = format_messages(msgs, link_template=chat_links.get(single_chat_id))
+        scope_label = chat_titles[single_chat_id]
+    else:
+        formatted = _format_multi_chat(msgs, chat_titles, chat_links)
+        scope_label = f"folder '{folder}'" if folder else "all synced chats"
+
+    user_text = (
+        f"Вопрос: {question.strip()}\n\n"
+        f"Контекст ({len(msgs)} сообщ. из {scope_label}):\n\n"
+        f"{formatted}\n\n"
+        "Ответ (с цитатами):"
+    )
+
+    # Cost preview against the *full* messages list (system + history + user).
+    messages = _build_history_messages(_SYSTEM_PROMPT, history, user_text)
+    prompt_tokens = sum(count_tokens(m["content"], used_model) for m in messages)
+    est_cost = chat_cost(used_model, prompt_tokens, 0, 2000, settings=settings)
+    if est_cost is not None:
+        console.print(
+            f"[dim]→ Estimated cost: ~${est_cost:.4f}[/] "
+            f"({prompt_tokens:,} prompt tokens × {used_model}; output capped at 2000)"
+        )
+        if max_cost is not None and est_cost > max_cost:
+            console.print(f"[bold yellow]⚠ Estimated ${est_cost:.4f} > --max-cost ${max_cost:.4f}[/]")
+            if yes:
+                console.print("[red]Aborting (--yes set, no confirmation possible).[/]")
+                raise typer.Exit(2)
+            if not typer.confirm("Run anyway?", default=False):
+                console.print("[yellow]Aborted.[/]")
+                raise typer.Exit(0)
+    elif max_cost is not None:
+        console.print(f"[dim]→ --max-cost not enforced: pricing missing for {used_model}.[/]")
+
+    console.print(f"[dim]→ Asking[/] [bold]{used_model}[/] over {len(msgs)} message(s)...")
+    res = await chat_complete(
+        oai,
+        repo=repo,
+        model=used_model,
+        messages=messages,
+        max_tokens=2000,
+        context={
+            "phase": "ask",
+            "scope": scope_label,
+            "tokens": tokens[:10],
+            "turn": len(history) + 1,
+        },
+    )
+    answer = (res.text or "").strip()
+    if not answer:
+        console.print("[red]Model returned empty answer.[/]")
+        raise typer.Exit(1)
+
+    body = (
+        f"# {question.strip()}\n\n"
+        f"_{len(msgs)} message(s) from {scope_label}, "
+        f"model {used_model}, ${float(res.cost_usd or 0):.4f}_\n\n"
+        f"{answer}\n"
+    )
+    if console_out or output is None:
+        from rich.markdown import Markdown
+        from rich.rule import Rule
+
+        console.print(Rule("answer", style="cyan"))
+        console.print(Markdown(body))
+        console.print(Rule(style="cyan"))
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(body, encoding="utf-8")
+        console.print(f"[green]Saved[/] {output}")
+    return answer
+
+
+def _build_history_messages(
+    system: str,
+    history: list[tuple[str, str]],
+    new_user_text: str,
+) -> list[dict[str, str]]:
+    """Build a multi-turn messages list: system → (user, assistant)*N → user.
+
+    Empty `history` falls back to the standard two-message shape so prompt
+    caching still hits on the first turn (system prefix is byte-identical
+    to the single-shot path).
+    """
+    if not history:
+        return [{"role": "system", "content": system}, {"role": "user", "content": new_user_text}]
+    msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for q, a in history:
+        msgs.append({"role": "user", "content": q})
+        msgs.append({"role": "assistant", "content": a})
+    msgs.append({"role": "user", "content": new_user_text})
+    return msgs
+
+
+def _print_retrieved_table(
+    scored: list[tuple],
+    chat_titles: dict[int, str],
+) -> None:
+    """Render the retrieval result as a Rich Table.
+
+    One row per retrieved message: relevance score, chat, date, msg_id,
+    short text excerpt. Sorted score-desc so the LLM-relevant rows are
+    on top. Sole purpose is debug visibility — `--show-retrieved` is the
+    fastest answer to "why did the LLM cite #11537?"
+    """
+    from rich.table import Table
+
+    by_score = sorted(scored, key=lambda p: (-p[1], p[0].date or datetime.min))
+    t = Table(title=f"Retrieved {len(scored)} message(s)", show_lines=False)
+    t.add_column("score", justify="right")
+    t.add_column("chat")
+    t.add_column("date")
+    t.add_column("msg_id", justify="right")
+    t.add_column("excerpt")
+    for m, score in by_score:
+        body = (m.text or m.transcript or "").strip().replace("\n", " ")
+        if len(body) > 80:
+            body = body[:77] + "…"
+        date_s = m.date.strftime("%Y-%m-%d %H:%M") if m.date else "—"
+        t.add_row(
+            str(score),
+            chat_titles.get(m.chat_id, str(m.chat_id))[:30],
+            date_s,
+            str(m.msg_id),
+            body,
+        )
+    console.print(t)
 
 
 async def _refresh_chats(

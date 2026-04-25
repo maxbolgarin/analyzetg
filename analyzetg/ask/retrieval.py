@@ -130,12 +130,17 @@ async def retrieve_messages(
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = 200,
-) -> list[Message]:
+    return_scores: bool = False,
+) -> list[Message] | list[tuple[Message, int]]:
     """Return the top-N messages most relevant to `question`.
 
     Scoring: number of distinct tokens that LIKE-match the message body
     (text or transcript). Ties broken by recency (newer wins). Output is
     chronologically sorted so the LLM sees the timeline in order.
+
+    `return_scores=True` returns `list[(Message, score)]` instead of
+    bare messages — used by `--show-retrieved` and the rerank pass that
+    care about the relevance ranking.
 
     Returns `[]` if the question contains no usable tokens — caller
     surfaces a "rephrase your question" hint to the user.
@@ -191,8 +196,10 @@ async def retrieve_messages(
     rows = await cur.fetchall()
     await cur.close()
 
-    msgs = [repo._row_to_msg(r) for r in rows]
+    pairs: list[tuple[Message, int]] = [(repo._row_to_msg(r), int(r["_score"] or 0)) for r in rows]
     # Re-sort chronologically: the LLM reads the conversation in order,
     # which improves answer coherence vs. relevance-ordered chunks.
-    msgs.sort(key=lambda m: (m.chat_id, m.date or datetime.min, m.msg_id))
-    return msgs
+    pairs.sort(key=lambda p: (p[0].chat_id, p[0].date or datetime.min, p[0].msg_id))
+    if return_scores:
+        return pairs
+    return [m for m, _ in pairs]

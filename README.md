@@ -25,17 +25,19 @@ enrichment is enabled — the URLs shared in your chats.
 atg init                      # log in to Telegram, verify OpenAI key
 
 # Most common: interactive wizard — pick a chat, pick a preset, done
-atg analyze                   # pick chat → preset → (enrich?) → period → runs
+atg analyze                   # pick chat → preset → period → enrich → run
 
 # Direct, when you know which chat
 atg analyze @somegroup                  # summary of unread (voice/videonote auto-transcribed)
 atg analyze @somegroup --console        # render in terminal instead of a file
 atg analyze @somegroup --last-days 7 --preset digest
 
-# Turn on extra enrichments for this run
-atg analyze @somegroup --enrich=image,link         # describe photos + summarize URLs
-atg analyze @somegroup --enrich-all                # every media kind
-atg analyze @somegroup --no-enrich                 # skip everything (text only)
+# Q&A across your synced archive (no Telegram round-trip)
+atg ask "what did Bob say about migration?" --chat @somegroup
+atg ask "open questions on the API" --folder Work --interactive
+
+# Cost-guarded run with citation audit blocks + Telegram Saved Messages delivery
+atg analyze @somegroup --max-cost 0.10 --cite-context 3 --post-saved
 
 # Dump history to a file, no OpenAI
 atg dump @somegroup -o history.md --last-days 30
@@ -90,7 +92,10 @@ OPENAI_API_KEY=sk-...
 ```
 
 `config.toml` has sane defaults — model choices, pricing table, chunk
-sizes. Leave it alone until you want to tune something.
+sizes. The shipped file uses the convention "only overrides are
+uncommented; every other knob is listed as a comment showing its
+default", so you can scan it once and only flip what you want to
+change. Strict-mode parsing catches typos.
 
 ```bash
 mkdir -p storage && chmod 700 storage   # SQLite isn't encrypted; rely on FS perms
@@ -110,7 +115,7 @@ That puts two commands on your PATH: **`atg`** (short) and `analyzetg`
 > run `uv sync --extra dev` once, and prefix every command with
 > `uv run` — e.g. `uv run atg analyze @somegroup`.
 
-### 6. Upgrading (read this before it bites you)
+### 6. Upgrading
 
 ```bash
 git pull
@@ -120,18 +125,8 @@ uv tool install --editable . --reinstall
 `--editable` picks up source changes automatically, but newly added
 Python dependencies (`beautifulsoup4`, `pypdf`, `python-docx` — used by
 the opt-in enrichments for links, PDFs, and docx) only land in the
-tool's venv when you pass `--reinstall`.
-
-**Missing the reinstall is not fatal anymore** — enrichers whose
-libraries aren't installed now skip themselves with a one-line warning
-like `enrich.link.lib_missing lib='beautifulsoup4' hint='run uv tool
-install --editable . --reinstall'` and the rest of the analysis
-continues. But to use those enrichments you still need the libraries,
-so run the reinstall after any `git pull`.
-
-If you see `ModuleNotFoundError` at **startup** (not mid-run), you're on
-an old build that eager-imported the optional libs. Pull + reinstall
-and it goes away.
+tool's venv when you pass `--reinstall`. Run `atg doctor` after a pull
+to verify your environment is clean.
 
 ### 7. First-time login
 
@@ -155,8 +150,10 @@ Run `atg` from the repo directory (the one containing your `.env` and
 ./.env                          ← credentials (step 4)
 ./config.toml                   ← models, pricing, tuning (step 4)
 ./storage/session.sqlite        ← Telegram session (created by atg init)
-./storage/data.sqlite           ← chats, messages, analysis cache
+./storage/data.sqlite           ← chats, messages, analysis cache, embeddings
+./storage/backups/              ← snapshots from `atg backup`
 ./reports/{chat}[/{topic}]/analyze/{preset}-{stamp}.md   ← default report path
+./reports/{chat}/dump/dump-{stamp}.md                    ← default dump path
 ```
 
 If you `cd` somewhere else and run `atg`, it will look for `.env` and
@@ -178,41 +175,51 @@ command will fail with missing credentials. Two ways to avoid that:
   atg() { (cd ~/path/to/analyzetg && command atg "$@"); }
   ```
 
-  Reload with `source ~/.zshrc` (or open a new terminal). Reports will
-  still land in the repo's `reports/` dir, not wherever you invoked from.
+---
+
+## Command reference
+
+`atg --help` shows three panels.
+
+### Main (everyday)
+
+| Command | Purpose |
+|---|---|
+| `atg init` | Interactive first-time setup. |
+| `atg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
+| `atg analyze [<ref>] [flags]` | Analyze a chat. Default window = unread. |
+| `atg ask "question" [flags]` | Q&A across your synced archive — no Telegram round-trip. |
+| `atg dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
+
+### Sync & subscriptions
+
+| Command | Purpose |
+|---|---|
+| `atg sync` | Pull new messages for every active subscription. |
+| `atg chats add/list/enable/disable/remove` | Manage subscriptions. Optional — one-off `analyze` already fetches. |
+
+### Maintenance
+
+| Command | Purpose |
+|---|---|
+| `atg folders` | List your Telegram folders (use with `--folder NAME`). |
+| `atg stats [--by …]` | Token spend / cache hit rate — by chat, preset, model, day, kind. |
+| `atg cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
+| `atg cache stats / ls / show / purge / export` | Analysis-cache maintenance. |
+| `atg cache effectiveness` | Per-(chat, preset) OpenAI prompt-cache hit rate. |
+| `atg doctor` | Preflight check — Telegram session, OpenAI key, ffmpeg, DB integrity, pricing. |
+| `atg backup [out]` | Snapshot `storage/data.sqlite` via `VACUUM INTO`. |
+| `atg restore <file>` | Replace `data.sqlite` with a backup (current DB moved aside). |
+| `atg reports prune --older-than 30d` | Move stale report files to `reports/.trash/`. |
+| `atg watch --interval 1h <inner cmd>` | Run an inner `atg` command on a fixed cadence. |
+
+### Hidden (still callable, not in `--help`)
+
+`atg download-media [<ref>]` — kept for back-compat. Use `atg dump --save-media` instead.
 
 ---
 
-## Everyday usage
-
-`atg` always has to know **which chat** to work on. You can either launch
-the interactive wizard or point it at a chat directly.
-
-### The wizard (no chat ref)
-
-```bash
-atg analyze            # → pick a chat → pick a preset → pick enrichments → pick a period → go
-atg dump               # → pick a chat → pick a period → dump to file
-atg describe           # → pick a chat → show details / topics
-```
-
-Navigation: **↑/↓** move, **type** to filter, **Enter** to select,
-**SPACE** to toggle a checkbox (enrichment step), **ESC** to go back a
-step, **Ctrl-C** to quit. The first item in the chat list is always
-*"Run on ALL N unread chats"* — picking it batch-processes every chat
-with unread messages at once.
-
-The enrichment step pre-checks the same defaults as `config.toml`
-(voice + videonote), so for most chats you can just hit Enter.
-
-### Direct (with a chat ref)
-
-```bash
-atg analyze @somegroup                   # summary of unread
-atg analyze https://t.me/somegroup       # same, via link
-atg analyze -1001234567890               # by numeric chat_id
-atg analyze "Bull Trading"               # fuzzy title match
-```
+## Chat references
 
 `<ref>` accepts:
 
@@ -226,28 +233,242 @@ atg analyze "Bull Trading"               # fuzzy title match
 | Numeric `chat_id` | `-1001234567890` or `1001234567890` |
 | Fuzzy title | `"Bull Trading"` — substring match across your dialogs |
 
+The wizard's chat picker accepts non-Latin type-to-filter (Cyrillic,
+Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
+`finanças` works the same as `crypto`.
+
+---
+
+## `atg analyze` — flags
+
+```bash
+atg analyze [<ref>] [period] [output] [enrichment] [budget] [audit] [delivery]
+```
+
+### Period (start point of the analysis window)
+
+| Flag | Meaning |
+|---|---|
+| `--full-history` | Whole chat |
+| `--from-msg <id>` / message link | Start at a specific message, inclusive |
+| `--since YYYY-MM-DD` / `--until YYYY-MM-DD` / `--last-days N` | Date range (UTC) |
+| _(none)_ | Unread only — `msg_id > read_marker` |
+
+Precedence (first match wins): `--full-history` > `--from-msg` > `--since/--until/--last-days` > unread.
+
+### Output
+
+| Flag | Meaning |
+|---|---|
+| `-o <path>` / `--output` | Custom output path (file for single chat, dir for batch) |
+| `-c` / `--console` | Render to terminal as Rich-styled markdown |
+| `-s` / `--save` | Skip the wizard's output picker; save to default path |
+
+### Enrichment
+
+| Flag | Meaning |
+|---|---|
+| `--enrich=voice,image,link` | Enable a specific subset for this run |
+| `--enrich-all` | Every kind (voice, videonote, video, image, doc, link) |
+| `--no-enrich` | Disable everything, even config defaults |
+| `--include-transcripts/--text-only` | Include enrichment text in the analyzable body |
+
+### Forum routing
+
+| Flag | Meaning |
+|---|---|
+| `--thread N` | One specific topic |
+| `--all-flat` | Whole forum as one analysis (needs an explicit period) |
+| `--all-per-topic` | One report per topic |
+
+### Cost / safety
+
+| Flag | Meaning |
+|---|---|
+| `--max-cost N` | Estimate cost upfront; abort or confirm if over budget. Pass `--yes` to abort silently. |
+| `--dry-run` | Resolve, backfill, count, print the cost band, exit before any LLM call. |
+| `--no-cache` | Don't read or write `analysis_cache` (forces a fresh run). |
+
+### Audit / quality
+
+| Flag | Meaning |
+|---|---|
+| `--cite-context N` | Append a `## Источники` section to the report with N messages of context around every cited `[#msg_id](url)`. Capped at 30 citations. |
+| `--self-check` | Run a cheap-model verifier pass; appends a `## Verification` section listing unsupported claims. |
+| `--by <sender>` | Filter to one sender. Substring match on `sender_name` (case-insensitive) or numeric `sender_id`. |
+
+### Delivery
+
+| Flag | Meaning |
+|---|---|
+| `--mark-read` / `--no-mark-read` | Tri-state. Without flag → prompt interactively. |
+| `--post-saved` | Send the result to your Telegram Saved Messages (split into 4000-char chunks). |
+| `--post-to <ref>` | Generalization — post to any chat (`me` for Saved Messages, `@channel`, etc.). |
+
+### Workflow shortcuts
+
+| Flag | Meaning |
+|---|---|
+| `--folder NAME` | Without `<ref>`: batch-analyze every chat in this Telegram folder with unread messages. |
+| `--repeat-last` | Reuse the saved flags from the last successful analyze on `<ref>`. Explicit CLI flags still win. |
+| `--preset NAME` / `--prompt-file path.md` | Pick a preset; `custom` + `--prompt-file` for ad-hoc. |
+| `--model M` / `--filter-model M` | Override per-run model picks. |
+| `--min-msg-chars N` | Drop messages shorter than N chars (after enrichment). |
+| `--yes` / `-y` | Skip interactive confirmations (per-topic Y/n, batch Y/n, over-budget Y/n). |
+
 ### What you get back
 
-By default `atg analyze` writes a Markdown file to
-`reports/{chat}-{preset}-{YYYY-MM-DD_HHMM}.md` and prints its path.
-Every cited claim includes a clickable link back to the source message:
+A Markdown file at `reports/{chat}[/{topic}]/analyze/{preset}-{stamp}.md`
+by default. Every cited claim is a clickable link back to the source:
 
 ```markdown
 Фонды переходят на индексные структуры с 2026 Q1. [#1586](https://t.me/c/3865481227/584/1586)
 ```
 
-Flags:
+---
 
-- **`--console` / `-c`** — render the result in your terminal (pretty,
-  Rich-formatted) instead of saving. Combine with `-o` to do both.
-- **`-o <path>`** — custom output path. For batch mode (no `<ref>`) it's
-  treated as a directory.
-- **`--mark-read`** — after the analysis, advance Telegram's read
-  marker to cover every processed message (so the chat looks "read" in
-  your other Telegram clients).
-- **`--enrich=<list>`** / **`--enrich-all`** / **`--no-enrich`** —
-  control which media types get turned into text for this run. See
-  [Media enrichment](#media-enrichment) below.
+## `atg ask` — Q&A across your synced archive
+
+```bash
+atg ask "what did we decide about the migration?" --chat @somegroup --interactive
+```
+
+Reads only your **local DB** — no Telegram round-trip during retrieval.
+The corpus is everything `analyze` / `dump` / `sync` has already pulled
+(transcripts, image descriptions, doc extracts, link summaries
+included).
+
+### Pipeline
+
+1. **Tokenize** the question — bilingual (English + Russian) stop-word filter, drops short tokens.
+2. **Retrieve** top-N messages by keyword `LIKE` over `text || transcript`. Default pool 500 with rerank, or 200 without.
+3. **(Optional)** Rerank: cheap model rates each candidate 1–5 against the question; keep top-K (default 50). Drops ask cost ~5–10× on media-heavy chats.
+4. **(Optional)** Semantic: `text-embedding-3-small` cosine over a precomputed index; composes with rerank.
+5. **Format** with the same dense-line formatter analyze uses, group by chat title for cross-chat answers.
+6. **Ask** the flagship model with a Q&A system prompt that mandates `[#msg_id](link)` citations.
+7. Print to terminal (default) or save to `-o file.md`.
+
+### Flags
+
+| Flag | Meaning |
+|---|---|
+| `--chat <ref>` | Restrict to one chat. |
+| `--folder NAME` | Restrict to chats in this Telegram folder. |
+| `--thread N` | Restrict to a forum topic (used with `--chat`). |
+| `--since/--until/--last-days` | Date filter. |
+| `--limit N` | Max messages to retrieve (default 200; bumped to 500 when rerank is on). |
+| `--rerank/--no-rerank` | Two-stage retrieval (default on; toggled in `[ask]` config). |
+| `--semantic` | Use precomputed embeddings instead of keyword retrieval. Requires `--build-index` once. |
+| `--build-index` | Embed every body-bearing message in the scoped chat(s). Idempotent. |
+| `--refresh` | Backfill new messages from Telegram before retrieval. Requires `--chat` or `--folder`. |
+| `--show-retrieved` | Print the retrieved messages with scores before the LLM call (debug). |
+| `--interactive` / `-i` | Drop into a follow-up prompt loop after the first answer. Prior turns flow as message history. |
+| `--max-cost N` | Abort if the estimated USD cost exceeds N. |
+| `--model M` | Override the answering model. |
+| `-o <path>` / `--console` | Save to file / force terminal render. |
+
+### Examples
+
+```bash
+# Across all synced chats:
+atg ask "когда дедлайн по проекту?" --last-days 7
+
+# In one chat, interactive follow-ups:
+atg ask "what did Bob say about migration?" --chat @somegroup -i
+
+# Folder scope, semantic retrieval (build index first):
+atg ask "..." --folder Work --build-index
+atg ask "open questions on the API" --folder Work --semantic --rerank --last-days 14
+
+# Cheap and small:
+atg ask "..." --limit 50 --model gpt-5.4-nano
+
+# Debug retrieval before paying for the answer:
+atg ask "..." --chat @somegroup --show-retrieved --max-cost 0.05
+```
+
+### Cost feel
+
+- **Retrieval**: free (local SQL).
+- **Rerank** (default on): ~10 cheap-model calls × ~1k tokens each ≈ $0.005 per question.
+- **Answer**: scales with `--limit`. With rerank+keep=50 and `gpt-5.4-mini`, typical cost is **~$0.01–0.05 per question**.
+
+Cost is logged under `phase=ask` in `usage_log` — see `atg stats --by kind`.
+
+---
+
+## `atg dump` — chat history to a file
+
+No OpenAI call by default. Same backfill + filter pipeline as `analyze`,
+just writes raw messages instead of an analysis.
+
+```bash
+atg dump @somegroup -o history.md --last-days 30
+atg dump @somegroup --format jsonl --with-transcribe -o dump.jsonl
+atg dump @somegroup --save-media           # also save raw media files alongside
+atg dump --folder Work                     # batch-dump every unread chat in folder
+```
+
+| Flag | Meaning |
+|---|---|
+| `--format md/jsonl/csv` | Output format (default `md`). |
+| `--with-transcribe` | Run the audio enricher before writing (legacy alias for `--enrich=voice,videonote`). |
+| `--enrich=...` / `--enrich-all` / `--no-enrich` | Same enrichment flags as `analyze`. |
+| `--save-media [--save-media-types ...]` | Also save raw media files next to the dump. |
+| `--folder NAME` | Without `<ref>`: batch-dump every unread chat in folder. |
+| All period / forum / output / `--mark-read` flags | Same as `analyze`. |
+
+---
+
+## Wizard (no `<ref>`)
+
+```bash
+atg analyze            # → pick chat → thread (forum) → preset → period → enrich → run
+atg dump               # → pick chat → period → enrich → run
+atg describe           # → pick chat → show details / topics
+```
+
+Navigation: **↑/↓** move, **type to filter** (works for Cyrillic /
+Greek / Arabic / Hebrew / Latin Extended too), **Enter** select,
+**SPACE** toggles a checkbox (enrichment step), **→** in the
+enrichment step also toggles, **ESC** goes back a step, **Ctrl-C**
+quits.
+
+Top of the chat picker:
+
+- **🔍 Search all dialogs (not just unread)** — first item; jumps into a fuzzy picker over every dialog.
+- **🚀 Run on ALL N unread chats (M total messages)** — second item; batch mode.
+- Then the column-aligned chat list: `unread | kind | last msg | folder | title`.
+
+The **enrichment step** runs **after** the period step (so the
+"(N in db)" decoration on each option reflects the period the user just
+chose). The header line shows `For the chosen period: N messages
+already synced, M with media, K with URLs.` — instant feel for what
+turning on `--enrich=image` will actually cost.
+
+The `🚀` batch entry is offered when `analyze` is run without flags;
+when picked, the wizard skips period/enrich and per-chat unread is the
+fixed window.
+
+---
+
+## Forum chats (topics)
+
+Forums are chats with topics, each with its own unread marker. Three
+modes for both `analyze` and `dump`:
+
+```bash
+atg analyze @forumchat --thread 42                       # one specific topic
+atg analyze @forumchat --all-flat --last-days 3          # whole forum, one report
+atg analyze @forumchat --all-per-topic                   # one report per topic
+```
+
+Without any of these, `atg analyze @forumchat` opens a topic picker.
+
+`atg describe @forumchat` prints the topic list with unread counts and
+local-DB counts; both `describe` and the wizard fix Telegram's stale /
+capped dialog-level forum counts by summing per-topic counts via
+`GetForumTopicsRequest`.
 
 ---
 
@@ -261,88 +482,42 @@ into something the LLM can read:
 | **text** | Used as-is | always on |
 | **voice** (🎤) | Transcribed via OpenAI Audio (`gpt-4o-mini-transcribe`) | **on** |
 | **videonote** (round) | Audio extracted by ffmpeg → transcribed | **on** |
-| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | off |
+| **external link** | HTTP fetch + BeautifulSoup clean + 1–2 sentence summary via `filter_model` | **on** |
 | **video** | Audio extracted by ffmpeg → transcribed | off |
 | **photo** | Described via vision model (`gpt-4o-mini` by default) — short caption + OCR of any on-image text | off |
 | **doc** (PDF / DOCX / txt / md / code) | Text extracted locally (`pypdf` / `python-docx` / plain read); truncated to `max_doc_chars` | off |
 
-Only voice and videonote are on by default. Everything else is **opt-in**
-because each one fires its own OpenAI / network call (one per unique URL,
-photo, or document). Three ways to turn extras on:
+Three ways to control:
 
 ```bash
-# Per-run, explicit set
-atg analyze @somegroup --enrich=voice,image,link
-
-# Per-run, everything
-atg analyze @somegroup --enrich-all
-
-# Per-run, nothing (not even voice/videonote)
-atg analyze @somegroup --no-enrich
+atg analyze @somegroup --enrich=voice,image,link    # explicit set
+atg analyze @somegroup --enrich-all                 # everything
+atg analyze @somegroup --no-enrich                  # nothing, even defaults
 ```
 
-**Precedence** when multiple sources disagree:
-`--no-enrich` → `--enrich-all` → `--enrich=<csv>` (unioned with the
-preset's declared needs) → the preset's `enrich:` frontmatter → the
-`[enrich]` block in `config.toml` (config defaults).
+**Precedence** (first wins): `--no-enrich` → `--enrich-all` →
+`--enrich=<csv>` (unioned with the preset's `enrich:` frontmatter) →
+preset's frontmatter alone → `[enrich]` block in `config.toml`.
 
-**Per-preset requirements.** A preset can declare enrichments it
-genuinely needs in its frontmatter, e.g. `links.md` already has
-`enrich: [link]` so picking that preset fetches + summarizes every URL
-without you remembering a flag.
+**Concurrency / per-doc lock.** The orchestrator serializes per
+`document_id` so a voice forwarded across multiple chats in one run
+gets one Whisper call, not N.
 
-**Config defaults** live in `config.toml`:
+**Caching.** Each enrichment result is stored once and reused: media
+keyed by Telegram's stable `document_id` / `photo_id`
+(`media_enrichments`); links keyed by normalized URL hash
+(`link_enrichments`). Repeat runs over the same messages cost **$0**
+once enrichments are cached.
 
-```toml
-[enrich]
-voice = true
-videonote = true
-video = false
-image = false
-doc = false
-link = false   # opt-in: one OpenAI call per unique URL
-vision_model = "gpt-4o-mini"
-# doc_model / link_model default to the preset's filter_model when null.
-max_images_per_run = 50
-max_link_fetches_per_run = 50
-max_doc_bytes = 25000000     # 25 MB — covers most real PDFs/DOCX
-max_doc_chars = 20000        # hard cap on extracted text per document
-link_fetch_timeout_sec = 10
-# skip_link_domains = ["twitter.com", "x.com"]
-concurrency = 3
-```
-
-**Caching.** Each enrichment is stored once and reused:
-- Voice / videonote / video / image / doc → keyed by Telegram's stable
-  `document_id` or `photo_id`, so the same media forwarded across 10
-  chats is processed once.
-- External URLs → keyed by a normalized URL hash.
-
-Repeat runs over the same messages cost **$0** once enrichments are
-cached. Toggling flags busts only the analysis cache, not the
-enrichment caches.
-
-**Costs at a glance** (all spend flows into `atg stats`):
+**Costs at a glance**:
 - Voice / videonote / video → Whisper (~$0.006/min).
 - Image → one vision call per unique photo.
-- Doc → free for text/PDF/DOCX extraction (local), then the extract
-  rides inside the analysis prompt like any other message body.
+- Doc → free (local extraction).
 - Link → one `filter_model` call per unique URL (cheap, `nano`-class).
 
-The orchestrator logs a one-line summary after every run:
-
-```
-analyze.enrich summary='Enriched: voice: 12 (5 cached); image: 3; link: 7 (2 cached)'
-```
-
-Each individual enrichment call is also logged with its kind, so you can tell at a glance whether a burst of `openai.chat` calls is analysis, link summaries, or image descriptions:
-
-```
-openai.chat phase=enrich_link url_hash=abc123… prompt=181 completion=59 cost=0.00011
-openai.chat phase=enrich_image doc_id=5245… prompt=1250 completion=60 cost=0.00025
-openai.audio phase=enrich_voice doc_id=8917… seconds=42 cost=0.00252
-openai.chat phase=map batch_hash=deadbeef… prompt=7740 completion=349 cost=0.00198
-```
+The orchestrator logs a one-line summary, plus per-call lines tagged
+with `phase=enrich_<kind>` and the originating `chat_id` / `msg_id` /
+`msg_date` so the cost in `atg stats` is traceable to actual messages.
 
 ---
 
@@ -353,190 +528,193 @@ What kind of analysis do you want? Pick a preset with `--preset`:
 | Preset | What it produces |
 |---|---|
 | `summary` (default) | Concentrated signal — key insights, concrete ideas/decisions, 3–5 pointer messages. No recap prose. |
-| `broad` | Full overview: Top-3 themes + 5–10 bullet points + tone + key messages (what the old `summary` produced) |
-| `digest` | Short numbered list of topics, 1–2 lines each |
-| `action_items` | Markdown table: *Who / What / Deadline / Status / Link* |
-| `decisions` | Markdown table: *Decision / Who / When / Rationale / Link* |
-| `highlights` | 5–15 most valuable messages, sorted by importance |
-| `questions` | Open questions table: *unanswered / partial / no consensus* |
-| `quotes` | Verbatim memorable quotes with author and link |
-| `links` | External URLs from the chat, grouped by topic |
-| `custom --prompt-file path.md` | Your own one-off prompt, no file in `presets/` needed |
-
-> **Why the split?** The old `summary` was a structured re-telling of the
-> chat — useful, but easy to replicate by scrolling. The new default
-> tries to answer "what's *new* or *non-obvious* here?" and skips the
-> recap. If you genuinely want the structured overview, pick
-> `--preset broad`.
+| `broad` | Full overview: top-3 themes + 5–10 bullet points + tone + key messages. |
+| `digest` | Short numbered list of topics, 1–2 lines each. |
+| `action_items` | Markdown table: *Who / What / Deadline / Status / Link*. |
+| `decisions` | Markdown table: *Decision / Who / When / Rationale / Link*. |
+| `highlights` | 5–15 most valuable messages, sorted by importance. |
+| `questions` | Open questions table: *unanswered / partial / no consensus*. |
+| `quotes` | Verbatim memorable quotes with author and link. |
+| `links` | External URLs grouped by topic (auto-enables link enrichment). |
+| `reactions` | Top-reacted messages grouped by reaction kind (👍 / 🔥 / 🤔 / 👎). |
+| `single_msg` | Picked automatically when `<ref>` is a `t.me/.../<msg_id>` link. |
+| `custom --prompt-file path.md` | Your own one-off prompt; same frontmatter format as the bundled ones. |
 
 Prompts live in [`presets/*.md`](presets/) — edit them, add your own,
-commit them to your fork. Bump `prompt_version` inside the preset file
-to invalidate the cache after you change the prompt. Optional
-frontmatter field `enrich: [link, image]` declares which media
-enrichments this preset assumes the chat will need; they get unioned
-with whatever the user passed via `--enrich`.
+commit them to your fork. Bump `prompt_version` after changing the
+prompt to invalidate the cache. Optional frontmatter `enrich: [link,
+image]` declares which media enrichments this preset assumes (unioned
+with `--enrich`).
+
+**Reaction signals.** Messages whose reaction count meets
+`[analyze] high_impact_reactions` (default 3) are tagged
+`[high-impact]` in the LLM prompt. Presets that care about prominence
+(`highlights`, `reactions`, `summary`) lean on the marker; others
+ignore it.
 
 ---
 
 ## Time window
 
-By default `analyze` and `dump` process **only unread messages**
-(`msg_id > read_marker`). To change that:
+By default `analyze` and `dump` process only messages past the chat's
+read marker. To change that:
 
 | Flag | Meaning |
 |---|---|
-| `--last-days 7` | Last N days |
-| `--since 2026-01-15 --until 2026-01-20` | Explicit date range (either end optional) |
+| `--last-days N` | Last N days (UTC) |
+| `--since YYYY-MM-DD --until YYYY-MM-DD` | Explicit date range (either end optional) |
 | `--from-msg <id>` / message link | Start at a specific message, inclusive |
 | `--full-history` | Entire chat |
 
-Precedence when multiple are set: `--full-history` > `--from-msg` >
-`--since / --until / --last-days` > unread default.
+Precedence: `--full-history` > `--from-msg` > `--since/--until/--last-days` > unread.
 
----
-
-## Forum chats (topics)
-
-Forums are chats with topics, and each topic has its own unread marker.
-Three modes, work for both `analyze` and `dump`:
-
-```bash
-# One specific topic — message links include /thread/
-atg analyze @forumchat --thread 42
-
-# Whole forum as one analysis (requires an explicit period)
-atg analyze @forumchat --all-flat --last-days 3
-
-# One report per topic (each topic's own unread)
-atg analyze @forumchat --all-per-topic
-# → reports/{chat-slug}/{topic-slug}-summary-YYYY-MM-DD_HHMM.md
-```
-
-Launch `atg analyze @forumchat` without any of these and you get the
-wizard: a table of topics with unread counts + a *"one topic"* /
-*"all-flat"* / *"per-topic"* chooser.
-
-`atg describe @forumchat` prints the topic list with unread counts and
-how many messages are already in your local DB.
-
----
-
-## Useful recipes
-
-```bash
-# Render a chat's unread in the terminal, no file
-atg analyze @somegroup --console
-
-# Short digest of the last week, custom path
-atg analyze @somegroup --last-days 7 --preset digest -o weekly.md
-
-# Extract the most valuable messages
-atg analyze @somegroup --preset highlights
-
-# Open questions that still deserve a reply
-atg analyze @somegroup --preset questions
-
-# All external links mentioned in the chat, grouped by topic
-# (links preset auto-enables link enrichment via its frontmatter)
-atg analyze @somegroup --preset links
-
-# Describe photos + read PDFs before summarizing
-atg analyze @somegroup --enrich=image,doc
-
-# Everything enriched — max context, max spend
-atg analyze @somegroup --enrich-all
-
-# Text-only, skip even voice transcription
-atg analyze @somegroup --no-enrich --text-only
-
-# From a specific message onwards (link embeds the msg_id)
-atg analyze "https://t.me/somegroup/10000"
-
-# Whole chat history → action items
-atg analyze @somegroup --full-history --preset action_items
-
-# Analyze and mark read in Telegram afterwards
-atg analyze @somegroup --mark-read
-
-# Dump-only (no OpenAI): history for the last 30 days
-atg dump @somegroup -o history.md --last-days 30
-
-# Dump with voice/videonote transcripts filled in
-atg dump @somegroup -o dump.jsonl --format jsonl --with-transcribe
-```
+YYYY-MM-DD strings are interpreted as **UTC** days (matches how
+`messages.date` is stored).
 
 ---
 
 ## Cost & caching
 
-`analyzetg` is aggressive about caching so repeat runs are cheap or free.
+Three caches, aggressive by design:
 
-### Check what you've spent
+### 1. Local `analysis_cache`
 
-```bash
-atg stats                     # totals by preset (cost_usd, tokens, calls)
-atg stats --by model          # or break down by model
-atg stats --by day            # or by day
-```
-
-### Analysis cache (local, biggest win)
-
-Every analysis result is hashed by *preset + prompt version + model +
-message ids + options + rendered prompt hashes* and stored in the local
-SQLite `analysis_cache` table. Re-run the same command with the same
-message text, enrichments, prompt context, and settings → zero-cost hit.
+Every analysis result is hashed by *preset + prompt_version + model +
+sorted msg_ids + options_payload + system/user-prompt hashes* and
+stored in SQLite. Re-run the same query → zero-cost hit. Toggling
+`--enrich`, `--by`, the model, or any other option-payload field busts
+the relevant rows.
 
 ```bash
 atg cache stats               # rows, disk size, saved $, breakdown
 atg cache ls --limit 20       # latest entries
 atg cache show <hash-prefix>  # print a stored result
-atg cache export -o old.jsonl --older-than 30d   # archive before purging
-atg cache purge --older-than 30d --vacuum        # delete + reclaim disk
+atg cache export -o old.jsonl --older-than 30d
+atg cache purge --older-than 30d --vacuum
+atg cache effectiveness       # per-(chat, preset) prompt-cache hit rate from usage_log
 ```
 
-### OpenAI prompt cache (server-side, free discount)
+**Truncated results are never cached.** A partial summary would
+silently poison every future run.
 
-When prompt prefix ≥ 1024 tokens and identical within ~5–10 minutes,
-OpenAI automatically discounts the repeated tokens. `atg stats` shows
-the hit rate; `config.toml` enforces `temperature=0.2` and a fixed
-*system → static → dynamic* message order to maximize it.
+### 2. OpenAI prompt cache (server-side)
 
-### Enrichment dedup
+When prompt prefix ≥ 1024 tokens and identical bytes arrive within
+~5–10 minutes, OpenAI discounts repeated tokens.
+`atg cache effectiveness` shows your hit rate per (chat, preset).
+`config.toml` enforces `temperature=0.2` and a fixed
+`system → static_context → dynamic` message order to maximize hits.
 
-Every enrichment — transcript, image description, PDF extract, URL
-summary — is stored once and reused across every future run:
+### 3. Enrichment dedup
 
-- Media (voice, videonote, video, photo, doc) keys by Telegram's
-  stable `document_id` or `photo_id` via the `media_enrichments` table.
-  Forwarded 10×, fetched once.
-- External links key by a normalized URL hash via `link_enrichments`,
-  so a viral article shared across 3 chats is summarized once.
+Per-kind forever-cache:
 
-Toggling `--enrich` flags only busts the **analysis** cache (because
-the prompt changes) — the enrichment caches survive and get reused.
+- Media (voice / videonote / video / photo / doc) keyed by Telegram's
+  stable `document_id` or `photo_id` via `media_enrichments`.
+- External links keyed by normalized URL hash via `link_enrichments`.
+
+Forwarded 10× = fetched once.
+
+### Up-front cost guard
+
+```bash
+atg analyze @somegroup --max-cost 0.50    # confirm if estimate exceeds
+atg analyze @somegroup --max-cost 0.50 --yes   # silently abort if over
+atg analyze @somegroup --dry-run          # estimate-and-exit, no LLM call
+```
+
+Estimate covers the analysis (map + reduce); enrichment cost is **not**
+included.
+
+### Spending visibility
+
+```bash
+atg stats                     # totals by preset
+atg stats --by chat           # biggest spenders by chat
+atg stats --by day            # spend over time
+atg stats --by kind           # chat vs audio vs ask
+atg cache effectiveness       # OpenAI prompt-cache hit rate per (chat, preset)
+```
+
+If a row says `(N unpriced)` next to its call count, those rows used a
+model not in your `[pricing.chat]` / `[pricing.audio]` table — add the
+entry so cost stops under-reporting. `atg doctor` flags missing
+pricing entries.
 
 ---
 
 ## Maintenance
 
 ```bash
+# Health check — Telegram session, OpenAI key, ffmpeg, DB integrity, presets, disk, pricing
+atg doctor
+
+# Backup the data DB (VACUUM INTO — atomic, compact)
+atg backup                                  # → storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite
+atg backup mybackup.sqlite --overwrite
+
+# Restore a backup (current DB moved aside as data-replaced-…sqlite)
+atg restore storage/backups/data-2026-04-25_…sqlite --yes
+
 # Null out old message texts (privacy / disk reclaim)
-atg cleanup --retention 90d                  # preview + confirmation prompt
-atg cleanup --retention 90d --yes            # skip the prompt
-
-# Clean up old cache results
-atg cache purge --older-than 30d --vacuum
-
-# Per-chat retention
+atg cleanup --retention 90d                # preview + confirmation
+atg cleanup --retention 90d --yes
 atg cleanup --retention 30d --chat 1234567890
+
+# Prune old report files to reports/.trash/<ts>/
+atg reports prune --older-than 30d --dry-run    # see what would move
+atg reports prune --older-than 30d
+atg reports prune --older-than 90d --purge       # hard delete (asks first)
+
+# Cache hygiene
+atg cache purge --older-than 30d --vacuum
 ```
 
-`--older-than` must be greater than zero. `0d` is treated as a no-op so
-it cannot accidentally wipe the whole analysis cache.
+`cleanup` preserves row metadata (ids, dates, authors, transcripts) —
+it only NULLs the raw `text` column.
 
-`cleanup` preserves row metadata (ids, dates, authors, transcripts) — it
-only NULLs the raw `text` column, so you keep the ability to re-analyze
-later with `--with-transcribe` without losing the structure.
+---
+
+## `atg watch` — scheduled runs
+
+Foreground loop that runs an inner `atg` command on a fixed cadence.
+No daemon — run under `tmux` / `nohup` for persistence.
+
+```bash
+atg watch --interval 1h analyze --folder Work --post-saved
+atg watch --interval 30m ask "anything urgent?" --folder Work
+atg watch --interval 24h --max-runs 7 analyze --folder Work --digest
+```
+
+| Flag | Meaning |
+|---|---|
+| `--interval Nm/Nh/Nd/Nw` | Cadence (or bare seconds). Required. |
+| `--max-runs N` | Stop after N runs (testing / fixed cycles). |
+
+Ctrl-C exits cleanly between iterations. The inner command's stdout
+streams live; each iteration is preceded by `── Run K  YYYY-MM-DDThh:mm:ss`.
+
+---
+
+## `atg folders` — Telegram folder integration
+
+Telegram "folders" (dialog filters) become a first-class scope:
+
+```bash
+atg folders                                  # list every folder + chat counts
+atg analyze --folder Work                    # batch every unread chat in folder
+atg dump --folder Work                       # same for dump
+atg ask "..." --folder Work                  # Q&A scoped to folder
+```
+
+Folder column shows up in:
+- `atg describe` (no ref) — the dialogs table.
+- `atg describe @chat` — folder line under the username row.
+- The wizard's chat picker — `unread | kind | last msg | folder | title`.
+
+Only **explicitly listed** chats are expanded — rule-based folders
+("contacts", "groups", "channels" without explicit peers) aren't
+walked.
 
 ---
 
@@ -544,93 +722,164 @@ later with `--with-transcribe` without losing the structure.
 
 You don't need these for one-off analysis — `atg analyze @chat` already
 resolves the chat and fetches what's missing. Subscriptions are for
-**long-term tracking**: a fixed set of chats you want to keep in your
-local DB, sync on a cron, and analyze by date ranges across many runs.
+**long-term tracking**: a fixed set of chats you keep in your local DB,
+sync on a cron, and analyze by date ranges across many runs.
 
 ```bash
-atg chats add @somegroup         # subscribe
-atg chats list                   # see what's subscribed
-atg sync                         # fetch new messages for every subscription
-atg chats remove <chat_id>       # unsubscribe
+atg chats add @somegroup
+atg chats list
+atg sync
+atg chats remove <chat_id>
+atg chats add @forum --all-topics
+atg chats add @channel --with-comments
 ```
-
-> The old standalone `atg transcribe` command has been removed —
-> enrichment now runs inside `analyze`. If you want to pre-cache
-> transcripts in bulk before analyzing, just run `atg analyze @chat
-> --full-history --no-cache` (or the preset of your choice); voice /
-> videonote transcription fires by default and populates the cache,
-> and the analysis itself is then a cache hit on every later run.
-
-Forum support: `atg chats add @forum --all-topics` subscribes to every
-topic; `--thread N` subscribes to one.
-
-Channel with comments: `atg chats add @channel --with-comments`
-subscribes to both the channel and its linked discussion group.
 
 ---
 
-## How it works (short)
+## Examples / recipes
+
+```bash
+# Daily morning digest of your work folder, into Saved Messages, on a 24h cron
+atg watch --interval 24h analyze --folder Work --preset digest --post-saved
+
+# Audit a high-stakes report — citations get expanded, claims verified
+atg analyze @somegroup --preset action_items --cite-context 5 --self-check
+
+# What did Bob say last week? Across one chat, with rerank + interactive follow-ups
+atg ask "what did Bob propose?" --chat @somegroup --by Bob --last-days 7 -i
+
+# Filter analysis to one sender (with a citable result)
+atg analyze @somegroup --by Bob --preset highlights
+
+# Cost-bounded run, with a budget alarm
+atg analyze @somegroup --enrich-all --max-cost 0.50 --post-to me
+
+# Re-run with the same flags as last time, but force a fresh cache
+atg analyze @somegroup --repeat-last --no-cache
+
+# Build a semantic index over a folder, then query it
+atg ask --build-index --folder Work
+atg ask "open architecture questions" --folder Work --semantic
+
+# Forum: per-topic reports for the entire forum
+atg analyze @forumchat --all-per-topic
+
+# Dump and save every photo / voice / video / doc alongside the text
+atg dump @somegroup --save-media --save-media-types photo,voice
+```
+
+---
+
+## Configuration (`config.toml`)
+
+The shipped file uses the convention: only settings you override are
+uncommented; every knob is listed (commented-out, showing its default)
+so it's discoverable. **Strict mode is on** — typos fail loudly with a
+clear "extra inputs not permitted" error and the offending key.
+
+Most-tuned settings:
+
+```toml
+[openai]
+chat_model_default = "gpt-5.4-mini"      # final / single-chunk model
+filter_model_default = "gpt-5.4-nano"    # map phase + cheap rerank + self-check
+audio_language = "ru"                    # transcription hint
+
+[analyze]
+min_msg_chars = 3                        # filter: drop messages shorter than N chars
+dedupe_forwards = true                   # collapse identical forwards/memes
+output_budget_tokens = 1500              # reduce / single-chunk max_tokens
+high_impact_reactions = 3                # `[high-impact]` marker threshold
+
+[enrich]
+vision_model = "gpt-4o-mini"
+
+[ask]
+rerank_enabled = true                    # default: rerank candidates before the answer
+rerank_top_k = 500                       # candidate pool size before rerank
+rerank_keep = 50                         # what survives rerank → flagship
+```
+
+`[pricing.chat.<model>]` / `[pricing.audio]` populate the cost table.
+Models that aren't priced still work — they just show as "unpriced
+calls" in `atg stats` and `atg doctor` warns about it.
+
+`ANALYZETG_CONFIG_PATH=/abs/path/config.toml` overrides the cwd-relative
+discovery.
+
+---
+
+## How it works
 
 ```
 CLI (Typer)
-   └─ Resolver (Telethon)        ──► SQLite: chats
-   └─ Backfill                   ──► SQLite: messages
-   └─ Analyzer pipeline
-        ├─ Filter + dedupe
-        ├─ Enrich (per-kind, opt-in)
-        │     ├─ voice/videonote/video → OpenAI Audio        ──► media_enrichments(kind=transcript)
-        │     ├─ photo                 → OpenAI Vision        ──► media_enrichments(kind=image_description)
-        │     ├─ doc                   → pypdf / python-docx  ──► media_enrichments(kind=doc_extract)
-        │     └─ link                  → httpx + bs4 + LLM    ──► link_enrichments
-        ├─ Chunk (token-aware, soft-breaks on idle gaps)
-        └─ Map-reduce (OpenAI)  ──► analysis_cache, analysis_runs, usage_log
+  ├─ Resolver (Telethon)        ──► SQLite: chats
+  ├─ Backfill (incremental)     ──► SQLite: messages
+  └─ Analyzer pipeline
+       ├─ Filter + dedupe (+ optional --by sender filter)
+       ├─ Enrich (per-kind, opt-in)
+       │    ├─ voice/videonote/video → OpenAI Audio    ──► media_enrichments(kind=transcript)
+       │    ├─ photo                 → OpenAI Vision    ──► media_enrichments(kind=image_description)
+       │    ├─ doc                   → pypdf / python-docx
+       │    └─ link                  → httpx + bs4 + LLM ──► link_enrichments
+       ├─ Chunk (token-aware, soft-breaks on idle gaps)
+       ├─ Map-reduce (OpenAI)   ──► analysis_cache, analysis_runs, usage_log
+       ├─ Optional --self-check (cheap-model verifier)
+       └─ Optional --cite-context (expand `[#msg_id](url)` to message blocks)
 ```
 
-Two SQLite files under `storage/`:
+Three SQLite tables under `storage/data.sqlite` matter most:
 
-- `session.sqlite` — Telethon session.
-- `data.sqlite` — chats, messages, enrichments, link summaries,
-  analysis cache, token usage log. `schema.sql` is applied on every
-  open, with small additive compatibility checks for older local DBs.
-  A read-only `media_transcripts` view of
-  `media_enrichments(kind='transcript')` is preserved for backward
-  compatibility with external tooling that queried the old table
-  directly.
+- `messages` — every message you've synced, plus media metadata + transcripts.
+- `media_enrichments` / `link_enrichments` — per-kind enrichment caches keyed by stable IDs.
+- `analysis_cache` — keyed analyses (zero-cost re-runs).
 
-Reports land in `reports/` (gitignored by default).
+Plus newer:
 
-**Enrichment stage** runs between filter and chunk: each message's
-media gets turned into text (or skipped, when the kind isn't enabled)
-and the result is attached to the in-memory `Message`. The formatter
-then composes `text → [image: …] → [doc: …] → transcript → ↳ link
-summaries` into one dense line per message, which is what the LLM
-actually reads.
+- `chat_last_run_args` — backs `--repeat-last`.
+- `message_embeddings` — vector store for `atg ask --semantic`.
+- `usage_log` — every OpenAI call, with `phase=` tag for cost attribution.
 
-Analyses larger than one context window are automatically **map-reduced**:
-a cheap model (`gpt-5.4-nano`) summarizes chunks in parallel, then the
-flagship model (`gpt-5.4`) merges them into the final report. Each map
-call is cached independently, so adding one new message re-costs only
-one chunk.
+Reports land in `reports/` (gitignored). Each cited claim is a
+clickable link back to the source message. With `--cite-context N` the
+report file additionally contains `<details>` fold blocks with N
+messages around every citation, so the report is self-auditable
+without re-opening Telegram.
 
-Before every network call, `analyze` and `dump` compare the local
-max `msg_id` against Telegram's read marker — if nothing new exists,
-the command exits without hitting the network at all.
+Analyses larger than one context window are automatically map-reduced:
+`filter_model` summarizes chunks in parallel, `final_model` merges. Each
+map call is cached independently — adding one new message at the tail
+re-costs only one chunk.
+
+`atg ask` is its own pipeline: keyword retrieval (or embedding cosine)
+→ optional rerank → format → single LLM call with citations. No
+map-reduce; the candidate pool is bounded by `--limit`.
+
+Before every network call, `analyze` and `dump` compare the local max
+`msg_id` against Telegram's read marker — if nothing new exists, the
+command exits without hitting the network.
 
 ---
 
 ## Development
 
 ```bash
-uv run pytest                 # unit tests
+uv sync --extra dev
+uv run pytest -q              # all tests (pytest-asyncio auto mode)
 uv run ruff check .           # lint
-uv run ruff format .          # format
+uv run ruff format --check .  # format check (CI runs this)
 ```
 
-Contributor guide — invariants, caching layers, preset format, and editing
-hazards — lives in [`CLAUDE.md`](CLAUDE.md). Read it before changing the
-pipeline, DB layer, or preset prompts.
+Contributor guide — invariants, caching layers, preset format, schema,
+and editing hazards — lives in [`CLAUDE.md`](CLAUDE.md). Read it
+before changing the pipeline, DB layer, or preset prompts.
 
-Design notes and implementation plans live under [`docs/`](docs/).
+Design notes and roadmap live under [`docs/`](docs/) and
+[`ROADMAP.md`](ROADMAP.md).
+
+Run `atg doctor` after any pull or env change — it surfaces the
+common breakage points (missing ffmpeg, broken Telegram session,
+missing pricing entries, schema drift).
 
 ---
 
