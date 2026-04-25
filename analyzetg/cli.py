@@ -101,9 +101,9 @@ def describe(
     )
 
 
-@app.command(rich_help_panel=PANEL_MAIN)
+@app.command(rich_help_panel=PANEL_MAINT)
 def folders() -> None:
-    """List your Telegram folders (for use with `analyze --folder NAME`)."""
+    """List your Telegram folders (for use with `analyze --folder NAME` / `dump --folder NAME`)."""
     _run(_list_folders())
 
 
@@ -461,7 +461,7 @@ def analyze(
 # ============================================================== 5.4b Download media
 
 
-@app.command("download-media", rich_help_panel=PANEL_MAIN)
+@app.command("download-media", hidden=True)
 def download_media(
     ref: str = typer.Argument(
         ...,
@@ -927,6 +927,15 @@ def dump(
             "Default: all. Only meaningful with --save-media."
         ),
     ),
+    folder: str | None = typer.Option(
+        None,
+        "--folder",
+        help=(
+            "Batch-dump every chat in this Telegram folder (case-insensitive "
+            "substring match on folder title). Only meaningful without <ref>. "
+            "Currently unread-only — pass period flags only with a single ref."
+        ),
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -943,6 +952,9 @@ def dump(
     the saved file. Legacy `--with-transcribe` still works for
     audio-only; it's suppressed when `--enrich` is set. `--save-media`
     additionally saves the raw media bytes next to the text dump.
+
+    Without `<ref>` and with `--folder NAME`: batch-dumps every chat in
+    that Telegram folder that has unread messages.
     """
     from analyzetg.export.commands import cmd_dump
 
@@ -970,6 +982,7 @@ def dump(
             no_enrich=no_enrich,
             save_media=save_media,
             save_media_types=save_media_types,
+            folder=folder,
             yes=yes,
         )
     )

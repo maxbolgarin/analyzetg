@@ -73,17 +73,18 @@ def test_default_uses_config_plus_preset():
     assert not opts.image and not opts.doc and not opts.video
 
 
-def test_default_link_is_enabled_without_preset_request():
-    # Regression guard for the default flip: flat config defaults must
-    # include link=True now. A preset that doesn't mention link still
-    # gets link enrichment because of the config default.
+def test_default_link_is_disabled_without_preset_request():
+    # Link enrichment is opt-in: each unique URL costs an OpenAI call, and
+    # users on link-heavy chats were surprised by tens of small requests.
+    # A preset that doesn't mention link gets no link enrichment unless the
+    # user passes --enrich=link or sets `link = true` in config.toml.
     opts = build_enrich_opts(
         cli_enrich=None,
         cli_enrich_all=False,
         cli_no_enrich=False,
         preset=_preset(),  # empty enrich_kinds
     )
-    assert opts.link, "link was set to default-on; don't quietly flip back"
+    assert not opts.link, "link was set to default-off; don't quietly flip back"
 
 
 def test_enrich_csv_rejects_unknown():

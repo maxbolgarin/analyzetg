@@ -116,6 +116,7 @@ async def enrich_audio(
                 "enrich.audio.no_audio_track",
                 chat_id=msg.chat_id,
                 msg_id=msg.msg_id,
+                msg_date=msg.date.isoformat() if msg.date else None,
                 media_type=msg.media_type,
             )
             return None
@@ -151,7 +152,12 @@ async def enrich_audio(
             model=used_model,
             audio_seconds=duration,
             cost_usd=cost,
-            context={"doc_id": msg.media_doc_id, "chat_id": msg.chat_id, "msg_id": msg.msg_id},
+            context={
+                "doc_id": msg.media_doc_id,
+                "chat_id": msg.chat_id,
+                "msg_id": msg.msg_id,
+                "msg_date": msg.date.isoformat() if msg.date else None,
+            },
         )
         log.info(
             "openai.audio",
@@ -160,6 +166,9 @@ async def enrich_audio(
             seconds=duration,
             cost=float(cost or 0.0),
             doc_id=msg.media_doc_id,
+            chat_id=msg.chat_id,
+            msg_id=msg.msg_id,
+            msg_date=msg.date.isoformat() if msg.date else None,
         )
         return EnrichResult(
             kind="transcript",

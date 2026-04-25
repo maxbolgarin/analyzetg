@@ -54,10 +54,10 @@ vision_model = "gpt-4o-mini"
 # Defaults (commented = config value matches default):
 # voice = true
 # videonote = true
-# link = true
 # video = false
 # image = false
 # doc = false
+# link = false   # opt-in: one OpenAI call per unique URL; enable per-run with --enrich=link
 
 # Cost caps per run (skipped once exceeded — re-run to get more):
 # max_images_per_run = 50

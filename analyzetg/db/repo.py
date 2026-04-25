@@ -511,6 +511,80 @@ class Repo:
         await cur.close()
         return int(row["c"]) if row else 0
 
+    async def media_breakdown(
+        self,
+        chat_id: int,
+        thread_id: int | None = None,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        min_msg_id: int | None = None,
+        max_msg_id: int | None = None,
+    ) -> dict[str, int]:
+        """Return `{media_type: count, "text": N, "links": N, "total": N}`.
+
+        Counts every message in the local DB matching the filters and
+        groups by `media_type`. `text` = messages whose `text` is non-empty
+        (regardless of media kind). `links` = messages with a likely URL
+        (cheap `LIKE '%http%'` proxy). Used by the wizard to show "voice:
+        36, image: 5, …" so the user knows enrichment scope before
+        committing.
+
+        Counts reflect what's already synced into SQLite — backfill at run
+        time may add more.
+        """
+        where = ["chat_id = ?"]
+        args: list[Any] = [chat_id]
+        if thread_id is not None:
+            where.append("(thread_id = ? OR (? = 0 AND thread_id IS NULL))")
+            args.extend([thread_id, thread_id])
+        if since:
+            where.append("date >= ?")
+            args.append(since.isoformat())
+        if until:
+            where.append("date <= ?")
+            args.append(until.isoformat())
+        if min_msg_id is not None:
+            where.append("msg_id > ?")
+            args.append(min_msg_id)
+        if max_msg_id is not None:
+            where.append("msg_id <= ?")
+            args.append(max_msg_id)
+        wsql = " AND ".join(where)
+        sql = f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN media_type IS NOT NULL THEN 1 ELSE 0 END) AS any_media,
+                SUM(CASE WHEN media_type = 'voice' THEN 1 ELSE 0 END) AS voice,
+                SUM(CASE WHEN media_type = 'videonote' THEN 1 ELSE 0 END) AS videonote,
+                SUM(CASE WHEN media_type = 'video' THEN 1 ELSE 0 END) AS video,
+                SUM(CASE WHEN media_type = 'photo' THEN 1 ELSE 0 END) AS photo,
+                SUM(CASE WHEN media_type = 'doc' THEN 1 ELSE 0 END) AS doc,
+                SUM(CASE WHEN text IS NOT NULL AND text != '' THEN 1 ELSE 0 END) AS text,
+                SUM(CASE WHEN text LIKE '%http%' THEN 1 ELSE 0 END) AS links
+            FROM messages
+            WHERE {wsql}
+        """
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return {
+                "total": 0,
+                "any_media": 0,
+                "voice": 0,
+                "videonote": 0,
+                "video": 0,
+                "photo": 0,
+                "doc": 0,
+                "text": 0,
+                "links": 0,
+            }
+        # aiosqlite/sqlite3 Row iterates values, not keys — explicitly enumerate
+        # the columns we asked for so the dict shape stays stable.
+        keys = ("total", "any_media", "voice", "videonote", "video", "photo", "doc", "text", "links")
+        return {k: int(row[k] or 0) for k in keys}
+
     async def set_message_transcript(self, chat_id: int, msg_id: int, transcript: str, model: str) -> None:
         await self._conn.execute(
             "UPDATE messages SET transcript=?, transcript_model=? WHERE chat_id=? AND msg_id=?",

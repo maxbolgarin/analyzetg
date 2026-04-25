@@ -330,6 +330,45 @@ async def test_dump_all_flat_requires_period() -> None:
         )
 
 
+async def test_media_breakdown_groups_by_kind(tmp_path: Path) -> None:
+    """The wizard's enrich picker reads this to show per-kind counts."""
+    from datetime import datetime as _dt
+
+    from analyzetg.models import Message
+
+    repo = await Repo.open(tmp_path / "t.sqlite")
+    try:
+        now = _dt.now(UTC)
+        msgs = [
+            Message(chat_id=1, msg_id=1, date=now, text=None, media_type="voice", media_doc_id=10),
+            Message(chat_id=1, msg_id=2, date=now, text=None, media_type="voice", media_doc_id=11),
+            Message(chat_id=2, msg_id=1, date=now, text=None, media_type="voice", media_doc_id=12),
+            Message(chat_id=1, msg_id=3, date=now, text=None, media_type="videonote", media_doc_id=13),
+            Message(chat_id=1, msg_id=4, date=now, text=None, media_type="photo", media_doc_id=14),
+            Message(chat_id=1, msg_id=5, date=now, text="check https://example.com"),
+            Message(chat_id=1, msg_id=6, date=now, text=None, media_type="doc", media_doc_id=16),
+        ]
+        await repo.upsert_messages(msgs)
+
+        b = await repo.media_breakdown(1)
+        assert b["total"] == 6
+        assert b["voice"] == 2
+        assert b["videonote"] == 1
+        assert b["photo"] == 1
+        assert b["doc"] == 1
+        assert b["links"] == 1
+        assert b["text"] == 1
+        assert b["any_media"] == 5
+
+        # min_msg_id is exclusive (matches the unread-anchor convention).
+        b2 = await repo.media_breakdown(1, min_msg_id=4)
+        assert b2["total"] == 2  # msg_ids 5, 6
+        assert b2["doc"] == 1
+        assert b2["links"] == 1
+    finally:
+        await repo.close()
+
+
 async def test_stats_by_includes_unpriced_calls(tmp_path: Path) -> None:
     repo = await Repo.open(tmp_path / "t.sqlite")
     try:
