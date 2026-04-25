@@ -191,7 +191,7 @@ def _load_base_system() -> str:
 # Threaded into `options_payload` in analyzer/pipeline.py so a base-rule
 # change busts EVERY preset's cache without needing per-preset version
 # bumps.
-BASE_VERSION = "v2"
+BASE_VERSION = "v3"
 
 
 # Only appears in the system prompt when the caller passes a non-empty

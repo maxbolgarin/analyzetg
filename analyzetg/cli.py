@@ -158,7 +158,10 @@ def channel_info(ref: str = typer.Argument(...)) -> None:
 
 @chats_app.command("add")
 def chats_add(
-    ref: str = typer.Argument(..., help="Chat reference."),
+    ref: str | None = typer.Argument(
+        None,
+        help="Chat reference. Omit to pick from an interactive list of dialogs.",
+    ),
     from_date: str | None = typer.Option(None, "--from-date", help="YYYY-MM-DD"),
     from_msg: str | None = typer.Option(None, "--from-msg", help="Message link or msg_id."),
     last: int | None = typer.Option(None, "--last", help="Backfill last N messages."),
@@ -168,8 +171,49 @@ def chats_add(
     with_comments: bool = typer.Option(False, "--with-comments", help="Channel + discussion group."),
     join: bool = typer.Option(False, "--join", help="Auto-join via invite link if required."),
     no_transcribe: bool = typer.Option(False, "--no-transcribe", help="Disable transcription for this sub."),
+    preset: str | None = typer.Option(
+        None,
+        "--preset",
+        help="Default preset for `atg chats run` on this sub (summary, action_items, …). Wizard asks if not set.",
+    ),
+    period: str | None = typer.Option(
+        None,
+        "--period",
+        help="Default period for `atg chats run` on this sub: unread | last7 | last30 | full. Wizard asks if not set.",
+    ),
+    enrich: str | None = typer.Option(
+        None,
+        "--enrich",
+        help=(
+            "Default enrichments for `atg chats run` on this sub. CSV of "
+            "voice,videonote,video,image,doc,link. Empty string disables all. "
+            "Unset = use config defaults at run time."
+        ),
+    ),
+    no_mark_read: bool = typer.Option(
+        False,
+        "--no-mark-read",
+        help="Don't advance Telegram's read marker after `atg chats run` analyzes this sub.",
+    ),
+    post_to: str | None = typer.Option(
+        None,
+        "--post-to",
+        help="Telegram chat ref to post the report to (`me` for Saved Messages). Used by `atg chats run`.",
+    ),
 ) -> None:
-    """Add a subscription (chat / topic / channel with comments)."""
+    """Add a subscription (chat / topic / channel with comments).
+
+    Without a `<ref>`, opens the interactive chat picker (same one used by
+    `atg analyze`). For a channel, asks whether to also subscribe to its
+    linked discussion group; for a forum, asks whether to include every
+    topic. CLI flags pre-fill those answers when given.
+
+    The wizard also captures per-subscription defaults consumed by
+    `atg chats run` — preset, period, enrich kinds, mark-read, post-to — so a
+    later `atg chats run` walks every enabled sub and analyzes each one with
+    its own settings. CLI flags `--preset`, `--period`, `--enrich`,
+    `--no-mark-read`, `--post-to` skip the matching wizard step.
+    """
     from analyzetg.tg.commands import cmd_chats_add
 
     _run(
@@ -184,16 +228,28 @@ def chats_add(
             with_comments=with_comments,
             join=join,
             no_transcribe=no_transcribe,
+            preset=preset,
+            period=period,
+            enrich=enrich,
+            no_mark_read=no_mark_read,
+            post_to=post_to,
         )
     )
 
 
-@chats_app.command("list")
-def chats_list(enabled_only: bool = typer.Option(False, "--enabled-only")) -> None:
-    """List all subscriptions."""
-    from analyzetg.tg.commands import cmd_chats_list
+@chats_app.command("manage")
+def chats_manage() -> None:
+    """Interactive panel — list, enable / disable, remove subscriptions.
 
-    _run(cmd_chats_list(enabled_only=enabled_only))
+    Prints the full subscriptions table on entry (preset, period,
+    enrich, mark-read, post-to, comments, start), then picks one
+    subscription and presents an action menu (toggle on/off, remove
+    keeping messages, remove and purge stored messages). Loops back to
+    the table after each action. Close with `← Done`, Ctrl-C, or ESC.
+    """
+    from analyzetg.tg.commands import cmd_chats_manage
+
+    _run(cmd_chats_manage())
 
 
 async def _list_folders() -> None:
@@ -234,52 +290,6 @@ async def _list_folders() -> None:
     )
 
 
-@chats_app.command("enable")
-def chats_enable(
-    chat_id: int = typer.Argument(...),
-    thread: int = typer.Option(0, "--thread"),
-) -> None:
-    """Enable a subscription."""
-    _run(_set_enabled(chat_id, thread, True))
-
-
-@chats_app.command("disable")
-def chats_disable(
-    chat_id: int = typer.Argument(...),
-    thread: int = typer.Option(0, "--thread"),
-) -> None:
-    """Disable a subscription (keeps data)."""
-    _run(_set_enabled(chat_id, thread, False))
-
-
-@chats_app.command("remove")
-def chats_remove(
-    chat_id: int = typer.Argument(...),
-    thread: int = typer.Option(0, "--thread"),
-    purge_messages: bool = typer.Option(False, "--purge-messages"),
-) -> None:
-    """Remove a subscription (optionally delete stored messages)."""
-    _run(_remove_sub(chat_id, thread, purge_messages))
-
-
-async def _set_enabled(chat_id: int, thread: int, enabled: bool) -> None:
-    settings = get_settings()
-    async with open_repo(settings.storage.data_path) as repo:
-        sub = await repo.get_subscription(chat_id, thread)
-        if not sub:
-            console.print(f"[red]No subscription for chat={chat_id} thread={thread}[/]")
-            raise typer.Exit(1)
-        await repo.set_subscription_enabled(chat_id, thread, enabled)
-        console.print(f"[green]OK[/] subscription chat={chat_id} thread={thread} enabled={enabled}")
-
-
-async def _remove_sub(chat_id: int, thread: int, purge: bool) -> None:
-    settings = get_settings()
-    async with open_repo(settings.storage.data_path) as repo:
-        await repo.remove_subscription(chat_id, thread, purge_messages=purge)
-        console.print(f"[green]Removed[/] chat={chat_id} thread={thread} purged={purge}")
-
-
 # ================================================================ 5.3 Sync
 
 
@@ -293,6 +303,111 @@ def sync(
     from analyzetg.tg.commands import cmd_sync
 
     _run(cmd_sync(chat=chat, thread=thread, dry_run=dry_run))
+
+
+@chats_app.command("run")
+def chats_run(
+    only_chat: int | None = typer.Option(
+        None,
+        "--only-chat",
+        help="Limit to one chat (numeric chat_id). Default: every enabled subscription.",
+    ),
+    preset: str | None = typer.Option(
+        None,
+        "--preset",
+        help="Override every sub's stored preset for this run only.",
+    ),
+    period: str | None = typer.Option(
+        None,
+        "--period",
+        help="Override every sub's stored period: unread | last7 | last30 | full.",
+    ),
+    enrich: str | None = typer.Option(
+        None,
+        "--enrich",
+        help="Override stored enrichments — CSV of voice,videonote,video,image,doc,link.",
+    ),
+    enrich_all: bool = typer.Option(
+        False,
+        "--enrich-all",
+        help="Override stored enrichments — enable everything.",
+    ),
+    no_enrich: bool = typer.Option(
+        False,
+        "--no-enrich",
+        help="Override stored enrichments — disable all enrichment.",
+    ),
+    mark_read: bool | None = typer.Option(
+        None,
+        "--mark-read/--no-mark-read",
+        help="Override stored mark-read setting for this run.",
+    ),
+    post_to: str | None = typer.Option(
+        None,
+        "--post-to",
+        help="Override stored post-to target for this run (e.g. `me`, @channel).",
+    ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        help="Refuse to run any sub whose estimated cost exceeds this (USD).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the plan table and exit — no backfill, no OpenAI calls.",
+    ),
+    flat: bool = typer.Option(
+        False,
+        "--flat",
+        help=(
+            "Single combined report across every enabled sub instead of "
+            "one report per chat. Per-sub stored preset/period/enrich are "
+            "ignored — uses CLI overrides + defaults. Saved to "
+            "reports/run-flat-<ts>.md."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt before launching the batch.",
+    ),
+) -> None:
+    """Walk every enabled subscription, sync + analyze with stored settings.
+
+    `atg chats add` captures per-subscription preset / period / enrich
+    kinds / mark-read / post-to. `atg chats run` walks each enabled
+    subscription (skipping comments-side subs — they ride along with
+    their parent channel via auto `--with-comments`) and dispatches
+    `cmd_analyze` with that sub's stored settings. Override flags
+    (`--preset`, `--period`, `--enrich`, `--mark-read`, `--post-to`)
+    apply to every sub for this invocation only and don't touch the
+    saved values.
+
+    `--flat` switches to a single multi-chat report: every enabled
+    sub's messages are merged into one input and analyzed in one
+    pass. Per-chat sections in the report keep their own citation
+    templates so links resolve correctly.
+    """
+    from analyzetg.runner import cmd_run
+
+    _run(
+        cmd_run(
+            only_chat=only_chat,
+            preset_override=preset,
+            period_override=period,
+            enrich_override=enrich,
+            enrich_all_override=enrich_all,
+            no_enrich_override=no_enrich,
+            mark_read_override=mark_read,
+            post_to_override=post_to,
+            max_cost=max_cost,
+            dry_run=dry_run,
+            flat=flat,
+            yes=yes,
+        )
+    )
 
 
 @app.command(hidden=True)
@@ -486,6 +601,18 @@ def analyze(
             "everything else)."
         ),
     ),
+    with_comments: bool = typer.Option(
+        False,
+        "--with-comments",
+        help=(
+            "For a Telegram channel: also include messages from its linked "
+            "discussion group (comments) in the same analysis. Comments are "
+            "pulled for the same time window as the channel posts and go "
+            "through the SAME enrichment toggles. The report renders "
+            "channel posts and comments as two sections with their own "
+            "citation links. No-op for non-channel chats."
+        ),
+    ),
 ) -> None:
     """Analyze a chat. Default window = messages since your Telegram read marker.
 
@@ -534,6 +661,7 @@ def analyze(
             by=by,
             post_to=post_to,
             repeat_last=repeat_last,
+            with_comments=with_comments,
         )
     )
 
@@ -1047,6 +1175,16 @@ def ask(
             "media-heavy chats. Pass with --yes to abort silently."
         ),
     ),
+    with_comments: bool = typer.Option(
+        False,
+        "--with-comments",
+        help=(
+            "When --chat is a channel: also retrieve from its linked "
+            "discussion group (comments). Both ranges of messages share "
+            "the answer. No-op when scope is global, a folder, or a "
+            "non-channel chat."
+        ),
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -1089,6 +1227,7 @@ def ask(
             semantic=semantic,
             build_index=build_index,
             max_cost=max_cost,
+            with_comments=with_comments,
             yes=yes,
         )
     )
@@ -1507,6 +1646,15 @@ def dump(
             "Currently unread-only — pass period flags only with a single ref."
         ),
     ),
+    with_comments: bool = typer.Option(
+        False,
+        "--with-comments",
+        help=(
+            "For a Telegram channel: also include linked discussion-group "
+            "messages (comments). Same time window, same enrichment opts. "
+            "No-op for non-channel chats."
+        ),
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -1554,6 +1702,7 @@ def dump(
             save_media=save_media,
             save_media_types=save_media_types,
             folder=folder,
+            with_comments=with_comments,
             yes=yes,
         )
     )

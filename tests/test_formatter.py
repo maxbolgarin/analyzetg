@@ -122,3 +122,63 @@ def test_title_and_period_header() -> None:
     out = format_messages([m], title="Test chat", period=(d, d))
     assert "Чат: Test chat" in out
     assert "Период:" in out
+
+
+def test_chat_groups_renders_each_chat_with_own_link_template() -> None:
+    """`chat_groups` mode: channel + comments — distinct headers + links."""
+    d = datetime(2026, 4, 19, 12, 0)
+    channel_msg = Message(chat_id=-100123, msg_id=10, date=d, sender_name="ch", text="post")
+    comment_msg = Message(chat_id=-100456, msg_id=999, date=d, sender_name="bob", text="reply")
+
+    groups = {
+        -100123: {"title": "MyChannel", "link_template": "https://t.me/mychan/{msg_id}"},
+        -100456: {"title": "Comments", "link_template": "https://t.me/c/456/{msg_id}"},
+    }
+    out = format_messages([channel_msg, comment_msg], chat_groups=groups)
+    # Both group headers must appear.
+    assert "Чат: MyChannel" in out
+    assert "Чат: Comments" in out
+    # And each group's link template must appear in its section.
+    assert "https://t.me/mychan/{msg_id}" in out
+    assert "https://t.me/c/456/{msg_id}" in out
+    # Channel msg renders before comment msg (the date-tied ordering pins
+    # primary group above the secondary; both have identical timestamps so
+    # we only assert both rendered, not ordering).
+    assert "#10" in out and "#999" in out
+
+
+def test_chat_groups_overrides_global_title_and_link_template() -> None:
+    """Global title + link_template are suppressed when `chat_groups` is set."""
+    d = datetime(2026, 4, 19, 12, 0)
+    msg = Message(chat_id=-100123, msg_id=10, date=d, sender_name="ch", text="post")
+    out = format_messages(
+        [msg],
+        title="GlobalTitle",
+        link_template="https://example.com/{msg_id}",
+        chat_groups={-100123: {"title": "InsideTitle", "link_template": "https://t.me/x/{msg_id}"}},
+    )
+    # Per-group header replaces the would-be global header.
+    assert "Чат: InsideTitle" in out
+    assert "Чат: GlobalTitle" not in out
+    # Per-group link template replaces the would-be global link line.
+    assert "https://t.me/x/{msg_id}" in out
+    assert "https://example.com/{msg_id}" not in out
+
+
+def test_chat_header_preamble_chat_groups_lists_each_chat() -> None:
+    d = datetime(2026, 4, 19)
+    out = chat_header_preamble(
+        "ignored title",
+        (d, d),
+        chat_groups={
+            -100123: {"title": "Channel", "link_template": "https://t.me/ch/{msg_id}"},
+            -100456: {"title": "Comments", "link_template": "https://t.me/c/456/{msg_id}"},
+        },
+    )
+    # In chat_groups mode the global "=== Чат: ignored title ===" line is
+    # suppressed (each chat group renders its own inline) but every group
+    # appears as a bullet in the preamble.
+    assert "Channel" in out and "Comments" in out
+    assert "https://t.me/ch/{msg_id}" in out
+    assert "https://t.me/c/456/{msg_id}" in out
+    assert "ignored title" not in out

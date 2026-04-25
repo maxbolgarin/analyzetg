@@ -115,15 +115,16 @@ def test_short_flag_not_confused_with_negative_number() -> None:
     ]
 
 
-def test_chats_remove_regression() -> None:
-    # Sibling regression: `atg chats remove -1001234 --purge-messages`.
-    # Subcommand nesting (chats → remove) shouldn't matter — any
-    # non-flag prev token is treated as non-option, so the id moves.
-    assert _preprocess_argv(["atg", "chats", "remove", "-1001234", "--purge-messages"]) == [
+def test_negative_id_under_nested_subcommand() -> None:
+    # Sibling regression: a negative chat id under `chats add` (or any
+    # nested subcommand) must end up after `--` regardless of which
+    # `chats` action is invoked. Subcommand nesting shouldn't matter —
+    # any non-flag prev token is treated as non-option, so the id moves.
+    assert _preprocess_argv(["atg", "chats", "add", "-1001234", "--full-history"]) == [
         "atg",
         "chats",
-        "remove",
-        "--purge-messages",
+        "add",
+        "--full-history",
         "--",
         "-1001234",
     ]

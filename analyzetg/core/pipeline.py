@@ -211,6 +211,150 @@ def _build_mark_read_fn(
     return _mark_single
 
 
+async def _pull_linked_comments(
+    *,
+    client: Any,
+    repo: Any,
+    chat_id: int,
+    primary_msgs: list[Any],
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+) -> tuple[dict[str, Any], list[Any]]:
+    """Resolve `linked_chat_id`, backfill its date window, return (meta, msgs).
+
+    Date window for the linked chat:
+      - if explicit `since_dt`/`until_dt` were given, reuse them;
+      - else span the primary chat's message range (min..max date) so
+        comments come from the same period the channel posts cover;
+      - else (no primary msgs and no window) skip — there's nothing to
+        attach the comments to.
+
+    On any failure (no linked chat, channel-info RPC error, backfill
+    error) returns `({...None}, [])` so the caller proceeds without
+    comments rather than aborting the analysis.
+    """
+    from analyzetg.tg.sync import backfill
+    from analyzetg.tg.topics import get_linked_chat_id
+    from analyzetg.util.logging import get_logger
+
+    log = get_logger(__name__)
+    null_meta: dict[str, Any] = {
+        "chat_id": None,
+        "title": None,
+        "username": None,
+        "internal_id": None,
+    }
+
+    chat_row = await repo.get_chat(chat_id)
+    if not chat_row or chat_row.get("kind") != "channel":
+        # Not a channel — comments don't apply. Silent no-op so generic
+        # callers can pass `with_comments=True` defensively without
+        # branching on chat kind.
+        return null_meta, []
+
+    linked_id = chat_row.get("linked_chat_id")
+    if linked_id is None:
+        try:
+            linked_id = await get_linked_chat_id(client, chat_id)
+        except Exception as e:
+            log.warning("comments.linked_chat_lookup_failed", chat_id=chat_id, err=str(e)[:200])
+            return null_meta, []
+        if linked_id is None:
+            console.print("[yellow]→ Channel has no linked discussion group; skipping comments.[/]")
+            return null_meta, []
+        # Persist the lookup so subsequent runs short-circuit.
+        await repo.upsert_chat(
+            chat_id,
+            "channel",
+            title=chat_row.get("title"),
+            username=chat_row.get("username"),
+            linked_chat_id=linked_id,
+        )
+
+    # Window for comments: explicit > derived from primary > skip.
+    com_since = since_dt
+    com_until = until_dt
+    if com_since is None and com_until is None and primary_msgs:
+        dates = [m.date for m in primary_msgs if m.date is not None]
+        if dates:
+            com_since = min(dates)
+            com_until = max(dates)
+    if com_since is None and com_until is None:
+        return null_meta, []
+
+    from analyzetg.core.paths import derive_internal_id
+
+    # Resolve linked chat metadata (title/username) — try cached row,
+    # fall back to Telethon get_entity for cosmetics. Never fatal.
+    linked_row = await repo.get_chat(linked_id)
+    title = (linked_row or {}).get("title")
+    username = (linked_row or {}).get("username")
+    if not title:
+        try:
+            from analyzetg.tg.client import entity_title, entity_username
+
+            entity = await client.get_entity(linked_id)
+            title = entity_title(entity)
+            username = username or entity_username(entity)
+            await repo.upsert_chat(
+                linked_id,
+                "supergroup",
+                title=title,
+                username=username,
+            )
+        except Exception as e:
+            log.debug("comments.entity_lookup_failed", linked_id=linked_id, err=str(e)[:200])
+            title = title or f"Comments {linked_id}"
+
+    console.print(
+        f"[dim]→ Including comments from linked chat[/] [bold]{title}[/] "
+        f"({linked_id})[dim] for window {com_since} … {com_until}[/]"
+    )
+
+    # Backfill the linked chat for the comment window. Use since_date
+    # when only since_dt is provided; otherwise rely on a forward pull
+    # from local_max so we don't refetch what's already there.
+    try:
+        if com_since is not None:
+            await backfill(
+                client,
+                repo,
+                chat_id=linked_id,
+                thread_id=None,
+                since_date=com_since,
+            )
+        else:
+            local_max = await repo.get_max_msg_id(linked_id, None) or 0
+            await backfill(
+                client,
+                repo,
+                chat_id=linked_id,
+                thread_id=None,
+                from_msg_id=local_max + 1,
+                direction="forward",
+            )
+    except Exception as e:
+        log.warning("comments.backfill_failed", linked_id=linked_id, err=str(e)[:200])
+        # Fall through — we can still surface whatever's in the local DB.
+
+    comments_msgs = await repo.iter_messages(
+        linked_id,
+        thread_id=None,
+        since=com_since,
+        until=com_until,
+    )
+    if not comments_msgs:
+        console.print("[dim]→ No comments in window.[/]")
+
+    meta: dict[str, Any] = {
+        "chat_id": linked_id,
+        "title": title,
+        "username": username,
+        "internal_id": derive_internal_id(linked_id),
+    }
+    return meta, comments_msgs
+
+
 async def prepare_chat_run(
     *,
     client: Any,
@@ -233,6 +377,7 @@ async def prepare_chat_run(
     topic_markers: dict[int, int] | None = None,
     mark_read: bool = False,
     skip_filter: bool = False,
+    with_comments: bool = False,
 ) -> PreparedRun:
     """Prepare a single chat run: resolve → backfill → enrich → ready for consumer.
 
@@ -294,6 +439,29 @@ async def prepare_chat_run(
         if before != len(msgs):
             console.print(f"[dim]→ Filtered per-topic: kept {len(msgs)} / dropped {before - len(msgs)}[/]")
 
+    # Channel + comments: pull the linked discussion group's messages
+    # from the same date range and merge them in BEFORE enrichment, so
+    # the combined list goes through one enrichment pass and one filter
+    # pass with identical opts. Each row keeps its original chat_id;
+    # downstream formatter renders them as two sections via chat_groups.
+    comments_meta: dict[str, Any] = {
+        "chat_id": None,
+        "title": None,
+        "username": None,
+        "internal_id": None,
+    }
+    if with_comments and msgs is not None:
+        comments_meta, comments_msgs = await _pull_linked_comments(
+            client=client,
+            repo=repo,
+            chat_id=chat_id,
+            primary_msgs=msgs,
+            since_dt=since_dt,
+            until_dt=until_dt,
+        )
+        if comments_msgs:
+            msgs = msgs + comments_msgs
+
     raw_count = len(msgs)
 
     enrich_stats = None
@@ -340,6 +508,10 @@ async def prepare_chat_run(
         client=client,
         repo=repo,
         settings=settings,
+        comments_chat_id=comments_meta["chat_id"],
+        comments_chat_title=comments_meta["title"],
+        comments_chat_username=comments_meta["username"],
+        comments_chat_internal_id=comments_meta["internal_id"],
     )
 
 
@@ -559,6 +731,36 @@ async def prepare_all_unread_runs(
             # _determine_start, so the net is iter_messages with
             # min_msg_id = read_inbox_max_id (exclusive) = correct.
             from_msg = u.read_inbox_max_id + 1
+
+            # Stale-marker guard: broadcast channels and accounts that
+            # never explicitly read a chat sometimes report
+            # `read_inbox_max_id=0` (or a very low value) alongside a
+            # small unread_count. Without this clamp, Telethon walks the
+            # whole chat history (300k+ msgs) just to surface 31 unread.
+            # When the implied window is >10x unread_count, trust the
+            # badge and start at `latest - unread_count - 50`.
+            if u.unread_count > 0:
+                try:
+                    latest = await client.get_messages(u.chat_id, limit=1)
+                    if latest:
+                        latest_id = int(latest[0].id)
+                        gap = latest_id - u.read_inbox_max_id
+                        if gap > u.unread_count * 10:
+                            clamped = max(latest_id - u.unread_count - 50, 1)
+                            console.print(
+                                f"[yellow]→ Stale read marker[/] "
+                                f"(msg_id={u.read_inbox_max_id}, "
+                                f"latest={latest_id}, unread={u.unread_count}); "
+                                f"trusting unread badge → start at "
+                                f"msg_id={clamped}"
+                            )
+                            from_msg = clamped
+                except Exception as e:
+                    log.debug(
+                        "prepare_all_unread_runs.latest_lookup_failed",
+                        chat_id=u.chat_id,
+                        err=str(e)[:200],
+                    )
 
             prepared = await prepare_chat_run(
                 client=client,

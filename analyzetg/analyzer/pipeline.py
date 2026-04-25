@@ -176,6 +176,11 @@ class AnalysisOptions:
     # exact sender_id. Mutually exclusive at CLI parse time.
     sender_substring: str | None = None
     sender_id: int | None = None
+    # Channel + comments: when True the cache key reflects that the input
+    # included messages from the linked discussion group, so toggling the
+    # flag produces different cached results for the same channel+period.
+    with_comments: bool = False
+    comments_chat_id: int | None = None
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
         """Hash ingredients that must bust cache when toggled."""
@@ -198,6 +203,11 @@ class AnalysisOptions:
             # produce different cached results for the same message set.
             "sender_substring": (self.sender_substring or "").casefold() or None,
             "sender_id": self.sender_id,
+            # `with_comments` flips the prompt's input set (channel-only vs
+            # channel+linked discussion). Include the linked chat id too so
+            # a re-link would invalidate.
+            "with_comments": self.with_comments,
+            "comments_chat_id": self.comments_chat_id if self.with_comments else None,
         }
         if self.enrich:
             payload["enrich_options"] = {
@@ -307,6 +317,7 @@ async def run_analysis(
     topic_titles: dict[int, str] | None = None,
     topic_markers: dict[int, int] | None = None,
     messages: list[Any] | None = None,
+    chat_groups: dict[int, dict] | None = None,
 ) -> AnalysisResult:
     """Run the end-to-end analysis for a chat/thread/period.
 
@@ -441,7 +452,17 @@ async def run_analysis(
         chat_internal_id=chat_internal_id,
         thread_id=thread_id,
     )
-    static_ctx = chat_header_preamble(title, period, link_template=link_template, topic_titles=topic_titles)
+    # When `chat_groups` is set the formatter renders a header per chat
+    # group inline; the preamble's single-template path is suppressed
+    # (`chat_header_preamble` knows). format_messages similarly drops
+    # the global `=== Чат: … ===` line in chat-groups mode.
+    static_ctx = chat_header_preamble(
+        title,
+        period,
+        link_template=link_template,
+        topic_titles=topic_titles,
+        chat_groups=chat_groups,
+    )
     # user_overhead: template minus {messages} — static, cacheable
     user_overhead = preset.render_user(
         period=_fmt_period(period),
@@ -497,6 +518,7 @@ async def run_analysis(
             title=None,
             link_template=link_template,
             topic_titles=topic_titles,
+            chat_groups=chat_groups,
         )
         user = preset.render_user(
             period=_fmt_period(period),
@@ -597,6 +619,7 @@ async def run_analysis(
                 title=None,
                 link_template=link_template,
                 topic_titles=topic_titles,
+                chat_groups=chat_groups,
             )
             user = preset.render_user(
                 period=_fmt_period(period),

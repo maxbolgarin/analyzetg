@@ -201,6 +201,7 @@ def format_messages(
     title: str | None = None,
     link_template: str | None = None,
     topic_titles: dict[int, str] | None = None,
+    chat_groups: dict[int, dict] | None = None,
 ) -> str:
     """Dense text format for a list of messages.
 
@@ -211,25 +212,58 @@ def format_messages(
     Groups are ordered by the date of their first message so top-to-bottom
     reading stays natural. Within each group, chronological order.
 
-    `topic_titles=None` (the default) produces byte-identical output to the
-    old code — crucial because every non-forum / per-topic / single-topic
-    path depends on the ungrouped layout.
+    `chat_groups` (mutually exclusive with `topic_titles`) groups messages
+    by `chat_id` — used when analyzing a channel together with its linked
+    discussion group (`--with-comments`). Each entry maps `chat_id ->
+    {"title": str, "link_template": str | None}`; each group emits its own
+    `=== Чат: … ===` header and its own `Ссылка на сообщение:` line so the
+    LLM picks the right link template for citations from each chat.
+
+    `topic_titles=None` AND `chat_groups=None` (the default) produces
+    byte-identical output to the old code — crucial because every
+    non-forum / per-topic / single-topic path depends on the ungrouped
+    layout.
     """
     if not msgs:
         return ""
     date_fmt = _pick_date_format(msgs)
     idx = {m.msg_id: m for m in msgs}
     lines: list[str] = []
-    if title:
+    if title and not chat_groups:
         lines.append(f"=== Чат: {title} ===")
     if period and (period[0] or period[1]):
         a = period[0].strftime("%Y-%m-%d %H:%M") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d %H:%M") if period[1] else "…"
         lines.append(f"Период: {a} — {b}")
     lines.append(f"Сообщений: {len(msgs)}")
-    if link_template:
+    if link_template and not chat_groups:
         lines.append(f"Ссылка на сообщение: {link_template}")
     lines.append("")
+
+    if chat_groups:
+        groups_by_cid: dict[int, list[Message]] = {}
+        for m in msgs:
+            groups_by_cid.setdefault(m.chat_id, []).append(m)
+        # Stable order: channel (primary, first-encountered chat_id with
+        # any messages) first, then comments. Sorting by first message's
+        # date keeps reading natural across chat groups.
+        ordered_cids = sorted(groups_by_cid.keys(), key=lambda c: groups_by_cid[c][0].date)
+        for i, cid in enumerate(ordered_cids):
+            if i > 0:
+                lines.append("")
+            meta = chat_groups.get(cid) or {}
+            ctitle = meta.get("title") or str(cid)
+            ctmpl = meta.get("link_template")
+            lines.append(f"=== Чат: {ctitle} ===")
+            lines.append(f"Сообщений в этой группе: {len(groups_by_cid[cid])}")
+            if ctmpl:
+                lines.append(f"Ссылка на сообщение: {ctmpl}")
+            lines.append("")
+            for m in groups_by_cid[cid]:
+                line = _emit_msg_line(m, idx, date_fmt)
+                if line is not None:
+                    lines.append(line)
+        return "\n".join(lines)
 
     if topic_titles:
         # Preserve input order (chronological) when building groups so
@@ -287,6 +321,7 @@ def chat_header_preamble(
     *,
     link_template: str | None = None,
     topic_titles: dict[int, str] | None = None,
+    chat_groups: dict[int, dict] | None = None,
 ) -> str:
     """Static (cacheable) portion of the prompt — appears before dynamic messages.
 
@@ -294,9 +329,14 @@ def chat_header_preamble(
     up to `_FORUM_TITLE_PREVIEW` topics. Sits in the static prefix so
     OpenAI's prompt cache keeps hitting across runs with the same forum
     shape; only a topic add/remove/rename invalidates it.
+
+    `chat_groups`, when provided, emits one `Группы чатов: …` line listing
+    each chat's title + link template so the LLM has a stable index of
+    where each msg_id range comes from. Used by `--with-comments` runs
+    (channel + linked discussion group).
     """
     parts = []
-    if title:
+    if title and not chat_groups:
         parts.append(f"=== Чат: {title} ===")
     if period and (period[0] or period[1]):
         a = period[0].strftime("%Y-%m-%d") if period[0] else "…"
@@ -304,7 +344,16 @@ def chat_header_preamble(
         parts.append(f"Период: {a} — {b}")
     if topic_titles:
         parts.append(_forum_line(topic_titles))
-    if link_template:
+    if chat_groups:
+        for cid in sorted(chat_groups.keys()):
+            meta = chat_groups[cid] or {}
+            ctitle = meta.get("title") or str(cid)
+            tmpl = meta.get("link_template")
+            line = f"  • {ctitle}"
+            if tmpl:
+                line += f" — ссылка: {tmpl}"
+            parts.append(line)
+    elif link_template:
         parts.append(f"Ссылка на сообщение: {link_template}")
     return "\n".join(parts)
 

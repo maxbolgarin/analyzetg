@@ -71,6 +71,7 @@ async def cmd_ask(
     build_index: bool = False,
     max_cost: float | None = None,
     interactive: bool = False,
+    with_comments: bool = False,
     yes: bool = False,
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
@@ -121,6 +122,40 @@ async def cmd_ask(
             resolved = await resolve_ref(client, repo, chat)
             chat_ids = [resolved.chat_id]
             chat_titles[resolved.chat_id] = resolved.title or str(resolved.chat_id)
+            # `--with-comments` on a channel: add the linked discussion
+            # group to scope so retrieval (keyword / semantic) sees both.
+            # Falls back gracefully when not a channel or no linked chat.
+            if with_comments:
+                from analyzetg.tg.topics import get_linked_chat_id
+
+                row = await repo.get_chat(resolved.chat_id)
+                linked_id = (row or {}).get("linked_chat_id")
+                if linked_id is None and (row or {}).get("kind") == "channel":
+                    try:
+                        linked_id = await get_linked_chat_id(client, resolved.chat_id)
+                    except Exception:
+                        linked_id = None
+                    if linked_id is not None:
+                        await repo.upsert_chat(
+                            resolved.chat_id,
+                            "channel",
+                            title=resolved.title,
+                            username=resolved.username,
+                            linked_chat_id=linked_id,
+                        )
+                if linked_id is not None:
+                    chat_ids.append(linked_id)
+                    linked_row = await repo.get_chat(linked_id) or {}
+                    chat_titles[linked_id] = linked_row.get("title") or f"Comments {linked_id}"
+                    console.print(
+                        f"[dim]→ Including comments from linked chat[/] "
+                        f"[bold]{chat_titles[linked_id]}[/] ({linked_id})"
+                    )
+                else:
+                    console.print(
+                        "[yellow]→ --with-comments: chat is not a channel "
+                        "or has no linked discussion group; ignoring.[/]"
+                    )
         elif folder:
             folders = await list_folders(client)
             matched = resolve_folder(folder, folders)
@@ -175,12 +210,19 @@ async def cmd_ask(
         # Conversation history for --interactive mode. Each turn appends
         # (question, answer) so follow-ups have prior context.
         history: list[tuple[str, str]] = []
+        # Last successful turn's retrieved pool — used as fallback for
+        # short / conversational follow-ups ("привет", "tell me more")
+        # whose own retrieval matches nothing. Without this, the loop
+        # bails on every greeting and the user can't have a real
+        # conversation.
+        prior_pool: list[tuple] = []
 
-        async def _answer_one(q: str, *, is_followup: bool) -> str:
+        async def _answer_one(q: str, *, is_followup: bool) -> tuple[str, list[tuple]]:
             """One full Q→A iteration: retrieve → rerank → format → answer.
 
-            Returns the assistant's answer text. Mutates `history` only
-            after a successful turn.
+            Returns `(answer_text, scored_pool_used)`. The pool is what
+            the LLM actually saw; the caller stashes it as `prior_pool`
+            for the next follow-up.
             """
             return await _run_single_turn(
                 question=q,
@@ -205,30 +247,40 @@ async def cmd_ask(
                 console_out=console_out or is_followup,
                 max_cost=max_cost,
                 yes=yes,
+                fallback_pool=prior_pool if is_followup else None,
             )
 
         # First turn — same shape as before --interactive existed.
-        first_answer = await _answer_one(question, is_followup=False)
+        first_answer, prior_pool = await _answer_one(question, is_followup=False)
         history.append((question, first_answer))
 
         if not interactive:
             return
 
         # Interactive loop: prompt for follow-ups until blank line / EOF.
+        # Plain `input()` misbehaves inside the asyncio event loop on
+        # macOS — Enter shows up as a literal `^M` (raw-mode carriage
+        # return) and the line never submits. prompt_toolkit's async
+        # session correctly hands stdin back and forth with the loop AND
+        # supports Cyrillic / non-ASCII typing out of the box.
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import HTML
+
         console.print(
             "\n[bold cyan]Interactive mode[/] — type a follow-up question (blank or Ctrl-D to exit)."
         )
+        prompt_session: PromptSession = PromptSession()
 
         while True:
             try:
-                follow = input("\n> ").strip()
+                follow = (await prompt_session.prompt_async(HTML("\n<ansicyan>> </ansicyan>"))).strip()
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
             if not follow:
                 break
             try:
-                ans = await _answer_one(follow, is_followup=True)
+                ans, prior_pool = await _answer_one(follow, is_followup=True)
             except typer.Exit as e:
                 # Budget guard fires raise; in interactive mode that means
                 # "skip this turn", not "kill the session".
@@ -262,14 +314,18 @@ async def _run_single_turn(
     console_out: bool,
     max_cost: float | None,
     yes: bool,
-) -> str:
+    fallback_pool: list[tuple] | None = None,
+) -> tuple[str, list[tuple]]:
     """Retrieve → rerank → format → preview → answer for one question.
 
-    Returns the assistant's answer text (caller appends to history).
-    Raises typer.Exit(0) on retrieval miss or budget abort, Exit(2) on
-    --yes-driven over-budget abort, Exit(1) on empty model output.
-    Prints / saves the answer using the same UX as the original single-
-    shot path.
+    Returns `(answer_text, scored_pool_used)`. The pool is the list of
+    `(Message, score)` tuples the LLM actually saw — caller stashes it
+    so the next conversational follow-up can fall back on it.
+
+    Raises typer.Exit(0) on retrieval miss with no fallback, or budget
+    abort. Exit(2) on --yes-driven over-budget abort. Exit(1) on empty
+    model output. Prints / saves the answer using the same UX as the
+    original single-shot path.
     """
     from analyzetg.core.paths import derive_internal_id
     from analyzetg.util.pricing import chat_cost
@@ -353,11 +409,20 @@ async def _run_single_turn(
 
     msgs = [m for m, _ in scored]
     if not msgs:
-        console.print(
-            "[yellow]No matching messages.[/] Try `atg sync <chat>` first if "
-            "the chat hasn't been backfilled, or broaden your scope."
-        )
-        raise typer.Exit(0)
+        # Conversational follow-ups ("привет", "tell me more") rarely
+        # have content tokens that match anything new. Reuse the prior
+        # turn's pool so the LLM can keep the thread instead of dying
+        # on every greeting.
+        if fallback_pool:
+            scored = list(fallback_pool)
+            msgs = [m for m, _ in scored]
+            console.print("[dim]→ No new matches; reusing prior context.[/]")
+        else:
+            console.print(
+                "[yellow]No matching messages.[/] Try `atg sync <chat>` first if "
+                "the chat hasn't been backfilled, or broaden your scope."
+            )
+            raise typer.Exit(0)
 
     # Title backfill for cross-chat answers.
     for m in msgs:
@@ -449,7 +514,7 @@ async def _run_single_turn(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(body, encoding="utf-8")
         console.print(f"[green]Saved[/] {output}")
-    return answer
+    return answer, scored
 
 
 def _build_history_messages(

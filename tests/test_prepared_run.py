@@ -41,6 +41,10 @@ def test_prepared_run_carries_all_consumer_contracts():
         "client",
         "repo",
         "settings",
+        "comments_chat_id",
+        "comments_chat_title",
+        "comments_chat_username",
+        "comments_chat_internal_id",
     }
     actual = {f.name for f in fields(PreparedRun)}
     assert actual == expected, f"missing {expected - actual}, extra {actual - expected}"
@@ -301,3 +305,110 @@ async def test_prepare_all_unread_forum_uses_per_topic_markers(repo, monkeypatch
     assert prepared.topic_markers == {1: 50, 2: 250}
     assert {m.msg_id for m in prepared.messages} == {100, 300}
     assert backfill_calls[0]["from_msg_id"] == 51
+
+
+async def test_prepare_all_unread_clamps_stale_read_marker(repo, monkeypatch):
+    """Broadcast channel with stale read marker: don't fetch the whole history.
+
+    Telegram sometimes reports `read_inbox_max_id=0` for channels the
+    user has never explicitly read, even when the unread badge is small.
+    Without a clamp, the batch path would walk all 313988 messages just
+    to surface 31 unread. The fix: when the implied window
+    (latest - marker) is >10× unread_count, trust the badge and start
+    at `latest - unread_count - 50`.
+    """
+    from analyzetg.core.pipeline import prepare_all_unread_runs
+    from analyzetg.tg.dialogs import UnreadDialog
+
+    async def fake_unread(_client):
+        return [
+            UnreadDialog(
+                chat_id=-200,
+                kind="channel",
+                title="CLASH",
+                username=None,
+                unread_count=31,
+                read_inbox_max_id=0,
+            )
+        ]
+
+    backfill_calls = []
+
+    async def _no_backfill(*args, **kwargs):
+        backfill_calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr("analyzetg.tg.dialogs.list_unread_dialogs", fake_unread)
+    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+
+    client = MagicMock()
+    # Latest message in the channel is msg_id=313988. Gap from marker
+    # (313988 - 0 = 313988) is 10000x the unread badge — clamp should fire.
+    fake_latest = MagicMock()
+    fake_latest.id = 313988
+    client.get_messages = AsyncMock(return_value=[fake_latest])
+
+    runs = [
+        prepared
+        async for prepared in prepare_all_unread_runs(
+            client=client,
+            repo=repo,
+            settings=get_settings(),
+            enrich_opts=EnrichOpts(),
+            yes=True,
+        )
+    ]
+
+    assert len(runs) == 1
+    # from_msg passed to prepare_chat_run = latest - unread - 50 = 313907.
+    # _determine_start subtracts 1 → start_msg_id=313906. backfill called
+    # with from_msg_id = start_msg_id + 1 = 313907.
+    assert backfill_calls, "backfill should still be invoked once clamped"
+    assert backfill_calls[0]["from_msg_id"] == 313907
+
+
+async def test_prepare_all_unread_keeps_marker_when_consistent(repo, monkeypatch):
+    """Normal case: read marker matches unread_count → no clamp."""
+    from analyzetg.core.pipeline import prepare_all_unread_runs
+    from analyzetg.tg.dialogs import UnreadDialog
+
+    async def fake_unread(_client):
+        return [
+            UnreadDialog(
+                chat_id=-300,
+                kind="channel",
+                title="Normal",
+                username=None,
+                unread_count=11,
+                read_inbox_max_id=20516,
+            )
+        ]
+
+    backfill_calls = []
+
+    async def _no_backfill(*args, **kwargs):
+        backfill_calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr("analyzetg.tg.dialogs.list_unread_dialogs", fake_unread)
+    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+
+    client = MagicMock()
+    fake_latest = MagicMock()
+    fake_latest.id = 20527  # gap = 11, exactly unread_count
+    client.get_messages = AsyncMock(return_value=[fake_latest])
+
+    [
+        prepared
+        async for prepared in prepare_all_unread_runs(
+            client=client,
+            repo=repo,
+            settings=get_settings(),
+            enrich_opts=EnrichOpts(),
+            yes=True,
+        )
+    ]
+
+    # Untouched: read_inbox_max_id + 1 = 20517. _determine_start - 1 +
+    # _pull_history + 1 = 20517 again.
+    assert backfill_calls[0]["from_msg_id"] == 20517

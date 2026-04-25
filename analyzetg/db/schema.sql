@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     transcribe_voice     INTEGER DEFAULT 1,
     transcribe_videonote INTEGER DEFAULT 1,
     transcribe_video     INTEGER DEFAULT 0,
+    -- Per-subscription analyze defaults consumed by `atg chats run`. NULL /
+    -- empty values fall back to config / CLI defaults; explicit values
+    -- here let `atg chats run` walk every enabled sub and analyze each one
+    -- with its own settings without re-prompting.
+    preset               TEXT DEFAULT 'summary',
+    period               TEXT DEFAULT 'unread',
+    enrich_kinds         TEXT,            -- CSV (e.g. 'voice,link'); NULL = config defaults
+    mark_read            INTEGER DEFAULT 1,
+    post_to              TEXT,            -- chat ref to post the report to (`me`, @chan, …)
     added_at             TIMESTAMP,
     PRIMARY KEY (chat_id, thread_id)
 );
