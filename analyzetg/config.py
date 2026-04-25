@@ -64,6 +64,25 @@ class AnalyzeCfg(_StrictCfg):
     chunk_soft_break_minutes: int = 30
     dedupe_forwards: bool = True
     map_concurrency: int = 4
+    # Threshold for the formatter's `[high-impact]` marker: a message with
+    # at least this many reactions (sum across all kinds) gets the marker
+    # so the LLM can lean on it for "what mattered" presets. 0 disables.
+    high_impact_reactions: int = 3
+
+
+class AskCfg(_StrictCfg):
+    """Knobs for `atg ask` retrieval and rerank.
+
+    Defaults aim at the typical per-question budget (~$0.01 on
+    gpt-5.4-mini): retrieve 500 keyword hits, rerank with the cheap model
+    down to 50, send those to the answer model.
+    """
+
+    rerank_enabled: bool = True
+    rerank_top_k: int = 500  # candidate pool size before rerank
+    rerank_keep: int = 50  # what survives rerank → flagship
+    rerank_batch_size: int = 50  # messages per cheap-model call
+    rerank_model: str | None = None  # None → falls back to filter_model_default
 
 
 class EnrichCfg(_StrictCfg):
@@ -134,6 +153,7 @@ class Settings(BaseSettings):
     sync: SyncCfg = Field(default_factory=SyncCfg)
     media: MediaCfg = Field(default_factory=MediaCfg)
     analyze: AnalyzeCfg = Field(default_factory=AnalyzeCfg)
+    ask: AskCfg = Field(default_factory=AskCfg)
     enrich: EnrichCfg = Field(default_factory=EnrichCfg)
     retention: RetentionCfg = Field(default_factory=RetentionCfg)
     storage: StorageCfg = Field(default_factory=StorageCfg)

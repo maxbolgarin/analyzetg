@@ -389,6 +389,184 @@ def test_tokenize_question_drops_stop_words_and_short_tokens() -> None:
     assert "по" not in ru
 
 
+async def test_cite_context_expands_citations(tmp_path: Path) -> None:
+    """`--cite-context` should append a sources section with surrounding messages."""
+    from datetime import datetime as _dt
+
+    from analyzetg.analyzer.commands import _expand_citations
+    from analyzetg.models import Message
+
+    repo = await Repo.open(tmp_path / "t.sqlite")
+    try:
+        now = _dt.now(UTC)
+        msgs = [
+            Message(chat_id=1, msg_id=i, date=now, text=f"msg {i}", sender_name="alice") for i in range(1, 11)
+        ]
+        await repo.upsert_messages(msgs)
+
+        body = "Findings: see [#5](https://t.me/x/5) and [#7](https://t.me/x/7)."
+        out = await _expand_citations(body, chat_id=1, repo=repo, context_n=2)
+        assert "Источники" in out
+        # Anchor markers around the cited msgs.
+        assert "#5" in out
+        assert "#7" in out
+        # Surrounding messages render: msg 3 is two before #5, msg 9 is two after #7.
+        assert "#3" in out
+        assert "#9" in out
+
+        # Cap respected: a body with 50 distinct citations expands at most 30.
+        many_cites = " ".join(f"[#{i}](https://t.me/x/{i})" for i in range(1, 51))
+        out2 = await _expand_citations(many_cites, chat_id=1, repo=repo, context_n=0)
+        # context_n=0 short-circuits.
+        assert out2 == many_cites
+    finally:
+        await repo.close()
+
+
+async def test_message_embeddings_round_trip_and_missing(tmp_path: Path) -> None:
+    """Embeddings must round-trip through SQLite as float32 bytes, and the
+    `missing` query must skip already-indexed rows + bodyless messages."""
+    import array
+    from datetime import datetime as _dt
+
+    from analyzetg.models import Message
+
+    repo = await Repo.open(tmp_path / "t.sqlite")
+    try:
+        now = _dt.now(UTC)
+        await repo.upsert_messages(
+            [
+                Message(chat_id=1, msg_id=1, date=now, text="hello world"),
+                Message(chat_id=1, msg_id=2, date=now, text="another"),
+                Message(chat_id=1, msg_id=3, date=now, text=None),  # bodyless → skip
+            ]
+        )
+        # Initially all body-bearing msgs are missing.
+        missing = await repo.msg_ids_missing_embedding(1, "test-model")
+        assert missing == [1, 2]
+
+        # Insert one row.
+        vec = array.array("f", [0.1, 0.2, 0.3]).tobytes()
+        wrote = await repo.put_embeddings([(1, 1, "test-model", vec)])
+        assert wrote == 1
+
+        # Now only msg_id=2 remains missing.
+        missing = await repo.msg_ids_missing_embedding(1, "test-model")
+        assert missing == [2]
+
+        # Different model → both missing again.
+        missing = await repo.msg_ids_missing_embedding(1, "other-model")
+        assert missing == [1, 2]
+
+        # Round-trip the bytes.
+        rows = await repo.get_embeddings([1], "test-model")
+        assert len(rows) == 1
+        cid, mid, vec_bytes = rows[0]
+        assert (cid, mid) == (1, 1)
+        recovered = array.array("f")
+        recovered.frombytes(vec_bytes)
+        assert list(recovered) == pytest.approx([0.1, 0.2, 0.3], rel=1e-5)
+    finally:
+        await repo.close()
+
+
+def test_citation_regex_matches_telegram_urls() -> None:
+    """The citation regex covers every Telegram link shape the formatter
+    emits: public usernames, private channel internal-ids, with and
+    without forum thread segments."""
+    from analyzetg.analyzer.commands import _CITATION_RE
+
+    # Public username.
+    body = "see [#42](https://t.me/somegroup/42) yes"
+    matches = list(_CITATION_RE.finditer(body))
+    assert len(matches) == 1
+    assert matches[0].group(1) == "42"
+    assert matches[0].group(2) == "https://t.me/somegroup/42"
+
+    # Private (internal_id form: t.me/c/<id>/<msg_id>).
+    body = "[#100](https://t.me/c/1234567/100)"
+    matches = list(_CITATION_RE.finditer(body))
+    assert matches[0].group(2) == "https://t.me/c/1234567/100"
+
+    # Forum topic (extra path segment).
+    body = "[#7](https://t.me/somegroup/12345/7)"
+    matches = list(_CITATION_RE.finditer(body))
+    assert matches[0].group(2) == "https://t.me/somegroup/12345/7"
+
+    # Multiple citations on one line.
+    body = "[#1](https://t.me/x/1) and [#2](https://t.me/x/2) too"
+    msg_ids = [m.group(1) for m in _CITATION_RE.finditer(body)]
+    assert msg_ids == ["1", "2"]
+
+
+def test_rerank_total_failure_returns_keyword_sorted_pool() -> None:
+    """When all rerank batches fail, the fallback must keep the *best*
+    keyword hits (sorted by score), not an arbitrary slice."""
+    import asyncio
+    from datetime import datetime as _dt
+
+    from analyzetg.ask import rerank as _rk
+    from analyzetg.models import Message
+
+    # Build a pool with shuffled keyword scores.
+    now = _dt.now(UTC)
+    pool: list[tuple[Message, int]] = [
+        (Message(chat_id=1, msg_id=10, date=now, text="low"), 1),
+        (Message(chat_id=1, msg_id=11, date=now, text="med"), 3),
+        (Message(chat_id=1, msg_id=12, date=now, text="high"), 5),
+        (Message(chat_id=1, msg_id=13, date=now, text="mid"), 2),
+        (Message(chat_id=1, msg_id=14, date=now, text="top"), 6),
+    ]
+
+    # Force every rerank batch to fail by stubbing chat_complete.
+    async def _bad_chat_complete(*a, **kw):
+        raise RuntimeError("simulated API outage")
+
+    import analyzetg.ask.rerank as rerank_mod
+
+    orig = rerank_mod.chat_complete
+    rerank_mod.chat_complete = _bad_chat_complete  # type: ignore[assignment]
+    try:
+        out = asyncio.run(_rk.rerank(repo=None, pool=pool, question="x", model="m", keep=3, batch_size=2))
+    finally:
+        rerank_mod.chat_complete = orig  # type: ignore[assignment]
+
+    # Top-3 by keyword score: msg_ids 14 (score 6), 12 (5), 11 (3).
+    msg_ids = [m.msg_id for m, _ in out]
+    assert msg_ids == [14, 12, 11]
+
+
+def test_rerank_parses_clean_json_and_fenced_responses() -> None:
+    """The cheap rerank model occasionally wraps the JSON in prose / fences.
+
+    `_parse_ratings` must tolerate both shapes. Without this, a single
+    chatty batch would silently lose its rerank scores and the rest of
+    the rerank pool falls back to the keyword order.
+    """
+    from analyzetg.ask.rerank import _parse_ratings
+
+    # Clean JSON.
+    out = _parse_ratings('[{"msg_id": 1, "score": 5}, {"msg_id": 2, "score": 3}]')
+    assert out == [(1, 5), (2, 3)]
+
+    # ```json fence.
+    out = _parse_ratings('```json\n[{"msg_id": 7, "score": 4}]\n```')
+    assert out == [(7, 4)]
+
+    # Prose-wrapped (model added an explanation).
+    out = _parse_ratings('Here are the ratings:\n[{"msg_id": 9, "score": 2}]\nDone.')
+    assert out == [(9, 2)]
+
+    # Score clamped to 1-5.
+    out = _parse_ratings('[{"msg_id": 1, "score": 99}, {"msg_id": 2, "score": -3}]')
+    assert out == [(1, 5), (2, 1)]
+
+    # Garbage → empty.
+    assert _parse_ratings("no json here") == []
+    assert _parse_ratings("") == []
+    assert _parse_ratings(None) == []
+
+
 async def test_ask_retrieval_scores_by_token_hits(tmp_path: Path) -> None:
     from datetime import datetime as _dt
 

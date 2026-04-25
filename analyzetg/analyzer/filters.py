@@ -14,6 +14,10 @@ class FilterOpts:
     min_msg_chars: int = 3
     text_only: bool = False
     include_transcripts: bool = True
+    # `--by` substring (case-insensitive) on sender_name. None → no filter.
+    # When the user passes a numeric, callers set `sender_id` instead.
+    sender_substring: str | None = None
+    sender_id: int | None = None
 
 
 _SERVICE_PREFIXES = ("[service]", "[join]", "[pin]", "[rename]")
@@ -52,6 +56,7 @@ def effective_text(m: Message, opts: FilterOpts | None = None) -> str:
 
 
 def filter_messages(msgs: list[Message], opts: FilterOpts) -> list[Message]:
+    sender_needle = opts.sender_substring.casefold() if opts.sender_substring else None
     out: list[Message] = []
     for m in msgs:
         if _is_service(m):
@@ -66,6 +71,15 @@ def filter_messages(msgs: list[Message], opts: FilterOpts) -> list[Message]:
         # they explicitly don't want described-photo or transcribed-voice rows.
         if opts.text_only and not m.text:
             continue
+        # `--by`: substring on sender_name (case-insensitive) OR exact sender_id.
+        # Runs after enrichment so transcribed/described messages are still
+        # attributed correctly (transcript inherits the original sender).
+        if opts.sender_id is not None and m.sender_id != opts.sender_id:
+            continue
+        if sender_needle is not None:
+            sname = (m.sender_name or "").casefold()
+            if sender_needle not in sname:
+                continue
         out.append(m)
     return out
 

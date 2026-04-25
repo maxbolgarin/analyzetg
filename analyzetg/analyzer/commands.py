@@ -44,6 +44,131 @@ log = get_logger(__name__)
 
 _ENRICH_KINDS = ("voice", "videonote", "video", "image", "doc", "link")
 
+# Match `[#12345](https://t.me/...)` markdown citations the LLM emits per the
+# Q&A / analysis system prompts. Captures (msg_id_int, url). The link side
+# uses `[^)]+` — Telegram URLs (the only template the LLM gets) never
+# contain `)`, so this is unambiguous in practice. URLs with literal parens
+# (Wikipedia-style) would truncate; we don't ship those as citations.
+_CITATION_RE = __import__("re").compile(r"\[#(\d+)\]\(([^)]+)\)")
+
+
+async def _self_check(
+    *,
+    result: AnalysisResult,
+    messages,
+    repo: Repo,
+) -> str:
+    """Cheap-model audit pass over an analysis report.
+
+    Sends source messages + the produced analysis to `filter_model_default`
+    (gpt-5.4-nano-class) with a system prompt asking for unsupported
+    claims. Output is a short markdown bullet list, or "All claims
+    supported." for a clean run. Caller appends as `## Verification`.
+
+    Failures (network blip, parse glitch) return empty string — the
+    primary report is what the user paid for; verification is a bonus.
+    """
+    from analyzetg.analyzer.formatter import format_messages
+    from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
+
+    settings = get_settings()
+    used_model = settings.openai.filter_model_default
+    sys_prompt = (
+        "Ты — рецензент анализа Telegram-чата. Тебе даны: (а) исходные "
+        "сообщения, (б) аналитический отчёт по ним. Твоя задача — найти "
+        "в отчёте утверждения, которые НЕ подтверждаются цитируемым "
+        "сообщением или вообще не подкреплены цитатой. Выведи короткий "
+        "markdown-список таких пунктов: каждый пункт = одно утверждение + "
+        "причина (нет цитаты / противоречит #N / не следует из контекста). "
+        "Если всё подтверждено, ответь одной строкой: 'All claims supported.'"
+    )
+    formatted_msgs = format_messages(messages)
+    user_text = (
+        f"Сообщения:\n\n{formatted_msgs}\n\n"
+        f"Отчёт:\n\n{result.final_result}\n\n"
+        "Неподтверждённые утверждения (или 'All claims supported.'):"
+    )
+    try:
+        oai = make_client()
+        res = await chat_complete(
+            oai,
+            repo=repo,
+            model=used_model,
+            messages=build_messages(sys_prompt, "", user_text),
+            max_tokens=1500,
+            context={"phase": "self_check", "preset": result.preset},
+        )
+        return (res.text or "").strip()
+    except Exception as e:
+        log.warning("analyze.self_check_failed", err=str(e)[:200])
+        return ""
+
+
+async def _expand_citations(
+    body: str,
+    *,
+    chat_id: int,
+    repo: Repo,
+    context_n: int,
+    thread_id: int | None = None,
+    cap: int = 30,
+) -> str:
+    """Append a `## Источники` section with `<details>`-fold blocks for
+    every cited msg_id, showing `context_n` messages on each side.
+
+    Capped at `cap` distinct citations so a runaway LLM that cites 200
+    messages doesn't 10x the report file size. Falls back to the body
+    unchanged when no citations are present or context_n <= 0.
+    """
+    if context_n <= 0:
+        return body
+    seen: list[int] = []
+    for m in _CITATION_RE.finditer(body):
+        try:
+            mid = int(m.group(1))
+        except ValueError:
+            continue
+        if mid in seen:
+            continue
+        seen.append(mid)
+        if len(seen) >= cap:
+            break
+    if not seen:
+        return body
+
+    blocks: list[str] = ["", "## Источники", ""]
+    for mid in seen:
+        msgs = await repo.get_messages_around(
+            chat_id, mid, before=context_n, after=context_n, thread_id=thread_id
+        )
+        if not msgs:
+            continue
+        # Find anchor — message with the cited msg_id; mark it visually.
+        anchor_date = None
+        anchor_sender = None
+        for m in msgs:
+            if m.msg_id == mid:
+                anchor_date = m.date.strftime("%Y-%m-%d %H:%M") if m.date else "?"
+                anchor_sender = m.sender_name or f"id:{m.sender_id}" if m.sender_id else "?"
+                break
+        summary = f"#{mid} — {anchor_date or '?'} {anchor_sender or ''}".strip()
+        blocks.append(f"<details><summary>{summary}</summary>\n")
+        for m in msgs:
+            marker = "►" if m.msg_id == mid else " "
+            ts = m.date.strftime("%H:%M") if m.date else "—"
+            sender = m.sender_name or f"id:{m.sender_id or '?'}"
+            text = (m.text or m.transcript or "").replace("\n", " ").strip()
+            if len(text) > 280:
+                text = text[:277] + "…"
+            # Escape backticks so a stray ` in the message body doesn't
+            # close the inline-code span we open around `[ts #msg_id]`,
+            # bleeding markdown formatting into the rest of the line.
+            text = text.replace("`", "\\`")
+            blocks.append(f"{marker} `[{ts} #{m.msg_id}]` **{sender}**: {text}")
+        blocks.append("\n</details>")
+        blocks.append("")  # spacer between blocks
+    return body + "\n".join(blocks)
+
 
 def _load_preset_for_commands(preset_name: str, prompt_file: Path | None) -> Preset | None:
     """Best-effort preset load — returns None if the preset isn't resolvable
@@ -174,6 +299,12 @@ async def cmd_analyze(
     folder: str | None = None,
     max_cost: float | None = None,
     post_saved: bool = False,
+    dry_run: bool = False,
+    cite_context: int = 0,
+    self_check: bool = False,
+    by: str | None = None,
+    post_to: str | None = None,
+    repeat_last: bool = False,
     yes: bool = False,
 ) -> None:
     # Default preset — overridden later for single-msg mode.
@@ -292,6 +423,53 @@ async def cmd_analyze(
             f"[dim](id={chat_id}, kind={resolved.kind}"
             f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
         )
+
+        # `--repeat-last`: load saved kwargs and use them as defaults for
+        # everything the user didn't explicitly set on this run. We can't
+        # tell "explicit" from "default" perfectly without Typer's source
+        # tracking, so we use a "default-shaped" heuristic: None / False / 0
+        # / "" → take from saved. Anything else → respect the user's value.
+        if repeat_last:
+            saved = await repo.get_last_run_args(chat_id, int(thread_id or 0))
+            if saved is None:
+                console.print(
+                    "[yellow]No saved run found[/] for this chat. "
+                    "Run `atg analyze <ref>` once normally first."
+                )
+                raise typer.Exit(0)
+            console.print(f"[dim]→ Repeating last run from {saved.get('__updated_at')}[/]")
+            # Map saved keys → local vars (only fill defaults).
+            if not preset and saved.get("preset"):
+                effective_preset = saved["preset"]
+            if not since and saved.get("since_ymd"):
+                since = saved["since_ymd"]
+                since_dt = _parse_ymd(since)
+            if not until and saved.get("until_ymd"):
+                until = saved["until_ymd"]
+                until_dt = _parse_ymd(until)
+            if from_msg_id is None and saved.get("from_msg_id") is not None:
+                from_msg_id = int(saved["from_msg_id"])
+            if not full_history and saved.get("full_history"):
+                full_history = True
+            if not by and saved.get("by"):
+                by = saved["by"]
+            if not post_to and saved.get("post_to"):
+                post_to = saved["post_to"]
+            if not post_saved and saved.get("post_saved"):
+                post_saved = True
+            if cite_context == 0 and saved.get("cite_context"):
+                cite_context = int(saved["cite_context"])
+            if not self_check and saved.get("self_check"):
+                self_check = True
+            if mark_read is None and saved.get("mark_read") is not None:
+                mark_read = bool(saved["mark_read"])
+                mark_read_bool = mark_read
+            if min_msg_chars is None and saved.get("min_msg_chars") is not None:
+                min_msg_chars = int(saved["min_msg_chars"])
+            if not model and saved.get("model"):
+                model = saved["model"]
+            if not filter_model and saved.get("filter_model"):
+                filter_model = saved["filter_model"]
 
         # A link like /group/100/5000 carries a msg_id. When no other period
         # flags were given, default to single-msg mode. Pass --from-msg /
@@ -468,6 +646,11 @@ async def cmd_analyze(
             no_cache=no_cache,
             max_cost=max_cost,
             post_saved=post_saved,
+            dry_run=dry_run,
+            cite_context=cite_context,
+            self_check=self_check,
+            by=by,
+            post_to=post_to,
             yes=yes,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -621,6 +804,11 @@ async def _run_single(
     topic_markers: dict[int, int] | None = None,
     max_cost: float | None = None,
     post_saved: bool = False,
+    dry_run: bool = False,
+    cite_context: int = 0,
+    self_check: bool = False,
+    by: str | None = None,
+    post_to: str | None = None,
     yes: bool = False,
 ) -> None:
     """Analyze one chat or one thread via the shared pipeline."""
@@ -650,6 +838,35 @@ async def _run_single(
         topic_markers=topic_markers,
         mark_read=mark_read,
     )
+
+    # --dry-run: print the cost estimate and exit before any LLM call.
+    # Useful before a `--enrich-all --full-history` run on a busy chat.
+    if dry_run:
+        loaded_preset = _load_preset_for_commands(preset, prompt_file)
+        n = len(prepared.messages)
+        if loaded_preset is None:
+            console.print(f"[bold]Dry run[/] — {n} message(s); preset {preset!r} not loadable.")
+            return
+        from analyzetg.analyzer.pipeline import estimate_cost as _estimate_cost
+
+        lo, hi = _estimate_cost(
+            n_messages=n,
+            preset=loaded_preset,
+            settings=get_settings(),
+        )
+        console.print(
+            f"[bold]Dry run[/] — would run preset [cyan]{preset}[/] over "
+            f"[bold]{n}[/] message(s) on {loaded_preset.final_model} "
+            f"(filter: {loaded_preset.filter_model})."
+        )
+        if hi is not None:
+            console.print(f"  Estimated cost (analysis only): [bold]${lo:.4f}–${hi:.4f}[/]")
+            console.print("  [dim]Note: enrichment cost (voice/image/video/doc/link) is NOT included.[/]")
+        else:
+            console.print(
+                "  [yellow]Cost estimate unavailable[/] — pricing missing for one of the run's models."
+            )
+        return
 
     # Budget guard: refuse (or confirm) before any LLM call when the
     # estimated upper-bound cost exceeds the user's --max-cost. The
@@ -683,6 +900,8 @@ async def _run_single(
                 )
 
     console.print("[dim]→ Running analysis...[/]")
+    sender_id_arg = int(by) if by and by.lstrip("-").isdigit() else None
+    sender_substring_arg = by if by and sender_id_arg is None else None
     opts = AnalysisOptions(
         preset=preset,
         prompt_file=prompt_file,
@@ -694,6 +913,8 @@ async def _run_single(
         since=since_dt,
         until=until_dt,
         enrich=effective_enrich,
+        sender_substring=sender_substring_arg,
+        sender_id=sender_id_arg,
     )
     result = await run_analysis(
         repo=repo,
@@ -709,6 +930,56 @@ async def _run_single(
         messages=prepared.messages,
     )
 
+    if self_check and result.final_result and prepared.messages:
+        verification = await _self_check(
+            result=result,
+            messages=prepared.messages,
+            repo=repo,
+        )
+        if verification:
+            result.final_result = result.final_result.rstrip() + "\n\n## Verification\n\n" + verification
+
+    if cite_context > 0 and result.final_result:
+        result.final_result = await _expand_citations(
+            result.final_result,
+            chat_id=chat_id,
+            repo=repo,
+            context_n=cite_context,
+            thread_id=thread_id,
+        )
+
+    # Persist a JSON-safe slice of the run's flags so the wizard's
+    # "🔁 Repeat last run" entry can reconstruct them. Bytes-y / Path-y
+    # things flatten to strings; runtime-only values (client, repo) are
+    # explicitly omitted.
+    if result.msg_count > 0:
+        try:
+            await repo.put_last_run_args(
+                chat_id=chat_id,
+                thread_id=int(thread_id or 0),
+                args={
+                    "preset": preset,
+                    "since_ymd": since_dt.strftime("%Y-%m-%d") if since_dt else None,
+                    "until_ymd": until_dt.strftime("%Y-%m-%d") if until_dt else None,
+                    "from_msg_id": from_msg_id,
+                    "full_history": bool(full_history),
+                    "include_transcripts": bool(include_transcripts),
+                    "min_msg_chars": min_msg_chars,
+                    "model": model,
+                    "filter_model": filter_model,
+                    "no_cache": bool(no_cache),
+                    "mark_read": bool(mark_read),
+                    "post_to": post_to,
+                    "post_saved": bool(post_saved),
+                    "cite_context": cite_context,
+                    "self_check": bool(self_check),
+                    "by": by,
+                    "thread": int(thread_id) if thread_id else None,
+                },
+            )
+        except Exception as e:
+            log.warning("analyze.last_run_args_persist_failed", err=str(e)[:200])
+
     _print_and_write(
         result,
         output=output,
@@ -717,12 +988,15 @@ async def _run_single(
         console_out=console_out,
     )
 
-    if post_saved and result.msg_count > 0:
+    # `--post-saved` is sugar for `--post-to=me`. Explicit --post-to wins
+    # if both are passed.
+    post_target = post_to if post_to else ("me" if post_saved else None)
+    if post_target and result.msg_count > 0:
         try:
-            await _post_to_saved_messages(client, result, title=title)
+            await _post_to_chat(client, repo, result, title=title, target=post_target)
         except Exception as e:
-            log.warning("analyze.post_saved_failed", chat_id=chat_id, err=str(e)[:200])
-            console.print(f"[yellow]⚠ Could not post to Saved Messages:[/] {e}")
+            log.warning("analyze.post_failed", chat_id=chat_id, target=post_target, err=str(e)[:200])
+            console.print(f"[yellow]⚠ Could not post to {post_target}:[/] {e}")
 
     if prepared.mark_read_fn and result.msg_count > 0:
         # Report is already on disk; a mark-read failure (permission denied,
@@ -1219,22 +1493,54 @@ def _print_and_write(
 _TG_MSG_LIMIT = 4000  # leave headroom for any wrapping markdown we add
 
 
-async def _post_to_saved_messages(client, result, *, title: str | None) -> None:
-    """Send the rendered analysis to the user's Saved Messages chat.
+async def _post_to_chat(
+    client,
+    repo,
+    result,
+    *,
+    title: str | None,
+    target: str,
+) -> None:
+    """Send the rendered analysis to a Telegram chat.
 
-    Splits on paragraph boundaries first (`\\n\\n`), then on lines, then
-    on hard cuts as a last resort, so multi-message output stays readable.
-    Uses Telethon's high-level `send_message`; no parse_mode (plain text)
-    so the LLM's stray `*` / `_` don't blow up Telegram's markdown
-    interpreter.
+    `target == "me"` (or empty) routes to Saved Messages via
+    `client.get_me()`. Anything else is resolved through `tg.resolver` —
+    same parser the rest of the CLI uses, so usernames, t.me/ links,
+    titles (fuzzy), and numeric ids all work.
+
+    Splits on paragraph → line → hard-cut boundaries to stay under
+    Telegram's per-message char limit. No parse_mode (plain text) so the
+    LLM's stray `*`/`_` don't trip Telegram's markdown interpreter.
     """
     header = f"📊 analyzetg — {title or result.chat_id}\npreset: {result.preset}\n"
     body = header + "\n" + _with_truncation_banner(result)
     chunks = _split_for_telegram(body, _TG_MSG_LIMIT)
-    me = await client.get_me()
+
+    target_norm = (target or "me").strip().lower()
+    if target_norm in ("me", "saved", ""):
+        entity = await client.get_me()
+        label = "Saved Messages"
+    else:
+        from analyzetg.tg.resolver import resolve as _resolve
+
+        resolved = await _resolve(client, repo, target)
+        entity = resolved.chat_id
+        label = resolved.title or str(resolved.chat_id)
+
     for chunk in chunks:
-        await client.send_message(me, chunk)
-    console.print(f"[green]Posted[/] to Saved Messages ({len(chunks)} message(s)).")
+        await client.send_message(entity, chunk)
+    console.print(f"[green]Posted[/] to {label} ({len(chunks)} message(s)).")
+
+
+# Back-compat shim: existing callers expect `_post_to_saved_messages`.
+async def _post_to_saved_messages(client, result, *, title: str | None) -> None:
+    """Send the analysis to Saved Messages — thin wrapper over _post_to_chat.
+
+    Kept so the existing `--post-saved` call site doesn't need plumbing
+    repo through. The new `--post-to=…` flag goes through `_post_to_chat`
+    directly with whatever target the user picked.
+    """
+    await _post_to_chat(client, None, result, title=title, target="me")
 
 
 def _split_for_telegram(text: str, limit: int) -> list[str]:

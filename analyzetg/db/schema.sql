@@ -114,6 +114,23 @@ CREATE TABLE IF NOT EXISTS link_enrichments (
 CREATE INDEX IF NOT EXISTS idx_link_enrich_fetched
     ON link_enrichments(fetched_at);
 
+-- One embedding row per (chat_id, msg_id, model). Built lazily by
+-- `atg ask --build-index`; `atg ask --semantic` reads them. Vector is
+-- `array.array('f', floats).tobytes()` — float32, native byte order.
+-- Re-embedding a message under a new model produces a new row, not an
+-- update, so old answers stay reproducible if you ever switch back.
+CREATE TABLE IF NOT EXISTS message_embeddings (
+    chat_id    INTEGER NOT NULL,
+    msg_id     INTEGER NOT NULL,
+    model      TEXT NOT NULL,
+    vector     BLOB NOT NULL,
+    created_at TIMESTAMP,
+    PRIMARY KEY (chat_id, msg_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_msg_emb_chat
+    ON message_embeddings(chat_id, model);
+
 CREATE TABLE IF NOT EXISTS analysis_cache (
     batch_hash        TEXT PRIMARY KEY,
     preset            TEXT NOT NULL,
@@ -126,6 +143,18 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
     cost_usd          REAL,
     truncated         INTEGER NOT NULL DEFAULT 0,
     created_at        TIMESTAMP
+);
+
+-- One row per (chat_id, thread_id) — the args of the *most recent*
+-- successful `atg analyze` run on that scope. Used by the wizard's
+-- "🔁 Repeat last run" entry to reconstruct flags without remembering
+-- them. JSON because the cmd_analyze surface adds flags often.
+CREATE TABLE IF NOT EXISTS chat_last_run_args (
+    chat_id    INTEGER NOT NULL,
+    thread_id  INTEGER NOT NULL DEFAULT 0,
+    args_json  TEXT NOT NULL,
+    updated_at TIMESTAMP,
+    PRIMARY KEY (chat_id, thread_id)
 );
 
 CREATE TABLE IF NOT EXISTS analysis_runs (

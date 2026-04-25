@@ -309,8 +309,22 @@ async def backfill(
     total = 0
     t0 = asyncio.get_event_loop().time()
 
+    # Try to estimate the upper bound of msgs we're about to pull so the
+    # bar is determinate. For forward walks from `min_id`, that's roughly
+    # `latest_msg_id - min_id`; for date-anchored walks we can fall back
+    # to the chat's total (rough but better than indeterminate).
+    estimated_total: int | None = None
+    try:
+        latest = await client.get_messages(chat_id, limit=1, **({"reply_to": thread_id} if thread_id else {}))
+        if latest and from_msg_id is not None and direction == "forward":
+            estimated_total = max(0, int(latest[0].id) - int(from_msg_id))
+    except Exception:
+        pass  # best-effort
+
     from rich.console import Console
     from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
         Progress,
         SpinnerColumn,
         TextColumn,
@@ -318,14 +332,16 @@ async def backfill(
     )
 
     _console = Console()
-    with Progress(
+    columns: list = [
         SpinnerColumn(),
         TextColumn("[dim]{task.description}[/]"),
-        TimeElapsedColumn(),
-        transient=True,
-        console=_console,
-    ) as progress:
-        task = progress.add_task("Fetching from Telegram — 0 msgs", total=None)
+    ]
+    if estimated_total:
+        columns.extend([BarColumn(), MofNCompleteColumn()])
+    columns.append(TimeElapsedColumn())
+
+    with Progress(*columns, transient=True, console=_console) as progress:
+        task = progress.add_task("Fetching from Telegram", total=estimated_total)
         async for msg in client.iter_messages(**iter_kwargs):  # type: ignore[arg-type]
             await limiter.acquire()
             batch.append(normalize(msg, sub))
@@ -333,11 +349,11 @@ async def backfill(
                 await repo.upsert_messages(batch)
                 total += len(batch)
                 batch.clear()
-                progress.update(task, description=f"Fetching from Telegram — {total} msgs")
+                progress.update(task, completed=total)
         if batch:
             await repo.upsert_messages(batch)
             total += len(batch)
-            progress.update(task, description=f"Fetching from Telegram — {total} msgs")
+            progress.update(task, completed=total)
 
     elapsed = asyncio.get_event_loop().time() - t0
     log.info(

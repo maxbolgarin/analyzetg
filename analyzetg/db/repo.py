@@ -511,6 +511,53 @@ class Repo:
         await cur.close()
         return int(row["c"]) if row else 0
 
+    async def get_messages_around(
+        self,
+        chat_id: int,
+        msg_id: int,
+        *,
+        before: int = 3,
+        after: int = 3,
+        thread_id: int | None = None,
+    ) -> list[Message]:
+        """Fetch up to N messages on each side of `msg_id` by msg_id ordering.
+
+        Used by `--cite-context` to expand each citation in the analysis
+        report into a context block (audit trail). Msg_ids are
+        per-chat-sequential, so ordering by id is reliable for "what
+        came right before/after". Two range queries — one above, one
+        below — joined with the anchor message.
+        """
+        # Below: msg_id - before .. msg_id - 1
+        before_rows: list[Message] = []
+        if before > 0:
+            sql = "SELECT * FROM messages WHERE chat_id=? AND msg_id < ?"
+            args: list[Any] = [chat_id, msg_id]
+            if thread_id is not None:
+                sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+                args.extend([thread_id, thread_id])
+            sql += " ORDER BY msg_id DESC LIMIT ?"
+            args.append(before)
+            cur = await self._conn.execute(sql, args)
+            rows = await cur.fetchall()
+            await cur.close()
+            before_rows = [self._row_to_msg(r) for r in rows]
+            before_rows.reverse()  # oldest-first
+
+        # Anchor + after.
+        sql = "SELECT * FROM messages WHERE chat_id=? AND msg_id >= ?"
+        args = [chat_id, msg_id]
+        if thread_id is not None:
+            sql += " AND (thread_id = ? OR (? = 0 AND thread_id IS NULL))"
+            args.extend([thread_id, thread_id])
+        sql += " ORDER BY msg_id ASC LIMIT ?"
+        args.append(after + 1)
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        anchor_and_after = [self._row_to_msg(r) for r in rows]
+        return before_rows + anchor_and_after
+
     async def media_breakdown(
         self,
         chat_id: int,
@@ -840,6 +887,127 @@ class Repo:
         )
         await self._conn.commit()
 
+    # ----------------------------------------------- last-run-args (wizard)
+
+    async def put_last_run_args(
+        self,
+        chat_id: int,
+        thread_id: int,
+        args: dict[str, Any],
+    ) -> None:
+        """Persist a CLI kwargs dict so the wizard can offer 'Repeat last run'.
+
+        Upserts on `(chat_id, thread_id)` — only the most recent run is
+        kept. Pruning Path/datetime/EnrichOpts to JSON-safe scalars is the
+        caller's job (we just `json.dumps` what we get).
+        """
+        from json import dumps as _dumps
+
+        await self._conn.execute(
+            """
+            INSERT INTO chat_last_run_args(chat_id, thread_id, args_json, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                args_json=excluded.args_json,
+                updated_at=excluded.updated_at
+            """,
+            (chat_id, thread_id, _dumps(args, ensure_ascii=False), _utcnow()),
+        )
+        await self._conn.commit()
+
+    async def get_last_run_args(
+        self,
+        chat_id: int,
+        thread_id: int = 0,
+    ) -> dict[str, Any] | None:
+        """Inverse of `put_last_run_args`. Returns the stored kwargs or None."""
+        from json import loads as _loads
+
+        cur = await self._conn.execute(
+            "SELECT args_json, updated_at FROM chat_last_run_args WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return None
+        try:
+            args = _loads(row["args_json"])
+        except Exception:
+            return None
+        if not isinstance(args, dict):
+            return None
+        args["__updated_at"] = row["updated_at"]
+        return args
+
+    # ------------------------------------------------------- embeddings
+
+    async def msg_ids_missing_embedding(
+        self,
+        chat_id: int,
+        model: str,
+    ) -> list[int]:
+        """Return msg_ids for `chat_id` that have a body but no embedding for `model`.
+
+        "Body" = `text` non-empty OR `transcript` non-empty. Empty media-only
+        rows are skipped — embedding "(no body)" wastes the API call.
+        """
+        sql = """
+            SELECT msg_id FROM messages
+            WHERE chat_id = ?
+              AND ((text IS NOT NULL AND text != '') OR (transcript IS NOT NULL AND transcript != ''))
+              AND msg_id NOT IN (
+                  SELECT msg_id FROM message_embeddings
+                  WHERE chat_id = ? AND model = ?
+              )
+            ORDER BY msg_id ASC
+        """
+        cur = await self._conn.execute(sql, (chat_id, chat_id, model))
+        rows = await cur.fetchall()
+        await cur.close()
+        return [int(r["msg_id"]) for r in rows]
+
+    async def put_embeddings(
+        self,
+        rows: list[tuple[int, int, str, bytes]],
+    ) -> int:
+        """Bulk-insert `(chat_id, msg_id, model, vector_bytes)` rows.
+
+        `INSERT OR REPLACE` so re-embedding the same message under the same
+        model overwrites — useful when an upstream change (transcript
+        added) means the body changed.
+        """
+        if not rows:
+            return 0
+        now = _utcnow()
+        await self._conn.executemany(
+            """
+            INSERT OR REPLACE INTO message_embeddings(chat_id, msg_id, model, vector, created_at)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            [(*r, now) for r in rows],
+        )
+        await self._conn.commit()
+        return len(rows)
+
+    async def get_embeddings(
+        self,
+        chat_ids: list[int],
+        model: str,
+    ) -> list[tuple[int, int, bytes]]:
+        """Return `(chat_id, msg_id, vector_bytes)` for the scoped chats + model."""
+        if not chat_ids:
+            return []
+        placeholders = ",".join("?" for _ in chat_ids)
+        sql = (
+            f"SELECT chat_id, msg_id, vector FROM message_embeddings "
+            f"WHERE model = ? AND chat_id IN ({placeholders})"
+        )
+        cur = await self._conn.execute(sql, (model, *chat_ids))
+        rows = await cur.fetchall()
+        await cur.close()
+        return [(int(r["chat_id"]), int(r["msg_id"]), bytes(r["vector"])) for r in rows]
+
     # ------------------------------------------------------------- analysis
 
     async def cache_get(self, batch_hash: str) -> dict[str, Any] | None:
@@ -1126,6 +1294,42 @@ class Repo:
             sql += " AND created_at >= ?"
             args.append(since.isoformat())
         sql += " GROUP BY bucket ORDER BY cost_usd DESC"
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def cache_effectiveness(
+        self,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-(chat, preset) cache hit-rate over `usage_log` rows of kind='chat'.
+
+        Hit-rate uses the prompt-cache-tokens / prompt-tokens ratio (server-
+        side OpenAI cache), not the analysis_cache table — that's the bigger
+        cost saver in practice. `analysis_cache` itself is invisible to the
+        usage_log because zero-cost cache hits aren't logged.
+
+        Returns rows sorted by total_calls descending so the biggest spenders
+        bubble up. Empty rows (no usage logged) → empty list.
+        """
+        sql = """
+            SELECT
+                COALESCE(json_extract(context, '$.chat_id'), 'unknown') AS chat_id,
+                COALESCE(json_extract(context, '$.preset'), 'unknown') AS preset,
+                COUNT(*) AS total_calls,
+                SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END) AS hit_calls,
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                COALESCE(SUM(cost_usd), 0) AS cost_usd
+            FROM usage_log
+            WHERE kind = 'chat'
+        """
+        args: list[Any] = []
+        if since is not None:
+            sql += " AND created_at >= ?"
+            args.append(since.isoformat())
+        sql += " GROUP BY chat_id, preset ORDER BY total_calls DESC"
         cur = await self._conn.execute(sql, args)
         rows = await cur.fetchall()
         await cur.close()

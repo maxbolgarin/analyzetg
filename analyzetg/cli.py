@@ -433,6 +433,59 @@ def analyze(
             "Markdown-friendly: rendered as monospace by Telegram."
         ),
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Resolve the chat, run backfill, count messages, print the cost estimate, "
+            "and exit before any LLM call. Useful before --enrich-all / --full-history."
+        ),
+    ),
+    cite_context: int = typer.Option(
+        0,
+        "--cite-context",
+        help=(
+            "After analysis, append a `## Источники` section to the saved report "
+            "with N messages of context around every cited [#msg_id](url). "
+            "0 (default) = off; 3 = three before + three after. Capped at 30 citations."
+        ),
+    ),
+    self_check: bool = typer.Option(
+        False,
+        "--self-check",
+        help=(
+            "After analysis, run a cheap-model audit pass that lists unsupported "
+            "claims under `## Verification`. Adds ~10% to cost. Useful when you'll "
+            "act on the report without re-reading the source messages."
+        ),
+    ),
+    by: str | None = typer.Option(
+        None,
+        "--by",
+        help=(
+            "Filter to messages from one sender. Substring match on sender_name "
+            "(case-insensitive) or numeric sender_id. Composes with all other filters."
+        ),
+    ),
+    post_to: str | None = typer.Option(
+        None,
+        "--post-to",
+        help=(
+            "After analysis, post the result to this chat (any chat ref: @user, "
+            "t.me link, fuzzy title, numeric id, or 'me' for Saved Messages). "
+            "Generalization of --post-saved (which is now sugar for --post-to=me)."
+        ),
+    ),
+    repeat_last: bool = typer.Option(
+        False,
+        "--repeat-last",
+        help=(
+            "Look up the saved flags from the most recent successful analyze on "
+            "<ref> and re-use them. Explicit CLI flags on this run still win "
+            "(e.g. `--repeat-last --no-cache` to bust the cache while keeping "
+            "everything else)."
+        ),
+    ),
 ) -> None:
     """Analyze a chat. Default window = messages since your Telegram read marker.
 
@@ -475,6 +528,12 @@ def analyze(
             folder=folder,
             max_cost=max_cost,
             post_saved=post_saved,
+            dry_run=dry_run,
+            cite_context=cite_context,
+            self_check=self_check,
+            by=by,
+            post_to=post_to,
+            repeat_last=repeat_last,
         )
     )
 
@@ -582,6 +641,61 @@ async def _cache_purge(
         if vacuum:
             reclaimed = await repo.vacuum()
             console.print(f"[green]Vacuumed[/] DB — reclaimed {_fmt_bytes(reclaimed)}.")
+
+
+@cache_app.command("effectiveness")
+def cache_effectiveness_cmd(
+    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
+) -> None:
+    """Per-(chat, preset) OpenAI prompt-cache hit rate from usage_log.
+
+    Surfaces "what's actually saving money": the server-side prompt cache
+    only kicks in when the stable prefix (system + static_context) is
+    1024+ tokens AND byte-identical across calls. Low hit rate on a
+    high-volume row → check the prompt for entropy in its prefix.
+    """
+    _run(_cache_effectiveness(since))
+
+
+async def _cache_effectiveness(since: str | None) -> None:
+    from rich.table import Table
+
+    settings = get_settings()
+    since_dt = parse_ymd(since) if since else None
+    async with open_repo(settings.storage.data_path) as repo:
+        rows = await repo.cache_effectiveness(since=since_dt)
+    if not rows:
+        console.print("[yellow]No usage logged yet[/] — run an analyze first.")
+        return
+    t = Table(title=f"Cache effectiveness{' since ' + since if since else ''}")
+    t.add_column("chat_id")
+    t.add_column("preset")
+    t.add_column("calls", justify="right")
+    t.add_column("hit calls", justify="right")
+    t.add_column("hit rate", justify="right")
+    t.add_column("prompt tok", justify="right")
+    t.add_column("cached tok", justify="right")
+    t.add_column("cost $", justify="right")
+    for r in rows:
+        prompt_tok = int(r["prompt_tokens"] or 0)
+        cached_tok = int(r["cached_tokens"] or 0)
+        rate_pct = (100.0 * cached_tok / prompt_tok) if prompt_tok else 0.0
+        t.add_row(
+            str(r["chat_id"]),
+            str(r["preset"]),
+            str(r["total_calls"]),
+            str(r["hit_calls"]),
+            f"{rate_pct:.1f}%",
+            f"{prompt_tok:,}",
+            f"{cached_tok:,}",
+            f"${float(r['cost_usd']):.4f}",
+        )
+    console.print(t)
+    console.print(
+        "[dim]Hit rate counts OpenAI server-side prompt-cache reuse "
+        "(`cached_tokens / prompt_tokens`). Local analysis_cache hits aren't "
+        "logged (they cost zero) — see `atg cache stats` for that table.[/]"
+    )
 
 
 @cache_app.command("stats")
@@ -882,6 +996,48 @@ def ask(
             "max msg_id) before retrieval. Requires --chat or --folder."
         ),
     ),
+    show_retrieved: bool = typer.Option(
+        False,
+        "--show-retrieved",
+        help="Print the retrieved messages with their scores before the LLM call (debug).",
+    ),
+    rerank: bool | None = typer.Option(
+        None,
+        "--rerank/--no-rerank",
+        help=(
+            "Two-stage retrieval: keyword pool → cheap-model rerank → flagship answer. "
+            "Default from [ask].rerank_enabled in config (true). Saves ~5-10× per question "
+            "on media-heavy chats by feeding the flagship a smaller, better-ranked set."
+        ),
+    ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        "-i",
+        help=(
+            "After the first answer, drop into a follow-up prompt. Each follow-up "
+            "re-retrieves under the same scope and includes prior turns as context "
+            "(so 'tell me more' just works). Blank line or Ctrl-D exits."
+        ),
+    ),
+    semantic: bool = typer.Option(
+        False,
+        "--semantic",
+        help=(
+            "Use OpenAI-embeddings retrieval (cosine over a precomputed index) "
+            "instead of keyword LIKE. Run `--build-index` first per chat/folder. "
+            "Catches paraphrase ('the DB' → migration discussion) that keyword misses."
+        ),
+    ),
+    build_index: bool = typer.Option(
+        False,
+        "--build-index",
+        help=(
+            "Embed every not-yet-indexed message in the scoped chat(s) and exit. "
+            "Idempotent — re-runs only fill gaps. Required once per chat before "
+            "`--semantic`. Cheap: ~$0.02 per 1M tokens at text-embedding-3-small."
+        ),
+    ),
     max_cost: float | None = typer.Option(
         None,
         "--max-cost",
@@ -927,10 +1083,215 @@ def ask(
             output=output,
             console_out=console_out,
             refresh=refresh,
+            show_retrieved=show_retrieved,
+            rerank=rerank,
+            interactive=interactive,
+            semantic=semantic,
+            build_index=build_index,
             max_cost=max_cost,
             yes=yes,
         )
     )
+
+
+reports_app = typer.Typer(help="Manage saved reports/", no_args_is_help=True)
+app.add_typer(reports_app, name="reports", rich_help_panel=PANEL_MAINT)
+
+
+@reports_app.command("prune")
+def reports_prune(
+    older_than: str = typer.Option("30d", "--older-than", help="Nd / Nw"),
+    root: Path = typer.Option(Path("reports"), "--root", help="Reports root directory (default: ./reports)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be pruned, take no action."),
+    purge: bool = typer.Option(
+        False,
+        "--purge",
+        help="Hard-delete instead of moving to reports/.trash/<ts>/. Irreversible.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Move (or delete) report files older than --older-than to reports/.trash/.
+
+    Default behavior: trash them by moving to `reports/.trash/<ts>/`. The
+    `.trash/` subtree is itself ignored when scanning. Run with `--purge`
+    to hard-delete (after confirmation, unless `--yes`).
+    """
+    _run(_reports_prune(older_than, root, dry_run, purge, yes))
+
+
+async def _reports_prune(
+    older_than: str,
+    root: Path,
+    dry_run: bool,
+    purge: bool,
+    yes: bool,
+) -> None:
+    import shutil
+    import time
+
+    days = _parse_duration_days(older_than)
+    if days <= 0:
+        console.print("[yellow]Skipped[/] — --older-than must be > 0 days.")
+        return
+    if not root.exists():
+        console.print(f"[yellow]No reports root[/] at {root} — nothing to prune.")
+        return
+    cutoff = time.time() - days * 86400
+    trash_root = root / ".trash"
+    candidates: list[Path] = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        # Don't prune the trash, the slash, or hidden dotfiles inside the
+        # tree (e.g. .gitkeep — the user may want those preserved).
+        if trash_root in p.parents or p.name.startswith("."):
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                candidates.append(p)
+        except OSError:
+            continue
+    if not candidates:
+        console.print(f"[dim]Nothing older than {days} days under {root}.[/]")
+        return
+    total_bytes = sum(p.stat().st_size for p in candidates if p.exists())
+    verb = (
+        "Would delete"
+        if dry_run and purge
+        else ("Would trash" if dry_run else ("Delete" if purge else "Trash"))
+    )
+    console.print(
+        f"[bold]{verb}[/] {len(candidates)} file(s) ({_fmt_bytes(total_bytes)}) "
+        f"older than {days} days under {root}."
+    )
+    for p in candidates[:20]:
+        console.print(f"  {p.relative_to(root)}")
+    if len(candidates) > 20:
+        console.print(f"  [dim]… and {len(candidates) - 20} more[/]")
+    if dry_run:
+        return
+    if not yes and not typer.confirm("Proceed?", default=False):
+        console.print("[yellow]Aborted.[/]")
+        return
+    if purge:
+        for p in candidates:
+            try:
+                p.unlink()
+            except OSError as e:
+                console.print(f"[red]Failed to delete[/] {p}: {e}")
+        console.print(f"[green]Deleted[/] {len(candidates)} file(s).")
+        return
+    # Trash mode: move to reports/.trash/<ts>/, preserving relative subtree.
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    bin_dir = trash_root / stamp
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for p in candidates:
+        rel = p.relative_to(root)
+        target = bin_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(p), str(target))
+        except OSError as e:
+            console.print(f"[red]Failed to move[/] {p}: {e}")
+    console.print(f"[green]Trashed[/] {len(candidates)} file(s) → {bin_dir}")
+
+
+@app.command(
+    rich_help_panel=PANEL_MAINT,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def watch(
+    ctx: typer.Context,
+    interval: str = typer.Option(
+        "1h",
+        "--interval",
+        help="How often to fire the inner command. Accepts Nm / Nh / Nd / Nw.",
+    ),
+    max_runs: int | None = typer.Option(
+        None,
+        "--max-runs",
+        help="Stop after N successful runs (handy for testing). None = run forever.",
+    ),
+) -> None:
+    """Run an inner `atg` command on a fixed cadence.
+
+    `atg watch --interval 1h analyze --folder Work --post-saved` walks the
+    wall clock: runs the inner command, sleeps for the interval, repeats.
+    Foreground only — run it under `tmux` / `nohup` if you need
+    persistence. Ctrl-C exits cleanly between iterations.
+
+    The inner command runs in a fresh subprocess each time (so an internal
+    crash doesn't poison subsequent runs); exit codes are surfaced but
+    don't abort the loop unless `--max-runs` is hit.
+    """
+    inner = ctx.args
+    if not inner:
+        console.print("[red]Pass an inner command, e.g.[/] atg watch --interval 1h analyze --folder Work")
+        raise typer.Exit(2)
+    _run(_watch_loop(interval, max_runs, inner))
+
+
+async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> None:
+    import asyncio as _asyncio
+    import shlex
+    import subprocess
+    import sys as _sys
+
+    seconds = _parse_duration_seconds(interval)
+    if seconds <= 0:
+        console.print("[red]--interval must be > 0.[/]")
+        raise typer.Exit(2)
+
+    runs = 0
+    cmd = ["atg", *inner]
+    pretty = " ".join(shlex.quote(c) for c in cmd)
+    console.print(f"[bold cyan]Watching[/] [dim]every {interval}: {pretty}[/]")
+    # Single Ctrl-C handler covers both phases (subprocess.run / sleep).
+    # subprocess.run inherits stdin so child sees the SIGINT first; if
+    # the child handles it cleanly, control returns here and we just
+    # continue. If the user mashes Ctrl-C again during sleep, it
+    # propagates as KeyboardInterrupt and we exit.
+    try:
+        while True:
+            runs += 1
+            console.print(f"\n[bold]── Run {runs}[/] [dim]{datetime.now().isoformat(timespec='seconds')}[/]")
+            try:
+                # subprocess.run blocks the event loop; that's fine — we're
+                # not racing anything here, and the inner command may itself
+                # spin up its own asyncio loop.
+                proc = subprocess.run(cmd, check=False)
+                if proc.returncode != 0:
+                    console.print(f"[yellow]Inner exited with code {proc.returncode}[/]")
+            except FileNotFoundError:
+                console.print(f"[red]`{cmd[0]}` not on PATH.[/]")
+                raise typer.Exit(2) from None
+            if max_runs is not None and runs >= max_runs:
+                console.print(f"[dim]Hit --max-runs {max_runs}; exiting.[/]")
+                return
+            console.print(f"[dim]Sleeping {interval}...[/]")
+            await _asyncio.sleep(seconds)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted; exiting.[/]")
+    finally:
+        _sys.stdout.flush()
+
+
+def _parse_duration_seconds(s: str) -> int:
+    """Parse `45s`/`5m`/`2h`/`3d`/`1w` into seconds. Raises on garbage."""
+    s = s.strip().lower()
+    if not s:
+        return 0
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    if s[-1] in units:
+        try:
+            return int(s[:-1]) * units[s[-1]]
+        except ValueError as e:
+            raise typer.BadParameter(f"Invalid duration: {s!r}") from e
+    # Bare integer = seconds.
+    try:
+        return int(s)
+    except ValueError as e:
+        raise typer.BadParameter(f"Invalid duration: {s!r}") from e
 
 
 @app.command(rich_help_panel=PANEL_MAINT)

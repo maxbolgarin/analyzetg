@@ -166,5 +166,36 @@ async def enrich_messages(
                 )
                 stats.record_error("link")
 
-    await asyncio.gather(*(handle(m) for m in msgs))
+    # Wrap the gather in a Rich Progress bar so a 50-image enrich pass
+    # shows obvious advancement instead of dead silence for ~30 seconds.
+    # Each handler advances the bar in its own try/finally below; we
+    # gather once with the progress active.
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]{task.description}[/]"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        transient=False,
+        console=Console(),
+    ) as progress:
+        task_id = progress.add_task("Enriching media", total=len(msgs))
+
+        async def handle_with_progress(m: Message) -> None:
+            try:
+                await handle(m)
+            finally:
+                progress.advance(task_id)
+
+        await asyncio.gather(*(handle_with_progress(m) for m in msgs))
     return stats
