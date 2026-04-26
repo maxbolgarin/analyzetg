@@ -28,6 +28,8 @@ from analyzetg.ask.retrieval import retrieve_messages, tokenize_question
 from analyzetg.config import get_settings
 from analyzetg.core.paths import compute_window
 from analyzetg.db.repo import open_repo
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.folders import list_folders, resolve_folder
 from analyzetg.tg.resolver import resolve as resolve_ref
@@ -36,19 +38,35 @@ from analyzetg.util.logging import get_logger
 console = Console()
 log = get_logger(__name__)
 
-# System prompt for the answer call. Russian since most users in this repo
-# work with Russian-speaking chats; the model will switch to the question's
-# language anyway.
-_SYSTEM_PROMPT = (
-    "Ты отвечаешь на вопросы пользователя по его архиву Telegram-сообщений. "
-    "Опирайся ИСКЛЮЧИТЕЛЬНО на приведённые сообщения. Не выдумывай фактов — "
-    "если ответа нет в данных, так и скажи. "
-    "Каждое утверждение цитируй markdown-ссылкой [#<msg_id>](<link>), где "
-    "link построен подстановкой msg_id в шаблон из строки "
-    "'Ссылка на сообщение:' соответствующей группы сообщений. Если шаблона "
-    "для группы нет, пиши просто #<msg_id>. Отвечай на языке вопроса, "
-    "кратко, по существу."
-)
+# Per-language system prompt for the answer call. Picked at runtime from
+# `settings.locale.language` (or the `--language` flag override). The model
+# can also switch language to match the question if it differs.
+_SYSTEM_PROMPT: dict[str, str] = {
+    "en": (
+        "You answer the user's questions over their Telegram message archive. "
+        "Rely EXCLUSIVELY on the provided messages. Do not invent facts — if the "
+        "answer isn't in the data, say so. "
+        "Cite every statement with a markdown link [#<msg_id>](<link>), where "
+        "link is built by substituting msg_id into the template from the "
+        "'Message link:' line of the corresponding chat group. If the template "
+        "is missing for a group, write just #<msg_id>. Answer in the question's "
+        "language, concisely and to the point."
+    ),
+    "ru": (
+        "Ты отвечаешь на вопросы пользователя по его архиву Telegram-сообщений. "
+        "Опирайся ИСКЛЮЧИТЕЛЬНО на приведённые сообщения. Не выдумывай фактов — "
+        "если ответа нет в данных, так и скажи. "
+        "Каждое утверждение цитируй markdown-ссылкой [#<msg_id>](<link>), где "
+        "link построен подстановкой msg_id в шаблон из строки "
+        "'Ссылка на сообщение:' соответствующей группы сообщений. Если шаблона "
+        "для группы нет, пиши просто #<msg_id>. Отвечай на языке вопроса, "
+        "кратко, по существу."
+    ),
+}
+
+
+def _resolve_system_prompt(language: str) -> str:
+    return _SYSTEM_PROMPT.get(language, _SYSTEM_PROMPT["en"])
 
 
 async def cmd_ask(
@@ -73,6 +91,8 @@ async def cmd_ask(
     interactive: bool = False,
     with_comments: bool = False,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
 
@@ -88,7 +108,7 @@ async def cmd_ask(
     # `--build-index` doesn't need a question; everything else does.
     if not build_index:
         if not question.strip():
-            console.print("[red]Empty question.[/]")
+            console.print(f"[red]{_t('ask_empty_question')}[/]")
             raise typer.Exit(2)
         if not semantic:
             tokens = tokenize_question(question)
@@ -111,6 +131,10 @@ async def cmd_ask(
         )
 
     settings = get_settings()
+    effective_language = (language or settings.locale.language or "en").lower()
+    effective_content_language = (
+        content_language or settings.locale.content_language or effective_language
+    ).lower()
     since_dt, until_dt = compute_window(since, until, last_days)
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
@@ -118,7 +142,7 @@ async def cmd_ask(
         chat_ids: list[int] | None = None
         chat_titles: dict[int, str] = {}
         if chat:
-            console.print(f"[dim]→ Resolving[/] {chat}")
+            console.print(f"[dim]{_tf('resolving', ref=chat)}[/]")
             resolved = await resolve_ref(client, repo, chat)
             chat_ids = [resolved.chat_id]
             chat_titles[resolved.chat_id] = resolved.title or str(resolved.chat_id)
@@ -161,7 +185,7 @@ async def cmd_ask(
             matched = resolve_folder(folder, folders)
             if matched is None:
                 titles = ", ".join(f"'{f.title}'" for f in folders) or "(none)"
-                console.print(f"[red]No folder matching[/] '{folder}'. Available: {titles}")
+                console.print(f"[red]{_tf('no_folder_matching', folder=folder, titles=titles)}[/]")
                 raise typer.Exit(2)
             chat_ids = list(matched.include_chat_ids)
             if not chat_ids:
@@ -170,7 +194,10 @@ async def cmd_ask(
                     "(rule-based folders aren't expanded)."
                 )
                 raise typer.Exit(2)
-            console.print(f"[dim]→ Folder[/] [bold]{matched.title}[/] — {len(chat_ids)} chat(s)")
+            console.print(
+                f"[dim]{_t('ask_folder_label')}[/] [bold]{matched.title}[/] — "
+                f"{_tf('ask_n_chats', n=len(chat_ids))}"
+            )
         # else: chat_ids stays None → search all synced chats.
 
         if refresh and chat_ids:
@@ -195,9 +222,9 @@ async def cmd_ask(
                 model=embed_model,
             )
             if written:
-                console.print(f"[green]Indexed[/] {written} new message(s).")
+                console.print(f"[green]{_tf('ask_indexed_n', n=written)}[/]")
             else:
-                console.print("[dim]Nothing new to index — already up to date.[/]")
+                console.print(f"[dim]{_t('ask_index_up_to_date')}[/]")
             return
 
         # Rerank decision: explicit CLI flag wins, else config default.
@@ -248,6 +275,8 @@ async def cmd_ask(
                 max_cost=max_cost,
                 yes=yes,
                 fallback_pool=prior_pool if is_followup else None,
+                language=effective_language,
+                content_language=effective_content_language,
             )
 
         # First turn — same shape as before --interactive existed.
@@ -315,6 +344,8 @@ async def _run_single_turn(
     max_cost: float | None,
     yes: bool,
     fallback_pool: list[tuple] | None = None,
+    language: str = "en",
+    content_language: str = "en",
 ) -> tuple[str, list[tuple]]:
     """Retrieve → rerank → format → preview → answer for one question.
 
@@ -416,7 +447,7 @@ async def _run_single_turn(
         if fallback_pool:
             scored = list(fallback_pool)
             msgs = [m for m, _ in scored]
-            console.print("[dim]→ No new matches; reusing prior context.[/]")
+            console.print(f"[dim]{_t('ask_no_matches_reusing')}[/]")
         else:
             console.print(
                 "[yellow]No matching messages.[/] Try `atg sync <chat>` first if "
@@ -443,23 +474,32 @@ async def _run_single_turn(
             thread_id=thread,
         )
 
+    # `content_language` drives LLM-facing strings: system prompt,
+    # user-template labels (Question:/Context:/Answer:), chat-group
+    # header `=== Chat: ... ===`, and the formatter labels in the
+    # context block. `language` is used only for what the user sees
+    # rendered by `atg` (cost preview, status messages — already English
+    # in the source).
+    llm_lang = content_language
     if chat_ids is not None and len(chat_ids) == 1:
         single_chat_id = chat_ids[0]
-        formatted = format_messages(msgs, link_template=chat_links.get(single_chat_id))
+        formatted = format_messages(msgs, link_template=chat_links.get(single_chat_id), language=llm_lang)
         scope_label = chat_titles[single_chat_id]
     else:
-        formatted = _format_multi_chat(msgs, chat_titles, chat_links)
+        formatted = _format_multi_chat(msgs, chat_titles, chat_links, language=llm_lang)
         scope_label = f"folder '{folder}'" if folder else "all synced chats"
 
     user_text = (
-        f"Вопрос: {question.strip()}\n\n"
-        f"Контекст ({len(msgs)} сообщ. из {scope_label}):\n\n"
+        f"{_t('ask_question', llm_lang)}: {question.strip()}\n\n"
+        f"{_t('ask_context', llm_lang)} ({len(msgs)} {_t('ask_msgs_short', llm_lang)} "
+        f"{_t('ask_from_scope', llm_lang)} {scope_label}):\n\n"
         f"{formatted}\n\n"
-        "Ответ (с цитатами):"
+        f"{_t('ask_answer_with_citations', llm_lang)}"
     )
 
+    system_prompt = _resolve_system_prompt(llm_lang)
     # Cost preview against the *full* messages list (system + history + user).
-    messages = _build_history_messages(_SYSTEM_PROMPT, history, user_text)
+    messages = _build_history_messages(system_prompt, history, user_text)
     prompt_tokens = sum(count_tokens(m["content"], used_model) for m in messages)
     est_cost = chat_cost(used_model, prompt_tokens, 0, 2000, settings=settings)
     if est_cost is not None:
@@ -468,17 +508,23 @@ async def _run_single_turn(
             f"({prompt_tokens:,} prompt tokens × {used_model}; output capped at 2000)"
         )
         if max_cost is not None and est_cost > max_cost:
-            console.print(f"[bold yellow]⚠ Estimated ${est_cost:.4f} > --max-cost ${max_cost:.4f}[/]")
+            console.print(
+                "[bold yellow]"
+                + _tf("max_cost_exceeded", lo=est_cost, hi=est_cost, max=max_cost, n=len(msgs), preset="ask")
+                + "[/]"
+            )
             if yes:
-                console.print("[red]Aborting (--yes set, no confirmation possible).[/]")
+                console.print(f"[red]{_t('aborting_yes_set')}[/]")
                 raise typer.Exit(2)
-            if not typer.confirm("Run anyway?", default=False):
-                console.print("[yellow]Aborted.[/]")
+            if not typer.confirm(_t("run_anyway_q"), default=False):
+                console.print(f"[yellow]{_t('aborted')}[/]")
                 raise typer.Exit(0)
     elif max_cost is not None:
-        console.print(f"[dim]→ --max-cost not enforced: pricing missing for {used_model}.[/]")
+        console.print(f"[dim]{_t('max_cost_not_enforced')}[/]")
 
-    console.print(f"[dim]→ Asking[/] [bold]{used_model}[/] over {len(msgs)} message(s)...")
+    console.print(
+        f"[dim]{_t('ask_asking_label')}[/] [bold]{used_model}[/] {_tf('ask_over_n_msgs', n=len(msgs))}"
+    )
     res = await chat_complete(
         oai,
         repo=repo,
@@ -494,7 +540,7 @@ async def _run_single_turn(
     )
     answer = (res.text or "").strip()
     if not answer:
-        console.print("[red]Model returned empty answer.[/]")
+        console.print(f"[red]{_t('ask_model_empty')}[/]")
         raise typer.Exit(1)
 
     body = (
@@ -513,7 +559,7 @@ async def _run_single_turn(
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(body, encoding="utf-8")
-        console.print(f"[green]Saved[/] {output}")
+        console.print(f"[green]{_tf('saved_to_path', path=output)}[/]")
     return answer, scored
 
 
@@ -592,7 +638,7 @@ async def _refresh_chats(
     from analyzetg.tg.sync import backfill
 
     sem = _asyncio.Semaphore(3)
-    console.print(f"[dim]→ Refreshing {len(chat_ids)} chat(s) from Telegram...[/]")
+    console.print(f"[dim]{_tf('ask_refreshing', n=len(chat_ids))}[/]")
 
     async def _one(chat_id: int) -> tuple[int, int | None, str | None]:
         async with sem:
@@ -620,33 +666,36 @@ async def _refresh_chats(
     total_new = sum(n for _, n, _ in results if n)
     failed = [(cid, err) for cid, n, err in results if err]
     if total_new:
-        console.print(f"[green]Refreshed:[/] {total_new} new message(s) across {len(chat_ids)} chat(s).")
+        console.print(f"[green]{_tf('ask_refreshed_total', total=total_new, n=len(chat_ids))}[/]")
     else:
-        console.print("[dim]Refreshed: no new messages.[/]")
+        console.print(f"[dim]{_t('ask_refreshed_none')}[/]")
     if failed:
-        console.print(f"[yellow]⚠ {len(failed)} chat(s) failed to refresh; falling back to local data.[/]")
+        console.print(f"[yellow]{_tf('ask_refresh_failed', n=len(failed))}[/]")
 
 
 def _format_multi_chat(
     msgs,
     chat_titles: dict[int, str],
     chat_links: dict[int, str | None],
+    *,
+    language: str = "en",
 ) -> str:
     """Group messages by chat and render with a chat-title separator.
 
     Mirrors the topic-grouped format the analyzer uses for flat-forum
     runs — keeps each chat's conversation contiguous so the LLM can
     answer cross-chat questions without losing thread. Each group gets
-    its own `Ссылка на сообщение: …` template so citations like
+    its own message-link template so citations like
     `[#11537](https://t.me/...)` resolve correctly regardless of which
     chat the msg_id came from.
     """
     from itertools import groupby
 
+    chat_lbl = _t("chat_label", language)
     chunks: list[str] = []
     msgs_sorted = sorted(msgs, key=lambda m: (m.chat_id, m.date or datetime.min, m.msg_id))
     for chat_id, group in groupby(msgs_sorted, key=lambda m: m.chat_id):
         title = chat_titles.get(chat_id, str(chat_id))
-        chunks.append(f"=== Чат: {title} (id={chat_id}) ===")
-        chunks.append(format_messages(list(group), link_template=chat_links.get(chat_id)))
+        chunks.append(f"=== {chat_lbl}: {title} (id={chat_id}) ===")
+        chunks.append(format_messages(list(group), link_template=chat_links.get(chat_id), language=language))
     return "\n\n".join(chunks)

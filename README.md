@@ -539,19 +539,86 @@ What kind of analysis do you want? Pick a preset with `--preset`:
 | `links` | External URLs grouped by topic (auto-enables link enrichment). |
 | `reactions` | Top-reacted messages grouped by reaction kind (👍 / 🔥 / 🤔 / 👎). |
 | `single_msg` | Picked automatically when `<ref>` is a `t.me/.../<msg_id>` link. |
+| `multichat` | Cross-chat synthesis. With no `<ref>` (batch / folder), aggregates messages across chats into ONE report instead of per-chat. |
 | `custom --prompt-file path.md` | Your own one-off prompt; same frontmatter format as the bundled ones. |
 
-Prompts live in [`presets/*.md`](presets/) — edit them, add your own,
-commit them to your fork. Bump `prompt_version` after changing the
-prompt to invalidate the cache. Optional frontmatter `enrich: [link,
-image]` declares which media enrichments this preset assumes (unioned
-with `--enrich`).
+Prompts live in [`presets/<lang>/*.md`](presets/) — `presets/en/` for
+English, `presets/ru/` for Russian. Each language directory is
+autonomous: a language can have any subset of presets, and the loader
+does NOT fall back across languages. Edit them, add your own, commit
+them to your fork. Bump `prompt_version` after changing the body to
+invalidate the cache. Optional frontmatter `enrich: [link, image]`
+declares which media enrichments this preset assumes (unioned with
+`--enrich`); `description:` is shown by the wizard's preset picker.
 
 **Reaction signals.** Messages whose reaction count meets
 `[analyze] high_impact_reactions` (default 3) are tagged
 `[high-impact]` in the LLM prompt. Presets that care about prominence
 (`highlights`, `reactions`, `summary`) lean on the marker; others
 ignore it.
+
+---
+
+## Language
+
+Two independent settings let you mix and match UI and chat content language:
+
+- `[locale] language` — **UI / saved-report headings**. Wizard, the
+  `## Sources` heading appended by `--cite-context`, the `## Verification`
+  heading from `--self-check`, the saved report's metadata block, the
+  truncation banner. Defaults to `"en"`.
+- `[locale] content_language` — **prompts / LLM input**. Picks which
+  `presets/<lang>/` tree the loader reads, the image/link enricher
+  prompt language, the ask system prompt, the formatter labels going
+  into the LLM. Defaults to follow `language`.
+
+The split exists because the natural use case is asymmetric: an English
+speaker analyzing a Russian Telegram chat wants their wizard / saved
+report metadata in English, but the LLM should still see Russian
+prompts and produce Russian output (so the analysis is idiomatic).
+
+```toml
+# config.toml
+[locale]
+language = "en"             # UI + report headings. Wizard, ## Sources, etc.
+content_language = "ru"     # Prompts the LLM gets + the language it answers in.
+                            # Empty = follow `language`.
+```
+
+Per-run override:
+
+```bash
+# English UI, Russian prompts → English headings, Russian analysis body
+atg analyze @somechat --language en --content-language ru
+atg ask "что обсуждали?" --language en --content-language ru
+```
+
+Whisper transcription has its own knob (`[openai] audio_language`) —
+empty means autodetect, decoupled from both UI and content language.
+
+### Persisting preferences with `atg settings`
+
+Edit your locale prefs without touching `config.toml`:
+
+```bash
+atg settings                              # interactive editor
+atg settings show                         # current effective values + DB overrides
+atg settings set locale.language en
+atg settings set locale.content_language ru
+atg settings unset locale.content_language  # drop a single override
+atg settings reset                         # drop all DB overrides
+```
+
+Saved to `storage/data.sqlite` in the `app_settings` table. Applied on
+every `atg` invocation; explicit `--language` / `--content-language`
+flags still win.
+
+### Migration note
+
+When you upgrade from a pre-locale build, your existing config has no
+`[locale]` block and defaults to English. To restore Russian as before:
+either run `atg settings set locale.language ru` (one-time), or add
+`[locale] language = "ru"` to your `config.toml`.
 
 ---
 
@@ -784,7 +851,11 @@ Most-tuned settings:
 [openai]
 chat_model_default = "gpt-5.4-mini"      # final / single-chunk model
 filter_model_default = "gpt-5.4-nano"    # map phase + cheap rerank + self-check
-audio_language = "ru"                    # transcription hint
+# audio_language = ""                    # Whisper hint; empty = autodetect
+
+[locale]
+# language = "en"                        # "en" (default) / "ru" / …
+# content_language = ""                  # follow `language` unless set explicitly
 
 [analyze]
 min_msg_chars = 3                        # filter: drop messages shorter than N chars

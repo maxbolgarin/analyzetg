@@ -1,6 +1,7 @@
 ---
 name: quotes
 prompt_version: v2
+description: Памятные цитаты дословно с автором и ссылкой
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

@@ -964,6 +964,60 @@ class Repo:
         args["__updated_at"] = row["updated_at"]
         return args
 
+    # ------------------------------------------------------- app_settings
+
+    async def get_app_setting(self, key: str) -> str | None:
+        """Return the saved override for `key`, or None if unset.
+
+        `None` means "no row" — `apply_db_locale_overrides` distinguishes
+        this from an empty-string row, which means "explicitly cleared".
+        """
+        cur = await self._conn.execute("SELECT value FROM app_settings WHERE key=?", (key,))
+        row = await cur.fetchone()
+        await cur.close()
+        if row is None:
+            return None
+        return row["value"]
+
+    async def set_app_setting(self, key: str, value: str) -> None:
+        """Upsert a setting override. `value=""` is allowed (means cleared)."""
+        await self._conn.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+            """,
+            (key, value, _utcnow()),
+        )
+        await self._conn.commit()
+
+    async def delete_app_setting(self, key: str) -> bool:
+        """Remove an override entirely so the next read falls back to config.
+
+        Returns True if a row was deleted.
+        """
+        cur = await self._conn.execute("DELETE FROM app_settings WHERE key=?", (key,))
+        await self._conn.commit()
+        deleted = cur.rowcount or 0
+        await cur.close()
+        return deleted > 0
+
+    async def get_all_app_settings(self) -> dict[str, str]:
+        """Return all saved overrides as a `{key: value}` dict."""
+        cur = await self._conn.execute("SELECT key, value FROM app_settings")
+        rows = await cur.fetchall()
+        await cur.close()
+        return {row["key"]: row["value"] for row in rows}
+
+    async def clear_all_app_settings(self) -> int:
+        """Remove every override. Returns the number of rows deleted."""
+        cur = await self._conn.execute("DELETE FROM app_settings")
+        await self._conn.commit()
+        deleted = cur.rowcount or 0
+        await cur.close()
+        return deleted
+
     # ------------------------------------------------------- embeddings
 
     async def msg_ids_missing_embedding(
@@ -1376,7 +1430,200 @@ class Repo:
 @asynccontextmanager
 async def open_repo(path: Path | str) -> AsyncIterator[Repo]:
     repo = await Repo.open(path)
+    # Apply any user-saved overrides from app_settings on top of the
+    # config.toml-driven settings singleton. Lets `atg settings` persist
+    # locale / audio-language preferences without touching config files.
+    await _apply_db_overrides(repo)
     try:
         yield repo
     finally:
         await repo.close()
+
+
+# Allow-list of `app_settings` keys that may overlay the config singleton.
+# Any other rows are stored but ignored — keeps the surface tight.
+#
+# To add a new key:
+#   1. Append it here.
+#   2. Add a branch in both `apply_db_overrides_sync` (sync, used at CLI
+#      bootstrap) and `_apply_db_overrides` (async, used per-`open_repo`).
+#      Mind the value type — bool / int / str — and any sentinel rules
+#      (e.g. empty string for "autodetect").
+#   3. Surface it in `analyzetg/settings/commands.py:_SETTING_DEFS` so
+#      the interactive editor can show + edit it.
+_OVERRIDE_KEYS = (
+    # Languages
+    "locale.language",
+    "locale.content_language",
+    "openai.audio_language",
+    # Models
+    "openai.chat_model_default",
+    "openai.filter_model_default",
+    "openai.audio_model_default",
+    "enrich.vision_model",
+    # Enrichment defaults (booleans persisted as "0"/"1")
+    "enrich.voice",
+    "enrich.videonote",
+    "enrich.video",
+    "enrich.image",
+    "enrich.doc",
+    "enrich.link",
+    # Analysis tuning
+    "analyze.high_impact_reactions",
+    "analyze.dedupe_forwards",
+    "analyze.min_msg_chars",
+)
+
+
+def _coerce_bool(raw: str) -> bool | None:
+    """Parse a stored bool override. None on garbage so the caller can
+    leave the existing value alone instead of silently flipping it."""
+    s = raw.strip().lower()
+    if s in {"1", "true", "yes", "on"}:
+        return True
+    if s in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _coerce_int(raw: str) -> int | None:
+    s = raw.strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _apply_one_override(settings, key: str, value: str) -> None:
+    """Apply a single (key, value) pair onto the live settings singleton.
+
+    Centralises the type coercion + setattr logic so the sync and async
+    overlay paths can share it instead of duplicating every branch.
+    Defensive: unknown / malformed values are silently ignored — the
+    config-default stays in effect.
+    """
+    # Languages — strings; empty string for content_language means
+    # "follow locale.language", for audio_language means "autodetect".
+    if key == "locale.language" and value:
+        settings.locale.language = value
+        return
+    if key == "locale.content_language":
+        settings.locale.content_language = value
+        return
+    if key == "openai.audio_language":
+        settings.openai.audio_language = value or None
+        return
+    # Model name overrides — empty value clears the override (rare).
+    if key in {
+        "openai.chat_model_default",
+        "openai.filter_model_default",
+        "openai.audio_model_default",
+        "enrich.vision_model",
+    }:
+        if not value:
+            return
+        section, attr = key.split(".", 1)
+        setattr(getattr(settings, section), attr, value)
+        return
+    # Enrich bool toggles.
+    if key in {
+        "enrich.voice",
+        "enrich.videonote",
+        "enrich.video",
+        "enrich.image",
+        "enrich.doc",
+        "enrich.link",
+    }:
+        b = _coerce_bool(value)
+        if b is None:
+            return
+        attr = key.split(".", 1)[1]
+        setattr(settings.enrich, attr, b)
+        return
+    # Analyze tuning.
+    if key == "analyze.high_impact_reactions":
+        n = _coerce_int(value)
+        if n is None or n < 0:
+            return
+        settings.analyze.high_impact_reactions = n
+        return
+    if key == "analyze.dedupe_forwards":
+        b = _coerce_bool(value)
+        if b is None:
+            return
+        settings.analyze.dedupe_forwards = b
+        return
+    if key == "analyze.min_msg_chars":
+        n = _coerce_int(value)
+        if n is None or n < 0:
+            return
+        settings.analyze.min_msg_chars = n
+        return
+
+
+def apply_db_overrides_sync(settings, db_path: Path | str | None = None) -> None:
+    """Sync flavour of `_apply_db_overrides` for CLI bootstrap.
+
+    Used in `cli.py` at module-import time (before Typer constructs the
+    app and reads `help=` strings) so `i18n.t()` lookups in help text
+    pick up the user's saved `locale.language`. Uses stdlib `sqlite3`
+    instead of aiosqlite — there's no event loop yet at import time.
+
+    Defensive on every error: a missing DB / unreadable file / missing
+    table all degrade to "leave settings as-is", so the CLI never fails
+    to construct just because the user hasn't run anything yet. Reads
+    only — never writes — so concurrent commands are safe.
+    """
+    import sqlite3
+
+    target = Path(db_path) if db_path is not None else Path(settings.storage.data_path)
+    if not target.is_file():
+        return
+    try:
+        # `mode=ro` opens read-only without creating the file; relative
+        # paths inside `file:` URIs don't resolve against cwd, so go
+        # absolute. We deliberately avoid `nolock=1` — sqlite refuses to
+        # combine it with WAL journals (the default in this DB), failing
+        # to open with "unable to open database file".
+        absolute = target.resolve()
+        conn = sqlite3.connect(f"file:{absolute}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return
+    try:
+        cur = conn.execute("SELECT key, value FROM app_settings")
+        rows = dict(cur.fetchall())
+    except sqlite3.Error:
+        # Table missing (pre-migration DB) or any other read failure.
+        conn.close()
+        return
+    conn.close()
+    if not rows:
+        return
+    for key in _OVERRIDE_KEYS:
+        if key in rows:
+            _apply_one_override(settings, key, rows[key])
+
+
+async def _apply_db_overrides(repo: Repo) -> None:
+    """Overlay saved `app_settings` onto the live `get_settings()` singleton.
+
+    Called once per `open_repo`. Idempotent: re-applying with the same DB
+    rows produces the same settings. Settings the user hasn't saved are
+    untouched (config.toml / defaults still win).
+    """
+    try:
+        rows = await repo.get_all_app_settings()
+    except Exception:
+        # Pre-migration DB or transient error — don't take down the whole
+        # CLI just because the overrides table isn't ready yet.
+        return
+    if not rows:
+        return
+    from analyzetg.config import get_settings
+
+    s = get_settings()
+    for key in _OVERRIDE_KEYS:
+        if key in rows:
+            _apply_one_override(s, key, rows[key])

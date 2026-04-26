@@ -1,6 +1,7 @@
 ---
 name: multichat
 prompt_version: v1
+description: Кросс-чат сводка: что стоящего было в каждом чате
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

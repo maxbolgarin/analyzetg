@@ -34,7 +34,11 @@ class OpenAICfg(_StrictCfg):
     chat_model_default: str = "gpt-5.4-mini"
     filter_model_default: str = "gpt-5.4-nano"
     audio_model_default: str = "gpt-4o-mini-transcribe"
-    audio_language: str = "ru"
+    # None / empty → Whisper autodetects per file. Set to an ISO code
+    # ("ru", "en", "de", …) when every audio file is the same language —
+    # gives slightly faster + more accurate transcription. Decoupled from
+    # `locale.language` (UI) so an English UI can still transcribe RU audio.
+    audio_language: str | None = None
     request_timeout_sec: int = 120
     max_retries: int = 5
     temperature: float = 0.2
@@ -130,6 +134,27 @@ class StorageCfg(_StrictCfg):
     data_path: Path = Path("storage/data.sqlite")
 
 
+class LocaleCfg(_StrictCfg):
+    """Output / UI / preset language.
+
+    `language` controls everything user-visible: wizard, formatter labels
+    in saved reports, citation/sources heading, ask labels, image+link
+    enricher prompts, and which preset directory the loader reads
+    (`presets/<language>/...`). The LLM produces analysis output in this
+    language because the loaded presets are natively in it.
+
+    `content_language` is the *chat content* language hint — only affects
+    cost estimation (`AVG_TOKENS_PER_MSG`) and an optional one-line model
+    hint about the chat language. Empty string means "follow `language`".
+
+    Both default to "en" so a fresh install has an English experience;
+    Russian users opt in via `language = "ru"` (or `--language ru`).
+    """
+
+    language: str = "en"
+    content_language: str = ""
+
+
 class ChatPricing(_StrictCfg):
     input: float
     cached_input: float
@@ -157,6 +182,7 @@ class Settings(BaseSettings):
     enrich: EnrichCfg = Field(default_factory=EnrichCfg)
     retention: RetentionCfg = Field(default_factory=RetentionCfg)
     storage: StorageCfg = Field(default_factory=StorageCfg)
+    locale: LocaleCfg = Field(default_factory=LocaleCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
 
     config_path: Path = Path("config.toml")

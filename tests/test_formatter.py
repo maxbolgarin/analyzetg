@@ -120,6 +120,14 @@ def test_title_and_period_header() -> None:
     d = datetime(2026, 4, 19, 12, 0)
     m = _m(1, d, sender_name="alice", text="hi")
     out = format_messages([m], title="Test chat", period=(d, d))
+    assert "Chat: Test chat" in out
+    assert "Period:" in out
+
+
+def test_title_and_period_header_ru_locale() -> None:
+    d = datetime(2026, 4, 19, 12, 0)
+    m = _m(1, d, sender_name="alice", text="hi")
+    out = format_messages([m], title="Test chat", period=(d, d), language="ru")
     assert "Чат: Test chat" in out
     assert "Период:" in out
 
@@ -136,8 +144,8 @@ def test_chat_groups_renders_each_chat_with_own_link_template() -> None:
     }
     out = format_messages([channel_msg, comment_msg], chat_groups=groups)
     # Both group headers must appear.
-    assert "Чат: MyChannel" in out
-    assert "Чат: Comments" in out
+    assert "Chat: MyChannel" in out
+    assert "Chat: Comments" in out
     # And each group's link template must appear in its section.
     assert "https://t.me/mychan/{msg_id}" in out
     assert "https://t.me/c/456/{msg_id}" in out
@@ -158,8 +166,8 @@ def test_chat_groups_overrides_global_title_and_link_template() -> None:
         chat_groups={-100123: {"title": "InsideTitle", "link_template": "https://t.me/x/{msg_id}"}},
     )
     # Per-group header replaces the would-be global header.
-    assert "Чат: InsideTitle" in out
-    assert "Чат: GlobalTitle" not in out
+    assert "Chat: InsideTitle" in out
+    assert "Chat: GlobalTitle" not in out
     # Per-group link template replaces the would-be global link line.
     assert "https://t.me/x/{msg_id}" in out
     assert "https://example.com/{msg_id}" not in out

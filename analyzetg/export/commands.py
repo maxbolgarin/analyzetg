@@ -21,6 +21,8 @@ from analyzetg.core.paths import parse_ymd as _parse_ymd
 from analyzetg.core.paths import slugify as _slugify
 from analyzetg.db.repo import Repo, open_repo
 from analyzetg.export.markdown import export_csv, export_jsonl, export_md
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.models import Message
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import (
@@ -44,15 +46,22 @@ def _parse_from_msg(value: str | None) -> int | None:
     return parse(value).msg_id
 
 
-def _write(msgs: list[Message], *, fmt: str, output: Path, title: str | None) -> None:
+def _write(
+    msgs: list[Message],
+    *,
+    fmt: str,
+    output: Path,
+    title: str | None,
+    language: str = "en",
+) -> None:
     if fmt == "md":
-        export_md(msgs, title=title, output=output)
+        export_md(msgs, title=title, output=output, language=language)
     elif fmt == "jsonl":
         export_jsonl(msgs, output)
     elif fmt == "csv":
         export_csv(msgs, output)
     else:
-        console.print(f"[red]Unknown format:[/] {fmt}")
+        console.print(f"[red]{_tf('unknown_format', fmt=fmt)}[/]")
         raise typer.Exit(1)
 
 
@@ -63,7 +72,7 @@ async def cmd_export(*, chat: int, fmt: str, output: Path, since: str | None, un
         msgs = await repo.iter_messages(chat, since=_parse_ymd(since), until=_parse_ymd(until))
         title = (chat_row or {}).get("title")
         _write(msgs, fmt=fmt, output=output, title=title)
-        console.print(f"[green]Exported[/] {len(msgs)} message(s) to {output}")
+        console.print(f"[green]{_tf('exported_n_to', n=len(msgs), path=output)}[/]")
 
 
 async def cmd_dump(
@@ -93,6 +102,8 @@ async def cmd_dump(
     folder: str | None = None,
     with_comments: bool = False,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
 
@@ -142,6 +153,8 @@ async def cmd_dump(
             save_media_types=save_media_types,
             folder=folder,
             yes=yes,
+            language=language,
+            content_language=content_language,
         )
         return
 
@@ -158,6 +171,8 @@ async def cmd_dump(
             include_transcripts=include_transcripts,
             console_out=console_out,
             mark_read=mark_read,
+            language=language,
+            content_language=content_language,
         )
         return
 
@@ -187,7 +202,7 @@ async def cmd_dump(
     from analyzetg.analyzer.commands import _derive_internal_id
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]→ Resolving[/] {ref}")
+        console.print(f"[dim]{_tf('resolving', ref=ref)}[/]")
         resolved = await resolve(client, repo, ref, join=join)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
@@ -209,6 +224,17 @@ async def cmd_dump(
         is_forum = resolved.kind == "forum"
         if is_forum and thread_id == 0 and not all_flat and not all_per_topic:
             all_flat, all_per_topic, thread_id = await _forum_pick_mode(client, chat_id, resolved.title)
+
+        # Resolve effective languages once so every dispatch path below
+        # gets the same values without re-reading settings each time.
+        eff_language = (language or settings.locale.language or "en").lower()
+        eff_content_language = (
+            content_language
+            or settings.locale.content_language
+            or language
+            or settings.locale.language
+            or "en"
+        ).lower()
 
         if is_forum and all_per_topic:
             await _dump_forum_per_topic(
@@ -233,6 +259,8 @@ async def cmd_dump(
                 save_media=save_media,
                 save_media_types=save_media_kinds,
                 yes=yes,
+                language=eff_language,
+                content_language=eff_content_language,
             )
             return
 
@@ -245,7 +273,7 @@ async def cmd_dump(
 
         if is_forum and all_flat:
             thread_id = None
-            console.print("[dim]→ Listing forum topics for flat-forum grouping...[/]")
+            console.print(f"[dim]{_t('listing_forum_topics_for_flat')}[/]")
             topics_for_flat = await list_forum_topics(client, chat_id)
             topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
             topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
@@ -267,11 +295,11 @@ async def cmd_dump(
             and thread_id > 0
             and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
         ):
-            console.print("[dim]→ Looking up topic's unread marker...[/]")
+            console.print(f"[dim]{_t('looking_up_topic_marker')}[/]")
             topics = await list_forum_topics(client, chat_id)
             matched = next((t for t in topics if t.topic_id == thread_id), None)
             if matched is None:
-                console.print(f"[red]Topic {thread_id} not found in this forum.[/]")
+                console.print(f"[red]{_tf('topic_not_found', thread_id=thread_id)}[/]")
                 raise typer.Exit(2)
             if matched.unread_count == 0:
                 console.print(
@@ -318,6 +346,8 @@ async def cmd_dump(
             save_media=save_media,
             save_media_types=save_media_kinds,
             with_comments=with_comments,
+            language=eff_language,
+            content_language=eff_content_language,
         )
 
 
@@ -348,6 +378,8 @@ async def _dump_single(
     save_media: bool = False,
     save_media_types: set[str] | None = None,
     with_comments: bool = False,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     """Dump one chat / thread / flat-forum using the shared pipeline."""
     from analyzetg.core.pipeline import prepare_chat_run
@@ -380,6 +412,8 @@ async def _dump_single(
         topic_markers=topic_markers,
         mark_read=mark_read,
         with_comments=with_comments,
+        language=language,
+        content_language=content_language,
     )
 
     if save_media and prepared.messages:
@@ -398,13 +432,13 @@ async def _dump_single(
         _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
-            _write(msgs, fmt=fmt, output=output, title=title)
-            console.print(f"[green]Also saved:[/] {output}")
+            _write(msgs, fmt=fmt, output=output, title=title, language=language)
+            console.print(f"[green]{_tf('also_saved', path=output)}[/]")
     else:
         target = output if output is not None else _default_output_path(title, fmt)
         target.parent.mkdir(parents=True, exist_ok=True)
-        _write(msgs, fmt=fmt, output=target, title=title)
-        console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {target}")
+        _write(msgs, fmt=fmt, output=target, title=title, language=language)
+        console.print(f"[green]{_tf('wrote_msgs_to', n=len(msgs), path=target)}[/]")
 
     if prepared.mark_read_fn and msgs:
         await prepared.mark_read_fn()
@@ -433,6 +467,8 @@ async def _dump_forum_per_topic(
     save_media: bool = False,
     save_media_types: set[str] | None = None,
     yes: bool = False,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     """One dump per topic, using the shared per-topic iterator.
 
@@ -454,7 +490,7 @@ async def _dump_forum_per_topic(
         if output is not None and output.exists() and output.is_dir():
             base_dir = output
         elif output is not None and output.suffix:
-            console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
+            console.print(f"[red]{_tf('output_is_file_need_dir', path=output)}[/]")
             raise typer.Exit(2)
         else:
             base_dir = output or Path("reports")
@@ -480,6 +516,8 @@ async def _dump_forum_per_topic(
         include_transcripts=include_transcripts,
         mark_read=mark_read,
         yes=yes,
+        language=language,
+        content_language=content_language,
     ):
         try:
             if save_media and prepared.messages:
@@ -503,12 +541,12 @@ async def _dump_forum_per_topic(
                 _print_console(msgs, title=prepared.chat_title, fmt=fmt, count=len(msgs))
                 if per_file is not None:
                     per_file.parent.mkdir(parents=True, exist_ok=True)
-                    _write(msgs, fmt=fmt, output=per_file, title=prepared.chat_title)
+                    _write(msgs, fmt=fmt, output=per_file, title=prepared.chat_title, language=language)
             else:
                 target = per_file if per_file else _default_output_path(prepared.chat_title, fmt)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _write(msgs, fmt=fmt, output=target, title=prepared.chat_title)
-                console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {target}")
+                _write(msgs, fmt=fmt, output=target, title=prepared.chat_title, language=language)
+                console.print(f"[green]{_tf('wrote_msgs_to', n=len(msgs), path=target)}[/]")
 
             if prepared.mark_read_fn and msgs:
                 await prepared.mark_read_fn()
@@ -521,17 +559,17 @@ async def _dump_forum_per_topic(
                 topic_id=prepared.thread_id,
                 err=str(e)[:200],
             )
-            console.print(f"[red]Topic {prepared.thread_title} failed:[/] {e}")
+            console.print(f"[red]{_tf('topic_failed', title=prepared.thread_title, err=e)}[/]")
 
 
 async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
     """Interactively pick a forum mode for dump. Returns (all_flat, all_per_topic, thread_id)."""
     import sys as _sys
 
-    console.print("[dim]→ Listing forum topics...[/]")
+    console.print(f"[dim]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     if not topics:
-        console.print("[yellow]No topics in this forum.[/]")
+        console.print(f"[yellow]{_t('no_topics_in_forum')}[/]")
         raise typer.Exit(0)
 
     if not _sys.stdin.isatty():
@@ -546,10 +584,10 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
 
     _print_topics_table(topics, with_unread=True)
     while True:
-        answer = typer.prompt("Pick topic id, A=all-flat, P=per-topic, Q=quit", default="P").strip()
+        answer = typer.prompt(_t("forum_pick_prompt"), default="P").strip()
         up = answer.upper()
         if up == "Q":
-            console.print("[dim]Aborted.[/]")
+            console.print(f"[dim]{_t('aborted')}[/]")
             raise typer.Exit(0)
         if up == "A":
             return True, False, 0
@@ -559,9 +597,9 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
             tid = int(answer)
             if any(t.topic_id == tid for t in topics):
                 return False, False, tid
-            console.print(f"[red]No topic with id={tid}.[/]")
+            console.print(f"[red]{_tf('no_topic_with_id', tid=tid)}[/]")
             continue
-        console.print("[red]Not a valid choice. Try again.[/]")
+        console.print(f"[red]{_t('not_a_valid_choice')}[/]")
 
 
 def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -> None:
@@ -599,7 +637,7 @@ async def _transcribe_pending(
 
     pending = await repo.untranscribed_media(chat_id=chat_id, since=since_dt, until=until_dt)
     pending = [m for m in pending if _transcribable(m, settings)]
-    console.print(f"[cyan]Transcribe[/] pending={len(pending)}")
+    console.print(f"[cyan]{_t('export_transcribe_label')}[/] {_tf('export_pending_label', n=len(pending))}")
 
     sem = asyncio.Semaphore(settings.media.download_concurrency)
 
@@ -633,6 +671,8 @@ async def run_all_unread_dump(
     save_media_types: str | None = None,
     folder: str | None = None,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
     """Public: dump every unread chat in one batch (was the old no-ref default).
 
@@ -640,6 +680,8 @@ async def run_all_unread_dump(
     title) to restrict the batch to chats in that Telegram folder.
     """
     settings = get_settings()
+    eff_language = (language or settings.locale.language or "en").lower()
+    eff_content_language = (content_language or settings.locale.content_language or eff_language).lower()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _dump_no_ref(
             client=client,
@@ -657,6 +699,8 @@ async def run_all_unread_dump(
             save_media_types=save_media_types,
             folder=folder,
             yes=yes,
+            language=eff_language,
+            content_language=eff_content_language,
         )
 
 
@@ -677,6 +721,8 @@ async def _dump_no_ref(
     save_media_types: str | None = None,
     folder: str | None = None,
     yes: bool = False,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     # Tri-state: ask once unless --yes was passed (default: keep unread).
     import sys as _sys
@@ -689,10 +735,7 @@ async def _dump_no_ref(
         if yes or not _sys.stdin.isatty():
             mark_read_effective = False
         else:
-            mark_read_effective = typer.confirm(
-                "Mark messages as read in Telegram after each chat is dumped?",
-                default=False,
-            )
+            mark_read_effective = typer.confirm(_t("mark_chats_read_after_dump_q"), default=False)
     else:
         mark_read_effective = mark_read
 
@@ -733,6 +776,8 @@ async def _dump_no_ref(
         mark_read=mark_read_effective,
         folder=folder,
         yes=yes,
+        language=language,
+        content_language=content_language,
     ):
         msgs = prepared.messages
         title = prepared.chat_title
@@ -753,8 +798,8 @@ async def _dump_no_ref(
                 chat_out = out_dir / _slugify(title or str(prepared.chat_id)) / "dump"
                 chat_out.mkdir(parents=True, exist_ok=True)
                 path = chat_out / f"dump-{stamp}.{ext}"
-                _write(msgs, fmt=fmt, output=path, title=title)
-                console.print(f"[green]Wrote[/] {len(msgs)} message(s) to {path}")
+                _write(msgs, fmt=fmt, output=path, title=title, language=language)
+                console.print(f"[green]{_tf('wrote_msgs_to', n=len(msgs), path=path)}[/]")
             if prepared.mark_read_fn and msgs:
                 try:
                     await prepared.mark_read_fn()
@@ -764,7 +809,7 @@ async def _dump_no_ref(
                         chat_id=prepared.chat_id,
                         err=str(e)[:200],
                     )
-                    console.print(f"[yellow]⚠ Could not mark as read:[/] {e}")
+                    console.print(f"[yellow]{_tf('couldnt_mark_read', err=e)}[/]")
             successes += 1
         except Exception as e:
             log.error(
@@ -772,7 +817,7 @@ async def _dump_no_ref(
                 chat_id=prepared.chat_id,
                 err=str(e)[:200],
             )
-            console.print(f"[red]Failed:[/] {e}")
+            console.print(f"[red]{_tf('batch_chat_failed', err=e)}[/]")
             failures.append((prepared.chat_id, prepared.chat_title, str(e)[:200]))
 
     total = successes + len(failures)
@@ -871,7 +916,7 @@ def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: i
                 w.writerow([m.msg_id, m.date.isoformat(), m.sender_name, m.text, m.transcript])
         console.print(buf.getvalue(), highlight=False)
     console.print(Rule(style="cyan"))
-    console.print(f"[dim]{count} message(s)[/]")
+    console.print(f"[dim]{_tf('export_n_msgs', n=count)}[/]")
 
 
 def _transcribable(m: Message, settings) -> bool:

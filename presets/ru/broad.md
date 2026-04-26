@@ -1,6 +1,7 @@
 ---
 name: broad
 prompt_version: v1
+description: Полный обзор: Топ-3 темы + тезисы + настроение + ключевые сообщения
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

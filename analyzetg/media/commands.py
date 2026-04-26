@@ -30,6 +30,8 @@ from analyzetg.core.paths import chat_slug as _chat_slug
 from analyzetg.core.paths import compute_window as _compute_window
 from analyzetg.core.paths import topic_slug as _topic_slug
 from analyzetg.db.repo import open_repo
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.media.download import download_message
 from analyzetg.models import Message
 from analyzetg.tg.client import tg_client
@@ -145,7 +147,10 @@ async def save_raw_media(
     for m in candidates:
         by_type[m.media_type or "unknown"] = by_type.get(m.media_type or "unknown", 0) + 1
     breakdown = ", ".join(f"{v} {k}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]))
-    console.print(f"[bold]Saving media:[/] {len(candidates)} file(s) — {breakdown} → [cyan]{output_dir}[/]")
+    console.print(
+        f"[bold]{_t('media_saving_label')}[/] "
+        f"{_tf('media_n_files', n=len(candidates))} — {breakdown} → [cyan]{output_dir}[/]"
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(settings.media.download_concurrency)
@@ -250,7 +255,7 @@ async def cmd_download_media(
         type_filter = requested
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]→ Resolving[/] {ref}")
+        console.print(f"[dim]{_t('media_resolving_label')}[/] {ref}")
         resolved = await resolve(client, repo, ref)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
@@ -286,19 +291,21 @@ async def cmd_download_media(
             if limit is not None:
                 candidates = candidates[:limit]
             if not candidates:
-                console.print("[yellow]No media matching filters.[/]")
+                console.print(f"[yellow]{_t('media_no_matching')}[/]")
                 return
             by_type: dict[str, int] = {}
             for m in candidates:
                 by_type[m.media_type or "unknown"] = by_type.get(m.media_type or "unknown", 0) + 1
             breakdown = ", ".join(f"{v} {k}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]))
-            console.print(f"[bold]Plan:[/] {len(candidates)} file(s) — {breakdown}")
+            console.print(
+                f"[bold]{_t('media_plan_label')}[/] {_tf('media_n_files', n=len(candidates))} — {breakdown}"
+            )
             sample = candidates[:10]
             for m in sample:
                 console.print(f"  [dim]{m.media_type:<10}[/] msg_id={m.msg_id}  {m.date}")
             if len(candidates) > len(sample):
-                console.print(f"  [dim]…and {len(candidates) - len(sample)} more[/]")
-            console.print("[dim]Dry run — no files written.[/]")
+                console.print(f"  [dim]{_tf('cli_prune_and_more', n=len(candidates) - len(sample))}[/]")
+            console.print(f"[dim]{_t('media_dry_run_no_files')}[/]")
             return
 
         await save_raw_media(

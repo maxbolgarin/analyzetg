@@ -211,15 +211,21 @@ def test_validate_user_template_rejects_unknown_placeholder(tmp_path: Path) -> N
 
 
 def test_load_preset_rejects_name_stem_mismatch(tmp_path: Path, monkeypatch) -> None:
+    # Per-language layout: presets live under presets/<lang>/. Build a
+    # tiny mock tree at tmp_path/presets/en/digest.md with a name/stem
+    # mismatch and assert the loader rejects it via get_presets("en").
     presets_dir = tmp_path / "presets"
-    presets_dir.mkdir()
-    (presets_dir / "digest.md").write_text(
+    en_dir = presets_dir / "en"
+    en_dir.mkdir(parents=True)
+    (en_dir / "digest.md").write_text(
         "---\nname: summary\nprompt_version: v1\n---\nsystem\n---USER---\n"
         "{period} {title} {msg_count}\n{messages}\n"
     )
     monkeypatch.setattr(prompts, "PRESETS_DIR", presets_dir)
+    prompts.clear_preset_cache()
     with pytest.raises(RuntimeError, match="does not match filename stem"):
-        prompts._load_all_presets()
+        prompts.get_presets("en")
+    prompts.clear_preset_cache()  # don't poison neighbour tests
 
 
 # --- Chunker degenerate-budget guard ------------------------------------
@@ -431,8 +437,12 @@ async def test_cite_context_expands_citations(tmp_path: Path) -> None:
         await repo.upsert_messages(msgs)
 
         body = "Findings: see [#5](https://t.me/x/5) and [#7](https://t.me/x/7)."
-        out = await _expand_citations(body, chat_id=1, repo=repo, context_n=2)
-        assert "Источники" in out
+        # Default language="en" → "Sources"; verify both EN and RU paths.
+        out_en = await _expand_citations(body, chat_id=1, repo=repo, context_n=2)
+        assert "Sources" in out_en
+        out_ru = await _expand_citations(body, chat_id=1, repo=repo, context_n=2, language="ru")
+        assert "Источники" in out_ru
+        out = out_en  # downstream assertions reference `out`
         # Anchor markers around the cited msgs.
         assert "#5" in out
         assert "#7" in out

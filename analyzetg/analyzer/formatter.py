@@ -1,9 +1,16 @@
-"""Dense text format for messages (spec §9.5). ~30–40% cheaper than JSON."""
+"""Dense text format for messages (spec §9.5). ~30–40% cheaper than JSON.
+
+Labels (`Period`, `Chat`, `Messages`, `Topic`, `Forum`, `[no transcript]`,
+…) are looked up via `i18n.t()` so saved reports + the LLM prompt match
+the user's `locale.language`. Default `language="en"` keeps direct
+callers (tests, ad-hoc scripts) on a stable English label set.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
+from analyzetg.i18n import t as i18n_t
 from analyzetg.models import Message
 
 
@@ -74,7 +81,9 @@ def _body(m: Message) -> str:
             combined = combined[:_BODY_CAP] + "…"
         return combined
     if m.media_type:
-        return f"[{m.media_type} без транскрипта]"
+        # `_body` is called from `_emit_msg_line` which doesn't carry the
+        # active language. Resolve from settings — cheap, cached.
+        return f"[{m.media_type} {i18n_t('no_transcript')}]"
     return ""
 
 
@@ -134,8 +143,13 @@ def _reactions_tag(m: Message) -> str:
     return f" [reactions: {' '.join(parts)}]"
 
 
-def _topic_header(thread_id: int | None, topic_titles: dict[int, str] | None) -> str | None:
-    """Render the `=== Топик: X (id=Y) ===` separator for a group.
+def _topic_header(
+    thread_id: int | None,
+    topic_titles: dict[int, str] | None,
+    *,
+    language: str = "en",
+) -> str | None:
+    """Render the `=== Topic: X (id=Y) ===` separator for a group.
 
     Falls back to `Topic #<id>` when the title isn't in the map — happens
     if a topic was deleted between fetch time and analysis, or if the
@@ -144,10 +158,11 @@ def _topic_header(thread_id: int | None, topic_titles: dict[int, str] | None) ->
     """
     if not topic_titles:
         return None
+    label = i18n_t("topic_label", language)
     if not thread_id:
-        return "=== Топик: Без топика ==="
-    name = topic_titles.get(thread_id) or f"Topic #{thread_id}"
-    return f"=== Топик: {name} (id={thread_id}) ==="
+        return f"=== {label}: {i18n_t('no_topic', language)} ==="
+    name = topic_titles.get(thread_id) or f"#{thread_id}"
+    return f"=== {label}: {name} (id={thread_id}) ==="
 
 
 def _high_impact_threshold() -> int:
@@ -202,6 +217,7 @@ def format_messages(
     link_template: str | None = None,
     topic_titles: dict[int, str] | None = None,
     chat_groups: dict[int, dict] | None = None,
+    language: str = "en",
 ) -> str:
     """Dense text format for a list of messages.
 
@@ -228,16 +244,20 @@ def format_messages(
         return ""
     date_fmt = _pick_date_format(msgs)
     idx = {m.msg_id: m for m in msgs}
+    chat_lbl = i18n_t("chat_label", language)
+    period_lbl = i18n_t("period_label", language)
+    msgs_lbl = i18n_t("messages_label", language)
+    msg_link_lbl = i18n_t("msg_link_label", language)
     lines: list[str] = []
     if title and not chat_groups:
-        lines.append(f"=== Чат: {title} ===")
+        lines.append(f"=== {chat_lbl}: {title} ===")
     if period and (period[0] or period[1]):
         a = period[0].strftime("%Y-%m-%d %H:%M") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d %H:%M") if period[1] else "…"
-        lines.append(f"Период: {a} — {b}")
-    lines.append(f"Сообщений: {len(msgs)}")
+        lines.append(f"{period_lbl}: {a} — {b}")
+    lines.append(f"{msgs_lbl}: {len(msgs)}")
     if link_template and not chat_groups:
-        lines.append(f"Ссылка на сообщение: {link_template}")
+        lines.append(f"{msg_link_lbl}: {link_template}")
     lines.append("")
 
     if chat_groups:
@@ -254,10 +274,10 @@ def format_messages(
             meta = chat_groups.get(cid) or {}
             ctitle = meta.get("title") or str(cid)
             ctmpl = meta.get("link_template")
-            lines.append(f"=== Чат: {ctitle} ===")
-            lines.append(f"Сообщений в этой группе: {len(groups_by_cid[cid])}")
+            lines.append(f"=== {chat_lbl}: {ctitle} ===")
+            lines.append(f"{i18n_t('messages_in_group', language)}: {len(groups_by_cid[cid])}")
             if ctmpl:
-                lines.append(f"Ссылка на сообщение: {ctmpl}")
+                lines.append(f"{msg_link_lbl}: {ctmpl}")
             lines.append("")
             for m in groups_by_cid[cid]:
                 line = _emit_msg_line(m, idx, date_fmt)
@@ -277,7 +297,7 @@ def format_messages(
         for i, tid in enumerate(ordered_tids):
             if i > 0:
                 lines.append("")  # blank separator between topic groups
-            header = _topic_header(tid, topic_titles)
+            header = _topic_header(tid, topic_titles, language=language)
             if header:
                 lines.append(header)
             for m in groups[tid]:
@@ -296,8 +316,8 @@ def format_messages(
 _FORUM_TITLE_PREVIEW = 8  # Titles listed before truncation; keeps the prefix bounded.
 
 
-def _forum_line(topic_titles: dict[int, str]) -> str:
-    """Build the `Форум: N топиков — a, b, c` line for the preamble.
+def _forum_line(topic_titles: dict[int, str], *, language: str = "en") -> str:
+    """Build the `Forum: N topic(s) — a, b, c` line for the preamble.
 
     Truncates at `_FORUM_TITLE_PREVIEW` names so a huge forum doesn't
     balloon the static prefix — the LLM only needs to know the forum's
@@ -311,8 +331,8 @@ def _forum_line(topic_titles: dict[int, str]) -> str:
     shown = names[:_FORUM_TITLE_PREVIEW]
     suffix = ""
     if n > _FORUM_TITLE_PREVIEW:
-        suffix = f" …и ещё {n - _FORUM_TITLE_PREVIEW}"
-    return f"Форум: {n} топик(ов) — {', '.join(shown)}{suffix}"
+        suffix = " " + i18n_t("and_more", language).format(n=n - _FORUM_TITLE_PREVIEW)
+    return f"{i18n_t('forum_label', language)}: {n} {i18n_t('topics_word', language)} — {', '.join(shown)}{suffix}"
 
 
 def chat_header_preamble(
@@ -322,6 +342,7 @@ def chat_header_preamble(
     link_template: str | None = None,
     topic_titles: dict[int, str] | None = None,
     chat_groups: dict[int, dict] | None = None,
+    language: str = "en",
 ) -> str:
     """Static (cacheable) portion of the prompt — appears before dynamic messages.
 
@@ -335,15 +356,19 @@ def chat_header_preamble(
     where each msg_id range comes from. Used by `--with-comments` runs
     (channel + linked discussion group).
     """
+    chat_lbl = i18n_t("chat_label", language)
+    period_lbl = i18n_t("period_label", language)
+    msg_link_lbl = i18n_t("msg_link_label", language)
+    link_lbl = i18n_t("link_label", language)
     parts = []
     if title and not chat_groups:
-        parts.append(f"=== Чат: {title} ===")
+        parts.append(f"=== {chat_lbl}: {title} ===")
     if period and (period[0] or period[1]):
         a = period[0].strftime("%Y-%m-%d") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d") if period[1] else "…"
-        parts.append(f"Период: {a} — {b}")
+        parts.append(f"{period_lbl}: {a} — {b}")
     if topic_titles:
-        parts.append(_forum_line(topic_titles))
+        parts.append(_forum_line(topic_titles, language=language))
     if chat_groups:
         for cid in sorted(chat_groups.keys()):
             meta = chat_groups[cid] or {}
@@ -351,10 +376,10 @@ def chat_header_preamble(
             tmpl = meta.get("link_template")
             line = f"  • {ctitle}"
             if tmpl:
-                line += f" — ссылка: {tmpl}"
+                line += f" — {link_lbl}: {tmpl}"
             parts.append(line)
     elif link_template:
-        parts.append(f"Ссылка на сообщение: {link_template}")
+        parts.append(f"{msg_link_lbl}: {link_template}")
     return "\n".join(parts)
 
 

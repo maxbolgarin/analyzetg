@@ -193,3 +193,16 @@ CREATE TABLE IF NOT EXISTS usage_log (
     context           TEXT,
     created_at        TIMESTAMP
 );
+
+-- Persistent user settings — overrides for the [locale] / [openai] config
+-- blocks set via `atg settings`. Applied on top of config.toml on every
+-- repo open so the user can save their language preferences once and
+-- forget. Keys use dotted paths matching the config schema, e.g.
+-- "locale.language" or "openai.audio_language". Empty string for value
+-- means "no override" (we still store the row to keep the user's history
+-- intact); use DELETE to remove an override entirely.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);

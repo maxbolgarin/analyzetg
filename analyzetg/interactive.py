@@ -19,9 +19,11 @@ import questionary
 from prompt_toolkit.keys import Keys
 from rich.console import Console
 
-from analyzetg.analyzer.prompts import PRESETS, Preset
+from analyzetg.analyzer.prompts import Preset, get_presets
 from analyzetg.config import get_settings
 from analyzetg.db.repo import open_repo
+from analyzetg.i18n import t as i18n_t
+from analyzetg.i18n import tf as i18n_tf
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.dialogs import list_unread_dialogs
 from analyzetg.tg.topics import list_forum_topics
@@ -374,6 +376,8 @@ async def run_interactive_analyze(
     by: str | None = None,
     post_to: str | None = None,
     with_comments: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
     """Default UX for `analyzetg analyze` (no ref). Walk wizard, then run.
 
@@ -402,6 +406,8 @@ async def run_interactive_analyze(
             console_out=answers.console_out,
             mark_read=answers.mark_read,
             yes=True,  # wizard already confirmed the plan, no second prompt
+            language=language,
+            content_language=content_language,
         )
         return
 
@@ -416,6 +422,8 @@ async def run_interactive_analyze(
     args["dry_run"] = dry_run
     args["by"] = by
     args["post_to"] = post_to
+    args["language"] = language
+    args["content_language"] = content_language
     # CLI explicit value wins; wizard answer fills in when CLI didn't set it.
     args["with_comments"] = with_comments or bool(answers.with_comments)
     await cmd_analyze(**args)
@@ -430,6 +438,8 @@ async def run_interactive_dump(
     include_transcripts: bool = True,
     console_out: bool = False,
     mark_read: bool | None = None,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
     """Default UX for `analyzetg dump` (no ref). Wizard without preset step."""
     answers = await _collect_answers(
@@ -453,33 +463,34 @@ async def run_interactive_dump(
             console_out=answers.console_out,
             mark_read=answers.mark_read,
             yes=True,
+            language=language,
+            content_language=content_language,
             **_build_enrich_kwargs(answers),
         )
         return
 
     from analyzetg.export.commands import cmd_dump
 
-    await cmd_dump(
-        **build_dump_args(
-            answers,
-            fmt=fmt,
-            with_transcribe=with_transcribe,
-            include_transcripts=include_transcripts,
-        )
+    args = build_dump_args(
+        answers,
+        fmt=fmt,
+        with_transcribe=with_transcribe,
+        include_transcripts=include_transcripts,
     )
+    args["language"] = language
+    args["content_language"] = content_language
+    await cmd_dump(**args)
 
 
 async def run_interactive_describe() -> None:
     """Default UX for `analyzetg describe` (no ref, no filters): pick → show."""
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path):
-        console.print("[bold cyan]analyzetg[/] — pick a chat to describe")
-        console.print(
-            "[dim]Tips: ↑/↓ to navigate, type to filter, Enter to select, ESC or Ctrl-C to cancel.[/]\n"
-        )
+        console.print(f"[bold cyan]{i18n_t('wiz_pick_chat_to_describe')}[/]")
+        console.print(f"[dim]{i18n_t('wiz_tips')}[/]\n")
         chat = await _pick_chat(client, offer_all_unread=False)
         if chat is None or chat is ALL_UNREAD:
-            console.print("[dim]Cancelled.[/]")
+            console.print(f"[dim]{i18n_t('cancelled')}[/]")
             return
         chat_ref = str(chat["chat_id"])
 
@@ -515,9 +526,11 @@ async def _collect_answers(
         # Make the action ("analyze" / "dump" / etc.) visible up-front; with
         # only "atg dump" in the scrollback, it's easy to forget which command
         # this wizard belongs to by the time you reach the confirm step.
-        console.print(
-            f"[bold cyan]analyzetg[/] — interactive mode  [dim](action:[/] [bold]{mode}[/][dim])[/]"
-        )
+        # Render the banner via i18n; the {action} placeholder is bolded
+        # post-format so the value pops without leaking Rich tags into the
+        # i18n string.
+        banner = i18n_tf("wiz_banner", action=f"[bold]{mode}[/]")
+        console.print(f"[bold cyan]{banner}[/]")
         # Show the immutable settings so the user knows what will happen.
         if output_forced:
             out_label = (
@@ -528,11 +541,7 @@ async def _collect_answers(
             console.print(f"  [dim]output (from CLI):[/]    [bold]{out_label}[/]")
         if mark_read_forced:
             console.print(f"  [dim]mark read (from CLI):[/] [bold]{'yes' if mark_read else 'no'}[/]")
-        console.print(
-            "[dim]Tips:[/] "
-            "[bold]type letters to filter[/] ([dim]e.g. [cyan]uni[/] → UNION[/]), "
-            "[dim]↑/↓ navigate, Enter select, ESC back, Ctrl-C cancel.[/]\n"
-        )
+        console.print(f"[dim]{i18n_t('wiz_tips')}[/]\n")
 
         chat: dict | None = None
         thread_id: int | None = None
@@ -568,7 +577,7 @@ async def _collect_answers(
             if step == "chat":
                 result = await _pick_chat(client, offer_all_unread=True)
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 if result is ALL_UNREAD:
                     run_on_all = True
@@ -628,11 +637,11 @@ async def _collect_answers(
                 # the more interesting part).
                 result = await _bind_escape(
                     questionary.select(
-                        "Канал имеет привязанные комментарии. Включить их в анализ?",
+                        i18n_t("wiz_include_comments_q"),
                         choices=[
-                            questionary.Choice("Да — канал + комментарии", value=True),
-                            questionary.Choice("Нет — только посты канала", value=False),
-                            questionary.Choice("← Назад", value=BACK),
+                            questionary.Choice(i18n_t("wiz_yes_with_comments"), value=True),
+                            questionary.Choice(i18n_t("wiz_no_only_posts"), value=False),
+                            questionary.Choice(i18n_t("wiz_back"), value=BACK),
                         ],
                         style=LIST_STYLE,
                     ),
@@ -642,7 +651,7 @@ async def _collect_answers(
                     step = "chat"
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 with_comments = bool(result)
                 step = "preset" if mode == "analyze" else "enrich"
@@ -653,7 +662,7 @@ async def _collect_answers(
                     step = "chat"
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 thread_id, forum_all_flat, forum_all_per_topic = result
                 step = "preset" if mode == "analyze" else "enrich"
@@ -672,7 +681,7 @@ async def _collect_answers(
                         step = "chat"
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 preset = result
                 step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "period"
@@ -701,7 +710,7 @@ async def _collect_answers(
                         step = "chat"
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 period, custom_since, custom_until, custom_from_msg = result
                 # For a custom date range, estimate the message count on
@@ -745,21 +754,21 @@ async def _collect_answers(
                 if media_counts.get("total"):
                     parts: list[str] = []
                     if media_counts.get("any_media"):
-                        parts.append(f"{media_counts['any_media']} with media")
+                        parts.append(i18n_tf("wiz_plan_with_media", n=media_counts["any_media"]))
                     if media_counts.get("links"):
-                        parts.append(f"{media_counts['links']} with URLs")
+                        parts.append(i18n_tf("wiz_plan_with_urls", n=media_counts["links"]))
                     extras = ", " + ", ".join(parts) if parts else ""
                     console.print(
-                        f"[dim]→ For the chosen period: "
-                        f"{media_counts['total']} message(s) already synced{extras}. "
-                        "Backfill at run time may add more.[/]"
+                        f"[dim]"
+                        f"{i18n_tf('wiz_plan_for_period_synced', total=media_counts['total'], extras=extras)}"
+                        f"[/]"
                     )
                 result = await _pick_enrich(media_counts=media_counts)
                 if result is BACK:
                     step = "period"
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 enrich_kinds = list(result) if isinstance(result, list) else None
                 # Output step is next unless the user already set it via CLI.
@@ -776,7 +785,7 @@ async def _collect_answers(
                     step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 chosen_console_out, chosen_output_path = result
                 step = "confirm" if mark_read_forced else "mark_read"
@@ -792,7 +801,7 @@ async def _collect_answers(
                         step = "output"
                     continue
                 if result is None:
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 chosen_mark_read = bool(result)
                 step = "confirm"
@@ -800,47 +809,57 @@ async def _collect_answers(
             elif step == "confirm":
                 summary_bits = []
                 if run_on_all:
-                    summary_bits.append("ALL unread chats (batch)")
+                    summary_bits.append(i18n_t("wiz_plan_all_unread_chats"))
                 else:
                     summary_bits.append(chat.get("title") or str(chat["chat_id"]))
                 if thread_id:
-                    summary_bits.append(f"topic {thread_id}")
+                    summary_bits.append(i18n_tf("wiz_plan_topic", id=thread_id))
                 if forum_all_flat:
-                    summary_bits.append("all-flat")
+                    summary_bits.append(i18n_t("wiz_plan_all_flat"))
                 if forum_all_per_topic:
-                    summary_bits.append("per-topic")
+                    summary_bits.append(i18n_t("wiz_plan_per_topic"))
                 if mode == "analyze":
-                    summary_bits.append(f"preset={preset}")
+                    summary_bits.append(i18n_tf("wiz_plan_preset_kv", preset=preset))
                     # Show the enrichment choice explicitly so the user can
                     # sanity-check it before spending — the step happens early
                     # in the wizard and is easy to forget by the time we hit
                     # confirm.
                     if enrich_kinds is not None:
                         if enrich_kinds:
-                            summary_bits.append(f"enrich={','.join(enrich_kinds)}")
+                            summary_bits.append(i18n_tf("wiz_plan_enrich_kv", kinds=",".join(enrich_kinds)))
                         else:
-                            summary_bits.append("enrich=none")
+                            summary_bits.append(i18n_t("wiz_plan_enrich_none"))
                 if not run_on_all:
-                    summary_bits.append(f"period={period}")
+                    summary_bits.append(i18n_tf("wiz_plan_period_kv", period=period))
                     if period == "custom":
                         # Include the estimated count next to the date
                         # range so the user sees the scope at confirm time.
                         n = period_counts.get("custom") if period_counts else None
                         range_str = f"{custom_since or ''}..{custom_until or ''}"
-                        summary_bits.append(f"({range_str}, {n} msgs)" if n is not None else f"({range_str})")
+                        summary_bits.append(
+                            i18n_tf("wiz_plan_range_with_count", range=range_str, n=n)
+                            if n is not None
+                            else i18n_tf("wiz_plan_range", range=range_str)
+                        )
                     elif period == "from_msg" and custom_from_msg:
-                        summary_bits.append(f"(from {custom_from_msg})")
+                        summary_bits.append(i18n_tf("wiz_plan_from", ref=custom_from_msg))
                 summary_bits.append(
-                    "console"
+                    i18n_t("wiz_plan_console")
                     if chosen_console_out
-                    else (f"file={chosen_output_path}" if chosen_output_path else "save to reports/")
+                    else (
+                        i18n_tf("wiz_plan_file_kv", path=chosen_output_path)
+                        if chosen_output_path
+                        else i18n_t("wiz_plan_save_reports")
+                    )
                 )
                 if chosen_mark_read:
-                    summary_bits.append("mark-read")
+                    summary_bits.append(i18n_t("wiz_plan_mark_read"))
                 # Lead with the action (analyze / dump / …) so the confirm
                 # line is unambiguous on its own — the user shouldn't have to
                 # scroll up to remember which command they invoked.
-                console.print(f"[bold]Plan ([yellow]{mode}[/]):[/] " + " / ".join(summary_bits))
+                console.print(
+                    f"[bold]{i18n_t('wiz_plan_label')} ([yellow]{mode}[/]):[/] " + " / ".join(summary_bits)
+                )
 
                 # Only show a cost estimate for the analyze flow (dump
                 # doesn't hit OpenAI for chat completion) and when we have
@@ -848,21 +867,31 @@ async def _collect_answers(
                 if mode == "analyze" and not run_on_all and preset is not None:
                     n_msgs = _count_for_period(period, period_counts)
                     if n_msgs is not None and n_msgs > 0:
-                        cost_lo, cost_hi = _estimate_cost(
-                            n_messages=n_msgs,
-                            preset=PRESETS.get(preset) or PRESETS["summary"],
-                            settings=settings,
+                        wizard_presets = get_presets(settings.locale.language or "en")
+                        chosen_preset = (
+                            wizard_presets.get(preset)
+                            or wizard_presets.get("summary")
+                            or next(iter(wizard_presets.values()), None)
                         )
+                        if chosen_preset is None:
+                            cost_lo = cost_hi = None
+                        else:
+                            cost_lo, cost_hi = _estimate_cost(
+                                n_messages=n_msgs,
+                                preset=chosen_preset,
+                                settings=settings,
+                            )
                         if cost_lo is None:
                             console.print(
-                                f"  [dim]messages ≈[/] {n_msgs}  "
-                                "[dim](pricing table missing a model — cost unknown)[/]"
+                                f"  [dim]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                                f"[dim]{i18n_t('wiz_plan_pricing_missing')}[/]"
                             )
                         else:
                             console.print(
-                                f"  [dim]messages ≈[/] {n_msgs}  "
-                                f"[dim]cost ≈[/] {_fmt_cost_range(cost_lo, cost_hi)}  "
-                                "[dim](analysis only; rough estimate)[/]"
+                                f"  [dim]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                                f"[dim]{i18n_t('wiz_plan_cost_approx')}[/] "
+                                f"{_fmt_cost_range(cost_lo, cost_hi)}  "
+                                f"[dim]{i18n_t('wiz_plan_analysis_estimate')}[/]"
                             )
                         # The analysis estimate doesn't include enrichment
                         # costs — we don't know per-message media counts at
@@ -871,33 +900,36 @@ async def _collect_answers(
                         extra_kinds = _extra_enrich_kinds(enrich_kinds)
                         if extra_kinds:
                             console.print(
-                                "  [dim yellow]+ enrichment on:[/] "
+                                f"  [dim yellow]{i18n_t('wiz_plan_extra_enrich_label')}[/] "
                                 f"[yellow]{', '.join(extra_kinds)}[/] "
-                                "[dim](adds ~$0.003/min of audio, "
-                                "~$0.0002/photo, ~$0.0001/link; actual cost per run visible in [/]"
-                                "[cyan]atg stats[/][dim])[/]"
+                                f"[dim]{i18n_t('wiz_plan_extra_enrich_hint')}[/] "
+                                "[cyan]atg stats[/]"
+                                f"[dim]{i18n_t('wiz_plan_extra_enrich_hint_close')}[/]"
                             )
                     elif n_msgs == 0:
-                        console.print("  [yellow]0 messages in this period — nothing to analyze.[/]")
+                        console.print(f"  [yellow]{i18n_t('wiz_plan_zero_msgs')}[/]")
                 elif mode == "dump" and not run_on_all:
                     n_msgs = _count_for_period(period, period_counts)
                     if n_msgs is not None:
-                        console.print(f"  [dim]messages ≈[/] {n_msgs}  [dim](dump is free — no OpenAI).[/]")
+                        console.print(
+                            f"  [dim]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                            f"[dim]{i18n_t('wiz_plan_dump_free')}[/]"
+                        )
 
                 choice = await _bind_escape(
                     questionary.select(
-                        "Run it?",
+                        i18n_t("wiz_run_it_q"),
                         choices=[
-                            questionary.Choice("Run", value="run"),
-                            questionary.Choice("← Back", value=BACK),
-                            questionary.Choice("Cancel", value="cancel"),
+                            questionary.Choice(i18n_t("wiz_run_choice"), value="run"),
+                            questionary.Choice(i18n_t("wiz_back"), value=BACK),
+                            questionary.Choice(i18n_t("wiz_cancel_choice"), value="cancel"),
                         ],
                         style=LIST_STYLE,
                     ),
                     BACK,
                 ).ask_async()
                 if choice is None or choice == "cancel":
-                    console.print("[dim]Cancelled.[/]")
+                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 if choice is BACK:
                     if mark_read_forced:
@@ -1276,11 +1308,11 @@ def _chat_header_row() -> str:
     # The 2-char gap before the title matches the `★ `/`  ` slot rows
     # carry so the header label still lines up over the title column.
     return (
-        f"{'unread':>{_COL_UNREAD}}  "
-        f"{'kind':<{_COL_KIND}}  "
-        f"{'last msg':<{_COL_DATE}}  "
-        f"{'folder':<{_COL_FOLDER}}  "
-        f"  title"
+        f"{i18n_t('wiz_col_unread'):>{_COL_UNREAD}}  "
+        f"{i18n_t('wiz_col_kind'):<{_COL_KIND}}  "
+        f"{i18n_t('wiz_col_last_msg'):<{_COL_DATE}}  "
+        f"{i18n_t('wiz_col_folder'):<{_COL_FOLDER}}  "
+        f"  {i18n_t('wiz_col_title')}"
     )
 
 
@@ -1308,7 +1340,7 @@ async def _pick_chat(
     sub_set = subscribed_ids or set()
 
     if not unread:
-        console.print("[yellow]No chats with unread messages. Showing all dialogs.[/]")
+        console.print(f"[yellow]{i18n_t('wiz_no_unread_showing_all')}[/]")
         return await _pick_from_all(client, subscribed_ids=sub_set)
 
     # Folder index: empty dict if the user hasn't defined any folders or
@@ -1326,7 +1358,7 @@ async def _pick_chat(
     choices: list[Any] = []
     choices.append(
         questionary.Choice(
-            title="🔍  Search all dialogs (not just unread)",
+            title=i18n_t("wiz_search_all_dialogs"),
             value=("all", None),
         )
     )
@@ -1334,7 +1366,7 @@ async def _pick_chat(
         total = sum(d.unread_count for d in unread)
         choices.append(
             questionary.Choice(
-                title=f"🚀  Run on ALL {len(unread)} unread chats ({total} total messages)",
+                title=i18n_tf("wiz_run_on_all_unread", n=len(unread), total=total),
                 value=("all_unread", None),
             )
         )
@@ -1359,10 +1391,11 @@ async def _pick_chat(
 
     result = await _bind_escape(
         questionary.select(
-            f"Pick a chat — {len(unread)} with unread, sorted by count (type to filter, ↑/↓ to move)",
+            i18n_tf("wiz_pick_chat_n_unread", n=len(unread)),
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
+            instruction=i18n_t("wiz_filter_instruction"),
             style=LIST_STYLE,
         ),
         None,
@@ -1372,10 +1405,16 @@ async def _pick_chat(
         return None
     action, payload = result
     if action == "all_unread":
-        _replace_last_line("[bold cyan]?[/] chat: [bold]ALL unread chats[/]")
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: "
+            f"[bold]{i18n_t('wiz_summary_chat_all_unread')}[/]"
+        )
         return ALL_UNREAD
     if action == "all":
-        _replace_last_line("[bold cyan]?[/] chat: [dim](searching all dialogs)[/]")
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: "
+            f"[dim]{i18n_t('wiz_summary_chat_searching_all')}[/]"
+        )
         return await _pick_from_all(client, subscribed_ids=sub_set)
     d = payload
     _replace_last_line(
@@ -1438,7 +1477,7 @@ async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> d
         for d in snapshot
     ]
     if not rows:
-        console.print("[yellow]No dialogs at all.[/]")
+        console.print(f"[yellow]{i18n_t('wiz_no_dialogs_at_all')}[/]")
         return None
 
     # Unread chats first (by count desc, then alpha) — keeps triage on top.
@@ -1476,10 +1515,11 @@ async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> d
 
     picked = await _bind_escape(
         questionary.select(
-            f"Pick a chat from {len(rows)} dialogs (type to filter, ↑/↓ to move)",
+            i18n_tf("wiz_pick_chat_n", n=len(rows)),
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
+            instruction=i18n_t("wiz_filter_instruction"),
             style=LIST_STYLE,
         ),
         None,
@@ -1496,7 +1536,7 @@ async def _pick_thread(client, chat_id: int):
     """Return (thread_id, all_flat, all_per_topic), BACK, or None (cancelled)."""
     topics = await list_forum_topics(client, chat_id)
     if not topics:
-        console.print("[yellow]No topics in this forum.[/]")
+        console.print(f"[yellow]{i18n_t('no_topics_in_forum')}[/]")
         return None
 
     # Sort: unread desc, then pinned first, then alpha.
@@ -1530,10 +1570,11 @@ async def _pick_thread(client, chat_id: int):
 
     result = await _bind_escape(
         questionary.select(
-            f"{len(topics)} topic(s) in this forum (type to filter)",
+            i18n_tf("wiz_n_topics_in_forum", n=len(topics)),
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
+            instruction=i18n_t("wiz_filter_instruction"),
             style=LIST_STYLE,
         ),
         ("back", None),
@@ -1543,22 +1584,40 @@ async def _pick_thread(client, chat_id: int):
         return None
     action, payload = result
     if action == "back":
-        _replace_last_line("[dim]← Back[/]")
+        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
         return BACK
+    mode_label = i18n_t("wiz_summary_step_mode")
     if action == "per_topic":
-        _replace_last_line("[bold cyan]?[/] mode: [bold]per-topic[/] [dim](one report per topic)[/]")
+        _replace_last_line(
+            f"[bold cyan]?[/] {mode_label}: [bold]{i18n_t('wiz_summary_mode_per_topic')}[/] "
+            f"[dim]{i18n_t('wiz_summary_mode_per_topic_hint')}[/]"
+        )
         return None, False, True
     if action == "flat":
-        _replace_last_line("[bold cyan]?[/] mode: [bold]all-flat[/] [dim](whole forum as one analysis)[/]")
+        _replace_last_line(
+            f"[bold cyan]?[/] {mode_label}: [bold]{i18n_t('wiz_summary_mode_all_flat')}[/] "
+            f"[dim]{i18n_t('wiz_summary_mode_all_flat_hint')}[/]"
+        )
         return None, True, False
     picked_topic = next((t for t in topics_sorted if t.topic_id == payload), None)
     label = picked_topic.title if picked_topic else str(payload)
-    _replace_last_line(f"[bold cyan]?[/] topic: [bold]{label}[/]")
+    _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_topic')}: [bold]{label}[/]")
     return payload, False, False
 
 
 async def _pick_preset():
-    """Returns preset name (str), BACK, or None."""
+    """Returns preset name (str), BACK, or None.
+
+    Reads presets from `presets/<active-language>/`. Each preset's
+    `description` frontmatter field is shown next to its name; new
+    presets are picked up automatically (drop a `.md` into the language
+    directory with `description:` set).
+    """
+    from analyzetg.config import get_settings
+
+    active_lang = (get_settings().locale.language or "en").lower()
+    presets_for_lang = get_presets(active_lang)
+
     preferred = [
         "summary",
         "broad",
@@ -1569,37 +1628,29 @@ async def _pick_preset():
         "questions",
         "quotes",
         "links",
+        "reactions",
+        "single_msg",
+        "multichat",
     ]
-    names = [p for p in preferred if p in PRESETS]
-    names += [n for n in sorted(PRESETS.keys()) if n not in preferred]
+    names = [p for p in preferred if p in presets_for_lang]
+    names += [n for n in sorted(presets_for_lang.keys()) if n not in preferred]
 
-    descriptions = {
-        "summary": "Главное + идеи/решения + что посмотреть — концентрат без пересказа (дефолт)",
-        "broad": "Полный обзор: Топ-3 темы + тезисы + настроение + ключевые сообщения",
-        "digest": "Короткий дайджест 5–10 тем",
-        "action_items": "Задачи из чата — таблица кто/что/срок/статус",
-        "decisions": "Принятые решения — таблица решение/кто/когда",
-        "highlights": "Топ 5–15 самых ценных сообщений с ссылками",
-        "questions": "Открытые вопросы, на которые стоит вернуться",
-        "quotes": "Памятные цитаты дословно с автором и ссылкой",
-        "links": "Внешние URL из чата, сгруппированные по темам",
-    }
-    choices: list[Any] = [
-        questionary.Choice(
-            title=f"{n:<13} — {descriptions.get(n, PRESETS[n].prompt_version)}",
-            value=n,
-        )
-        for n in names
-    ]
+    def _label(name: str) -> str:
+        preset = presets_for_lang[name]
+        desc = preset.description or preset.prompt_version
+        return f"{name:<13} — {desc}"
+
+    choices: list[Any] = [questionary.Choice(title=_label(n), value=n) for n in names]
     choices.append(questionary.Separator())
-    choices.append(questionary.Choice(title="← Back", value=BACK))
+    choices.append(questionary.Choice(title=i18n_t("wiz_back"), value=BACK))
 
     picked = await _bind_escape(
         questionary.select(
-            "Pick a preset (type to filter)",
+            i18n_t("wiz_pick_preset_q"),
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
+            instruction=i18n_t("wiz_filter_instruction"),
             style=LIST_STYLE,
         ),
         BACK,
@@ -1607,9 +1658,9 @@ async def _pick_preset():
     if picked is None:
         return None
     if picked is BACK:
-        _replace_last_line("[dim]← Back[/]")
+        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
         return BACK
-    _replace_last_line(f"[bold cyan]?[/] preset: [bold]{picked}[/]")
+    _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_preset')}: [bold]{picked}[/]")
     return picked
 
 
@@ -1620,15 +1671,15 @@ async def _pick_output(*, default_path: Path | None):
     already-provided value instead of retyping it.
     """
     choices = [
-        questionary.Choice("📁 Save to reports/ (default, auto-named)", value=("file", None)),
-        questionary.Choice("📝 Save to custom path…", value=("custom", None)),
-        questionary.Choice("🖥  Print to terminal (rendered markdown)", value=("console", None)),
+        questionary.Choice(i18n_t("wiz_output_save_default"), value=("file", None)),
+        questionary.Choice(i18n_t("wiz_output_save_custom"), value=("custom", None)),
+        questionary.Choice(i18n_t("wiz_output_console"), value=("console", None)),
         questionary.Separator(),
-        questionary.Choice("← Back", value=(BACK, None)),
+        questionary.Choice(i18n_t("wiz_back"), value=(BACK, None)),
     ]
     picked = await _bind_escape(
         questionary.select(
-            "Where do you want the output?",
+            i18n_t("wiz_output_q"),
             choices=choices,
             use_jk_keys=False,
             style=LIST_STYLE,
@@ -1639,18 +1690,22 @@ async def _pick_output(*, default_path: Path | None):
         return None
     action, _ = picked
     if action is BACK:
-        _replace_last_line("[dim]← Back[/]")
+        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
         return BACK
+    out_label = i18n_t("wiz_summary_step_output")
     if action == "console":
-        _replace_last_line("[bold cyan]?[/] output: [bold]console[/]")
+        _replace_last_line(f"[bold cyan]?[/] {out_label}: [bold]{i18n_t('wiz_summary_step_console')}[/]")
         return True, None
     if action == "file":
-        _replace_last_line("[bold cyan]?[/] output: [bold]reports/[/] [dim](auto-named)[/]")
+        _replace_last_line(
+            f"[bold cyan]?[/] {out_label}: [bold]{i18n_t('wiz_summary_step_reports_dir')}[/] "
+            f"[dim]{i18n_t('wiz_summary_step_auto_named')}[/]"
+        )
         return False, None
     # Custom path — prompt for the exact path.
     seed = str(default_path) if default_path else ""
     raw = await questionary.text(
-        "Custom output path (file or directory; blank = cancel)",
+        i18n_t("wiz_output_custom_prompt"),
         default=seed,
     ).ask_async()
     if raw is None:
@@ -1661,7 +1716,7 @@ async def _pick_output(*, default_path: Path | None):
         # bounce back to the picker.
         return await _pick_output(default_path=default_path)
     path = Path(raw).expanduser()
-    _replace_last_line(f"[bold cyan]?[/] output: [bold]{path}[/]")
+    _replace_last_line(f"[bold cyan]?[/] {out_label}: [bold]{path}[/]")
     return False, path
 
 
@@ -1685,7 +1740,7 @@ async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[st
         # `link` doesn't map to a media_type — proxy via "messages with a
         # URL substring" which media_breakdown precomputes.
         n = counts.get(kind_db_key, 0)
-        return f"  ({n} in db)" if n else ""
+        return f"  ({i18n_tf('wiz_enrich_in_db', n=n)})" if n else ""
 
     # Order reflects default-on status: voice + videonote first (the two
     # kinds that default to True in config), then the opt-in enrichments.
@@ -1693,20 +1748,20 @@ async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[st
     # wizard mostly picks the pre-checked defaults and the user sees what's
     # on without scrolling.
     all_kinds = [
-        ("voice", f"Voice messages — transcribe{_suffix('voice')}", cfg.voice),
+        ("voice", f"{i18n_t('wiz_enrich_voice')}{_suffix('voice')}", cfg.voice),
         (
             "videonote",
-            f"Video notes (round videos) — transcribe{_suffix('videonote')}",
+            f"{i18n_t('wiz_enrich_videonote')}{_suffix('videonote')}",
             cfg.videonote,
         ),
-        ("link", f"External URLs — fetch and summarize{_suffix('links')}", cfg.link),
-        ("video", f"Videos — transcribe audio track{_suffix('video')}", cfg.video),
+        ("link", f"{i18n_t('wiz_enrich_link')}{_suffix('links')}", cfg.link),
+        ("video", f"{i18n_t('wiz_enrich_video')}{_suffix('video')}", cfg.video),
         (
             "image",
-            f"Photos — describe via vision model (spendy){_suffix('photo')}",
+            f"{i18n_t('wiz_enrich_image')}{_suffix('photo')}",
             cfg.image,
         ),
-        ("doc", f"Documents (PDF / DOCX / text) — extract text{_suffix('doc')}", cfg.doc),
+        ("doc", f"{i18n_t('wiz_enrich_doc')}{_suffix('doc')}", cfg.doc),
     ]
     choices = [
         questionary.Choice(title=label, value=key, checked=default_on) for key, label, default_on in all_kinds
@@ -1714,7 +1769,7 @@ async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[st
     picked = await _bind_escape(
         _bind_arrow_checkbox(
             questionary.checkbox(
-                "Enrich media? (→ / space to toggle, ← to uncheck, Enter to accept)",
+                i18n_t("wiz_enrich_q"),
                 choices=choices,
                 style=LIST_STYLE,
             )
@@ -1724,10 +1779,10 @@ async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[st
     if picked is None:
         return None
     if picked is BACK:
-        _replace_last_line("[dim]← Back[/]")
+        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
         return BACK
-    summary = ",".join(picked) if picked else "none"
-    _replace_last_line(f"[bold cyan]?[/] enrich: [bold]{summary}[/]")
+    summary = ",".join(picked) if picked else i18n_t("wiz_enrich_summary_none")
+    _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_enrich')}: [bold]{summary}[/]")
     return picked
 
 
@@ -1743,9 +1798,7 @@ async def _prompt_msg_ref() -> str | None:
 
     while True:
         raw = await questionary.text(
-            "Message link or msg_id "
-            "(e.g. https://t.me/c/1234567/890, https://t.me/somegroup/890, or bare 890 — "
-            "blank to cancel)",
+            i18n_t("wiz_msg_ref_prompt"),
             default="",
         ).ask_async()
         if raw is None:
@@ -1761,14 +1814,10 @@ async def _prompt_msg_ref() -> str | None:
         try:
             parsed = _parse_link(raw)
         except Exception as e:
-            console.print(f"[red]Can't parse '{raw}':[/] {e}")
+            console.print(f"[red]{i18n_tf('wiz_msg_ref_cant_parse', raw=raw, err=e)}[/]")
             continue
         if parsed.msg_id is None:
-            console.print(
-                f"[red]No msg_id in '{raw}'.[/] "
-                "Expected a message link like https://t.me/c/<chat>/<msg> "
-                "(optionally with a topic in between), or a bare integer id."
-            )
+            console.print(f"[red]{i18n_tf('wiz_msg_ref_no_msgid', raw=raw)}[/]")
             continue
         return raw
 
@@ -1781,14 +1830,14 @@ async def _pick_mark_read(*, default: bool):
     Telegram's read marker matches intent.
     """
     choices = [
-        questionary.Choice("Yes — advance Telegram's read marker after analysis", value=True),
-        questionary.Choice("No — keep messages unread in Telegram", value=False),
+        questionary.Choice(i18n_t("wiz_mark_read_yes"), value=True),
+        questionary.Choice(i18n_t("wiz_mark_read_no"), value=False),
         questionary.Separator(),
-        questionary.Choice("← Back", value=BACK),
+        questionary.Choice(i18n_t("wiz_back"), value=BACK),
     ]
     picked = await _bind_escape(
         questionary.select(
-            "Mark the processed messages as read?",
+            i18n_t("wiz_mark_read_q"),
             choices=choices,
             default=bool(default),
             use_jk_keys=False,
@@ -1799,9 +1848,10 @@ async def _pick_mark_read(*, default: bool):
     if picked is None:
         return None
     if picked is BACK:
-        _replace_last_line("[dim]← Back[/]")
+        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
         return BACK
-    _replace_last_line(f"[bold cyan]?[/] mark-read: [bold]{'yes' if picked else 'no'}[/]")
+    yn = i18n_t("wiz_summary_yes") if picked else i18n_t("wiz_summary_no")
+    _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_mark_read')}: [bold]{yn}[/]")
     return picked
 
 
@@ -1834,25 +1884,22 @@ async def _pick_period(
         n = c.get(key)
         if n is None:
             return base
-        return f"{base}  [{n} msgs]"
+        return f"{base}  [{i18n_tf('wiz_period_n_msgs', n=n)}]"
 
     options: list[Any] = [
-        questionary.Choice(
-            title=_label("Unread (default) — since Telegram read marker", "unread"),
-            value="unread",
-        ),
-        questionary.Choice(title=_label("Last 7 days", "last7"), value="last7"),
-        questionary.Choice(title=_label("Last 30 days", "last30"), value="last30"),
-        questionary.Choice(title=_label("Full history", "full"), value="full"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_unread"), "unread"), value="unread"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last7"), "last7"), value="last7"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last30"), "last30"), value="last30"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_full"), "full"), value="full"),
     ]
     if not static_only:
-        options.append(questionary.Choice(title="From a specific message (link or id)…", value="from_msg"))
-        options.append(questionary.Choice(title="Custom date range…", value="custom"))
+        options.append(questionary.Choice(title=i18n_t("wiz_period_from_msg"), value="from_msg"))
+        options.append(questionary.Choice(title=i18n_t("wiz_period_custom"), value="custom"))
     options.append(questionary.Separator())
-    options.append(questionary.Choice(title="← Back", value=BACK))
+    options.append(questionary.Choice(title=i18n_t("wiz_back"), value=BACK))
     key = await _bind_escape(
         questionary.select(
-            "Pick a period",
+            i18n_t("wiz_pick_period"),
             choices=options,
             use_jk_keys=False,
             style=LIST_STYLE,
@@ -1862,20 +1909,21 @@ async def _pick_period(
     if key is None:
         return None
     if key is BACK:
-        _replace_last_line("[dim]← Back[/]")
+        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
         return BACK
-    _period_labels = {
-        "unread": "unread (since Telegram read marker)",
-        "last7": "last 7 days",
-        "last30": "last 30 days",
-        "full": "full history",
-        "custom": "custom range",
-        "from_msg": "from a specific message",
+    _period_label_keys = {
+        "unread": "wiz_summary_period_unread",
+        "last7": "wiz_summary_period_last7",
+        "last30": "wiz_summary_period_last30",
+        "full": "wiz_summary_period_full",
+        "custom": "wiz_summary_period_custom",
+        "from_msg": "wiz_summary_period_from_msg",
     }
-    label = _period_labels.get(key, key)
+    label_key = _period_label_keys.get(key)
+    label = i18n_t(label_key) if label_key else key
     n = c.get(key) if isinstance(key, str) else None
-    label_with_count = f"{label} [{n} msgs]" if n is not None else label
-    _replace_last_line(f"[bold cyan]?[/] period: [bold]{label_with_count}[/]")
+    label_with_count = i18n_tf("wiz_summary_period_with_count", label=label, n=n) if n is not None else label
+    _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_period')}: [bold]{label_with_count}[/]")
     if key == "from_msg":
         ref = await _prompt_msg_ref()
         if ref is None:
@@ -1884,11 +1932,14 @@ async def _pick_period(
             # "I meant to pick last-7" without losing their chat / preset
             # choice so far.
             return await _pick_period(counts=counts)
-        _replace_last_line(f"[bold cyan]?[/] period: [bold]from {ref}[/]")
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_period')}: "
+            f"[bold]{i18n_tf('wiz_summary_step_period_from', ref=ref)}[/]"
+        )
         return key, None, None, ref
     if key == "custom":
-        since = await questionary.text("From (YYYY-MM-DD, blank for open)", default="").ask_async()
-        until = await questionary.text("Until (YYYY-MM-DD, blank for open)", default="").ask_async()
+        since = await questionary.text(i18n_t("wiz_custom_since_prompt"), default="").ask_async()
+        until = await questionary.text(i18n_t("wiz_custom_until_prompt"), default="").ask_async()
         if since is None or until is None:
             return None
         for val in (since, until):
@@ -1896,7 +1947,7 @@ async def _pick_period(
                 try:
                     datetime.strptime(val, "%Y-%m-%d")
                 except ValueError:
-                    console.print(f"[red]Bad date:[/] {val} (expected YYYY-MM-DD)")
+                    console.print(f"[red]{i18n_tf('wiz_bad_date', value=val)}[/]")
                     return await _pick_period(counts=counts)
         return key, since or None, until or None, None
     return key, None, None, None

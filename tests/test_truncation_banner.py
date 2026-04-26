@@ -46,8 +46,10 @@ def test_banner_prepended_when_truncated() -> None:
 def test_banner_names_the_preset_file_to_edit() -> None:
     r = _mk_result("partial", truncated=True, preset="digest")
     out = _with_truncation_banner(r)
-    # Banner must reference the preset file path so the user knows where to go.
-    assert "presets/digest.md" in out
+    # Banner must reference the preset file path so the user knows where to
+    # go. Per-language presets live under presets/<lang>/<name>.md; the
+    # banner uses a placeholder so it works regardless of locale.
+    assert "presets/<lang>/digest.md" in out
     assert "output_budget_tokens" in out
 
 

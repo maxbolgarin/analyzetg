@@ -23,6 +23,8 @@ from rich.table import Table
 
 from analyzetg.config import get_settings
 from analyzetg.db.repo import open_repo
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.models import Subscription
 from analyzetg.tg.client import tg_client
 from analyzetg.util.logging import get_logger
@@ -134,7 +136,7 @@ async def cmd_run(
             all_subs = [s for s in all_subs if int(s.chat_id) == int(only_chat)]
         targets_preview = [s for s in all_subs if s.source_kind != "comments"]
         if not targets_preview:
-            console.print("[yellow]No enabled subscriptions to run.[/]")
+            console.print(f"[yellow]{_t('run_no_enabled_subs')}[/]")
             return
 
         # Compact summary so the user can see what's about to be hit
@@ -150,24 +152,27 @@ async def cmd_run(
                     comments_for[int(s.chat_id)] = has
                     if has:
                         n_comments_pairs += 1
-        summary_table = Table(title=f"Enabled subscriptions ({len(targets_preview)})")
-        for col in ("title", "kind", "preset", "period", "comments"):
-            summary_table.add_column(col)
+        summary_table = Table(title=_tf("run_summary_table_title", n=len(targets_preview)))
+        for col_key in (
+            "run_col_title",
+            "run_col_kind",
+            "run_col_preset",
+            "run_col_period",
+            "run_col_comments",
+        ):
+            summary_table.add_column(_t(col_key))
         for s in targets_preview:
-            comments_label = "✓ folded in" if comments_for.get(int(s.chat_id)) else "—"
+            comments_label = _t("run_folded_in_label") if comments_for.get(int(s.chat_id)) else _t("run_dash")
             summary_table.add_row(
                 (s.title or str(s.chat_id))[:50],
                 s.source_kind,
-                s.preset or "summary",
-                s.period or "unread",
+                s.preset or _t("run_default_preset"),
+                s.period or _t("run_default_period"),
                 comments_label,
             )
         console.print(summary_table)
         if n_comments_pairs:
-            console.print(
-                f"[dim]→ {n_comments_pairs} channel(s) have a sibling comments group "
-                "subscribed and will be merged into one report each.[/]"
-            )
+            console.print(f"[dim]{_tf('run_comments_auto_merge', n=n_comments_pairs)}[/]")
 
         # Use LIST_STYLE + ESC-binding for consistency with the analyze
         # wizard. ESC = cancel; mouse-friendly choice labels.
@@ -178,18 +183,12 @@ async def cmd_run(
 
             mode = await _bind_escape(
                 questionary.select(
-                    "How to run?",
+                    _t("run_mode_picker_q"),
                     choices=[
-                        questionary.Choice(
-                            title="📄  Per-chat — one report per subscription (default)",
-                            value="per_chat",
-                        ),
-                        questionary.Choice(
-                            title="📚  Flat — single combined report across all enabled subs",
-                            value="flat",
-                        ),
+                        questionary.Choice(title=_t("run_mode_per_chat"), value="per_chat"),
+                        questionary.Choice(title=_t("run_mode_flat"), value="flat"),
                         questionary.Separator(),
-                        questionary.Choice(title="← Cancel", value="cancel"),
+                        questionary.Choice(title=_t("run_mode_cancel"), value="cancel"),
                     ],
                     default="per_chat",
                     use_jk_keys=False,
@@ -200,7 +199,7 @@ async def cmd_run(
         except (KeyboardInterrupt, EOFError):
             mode = "cancel"
         if mode is None or mode == "cancel":
-            console.print("[dim]Cancelled.[/]")
+            console.print(f"[dim]{_t('cancelled')}[/]")
             return
         if mode == "flat":
             flat = True
@@ -229,7 +228,7 @@ async def cmd_run(
         # their own — drop them from the worklist.
         targets = [s for s in all_subs if s.source_kind != "comments"]
         if not targets:
-            console.print("[yellow]No enabled subscriptions to run.[/]")
+            console.print(f"[yellow]{_t('run_no_enabled_subs')}[/]")
             return
 
         # Pre-resolve per-target `with_comments` so the plan table can
@@ -246,33 +245,46 @@ async def cmd_run(
 
         # Plan summary first so the user can confirm before any
         # backfill / OpenAI spend.
-        plan = Table(title=f"`atg chats run` plan — {len(targets)} subscription(s)")
-        for col in ("chat_id", "title", "preset", "period", "enrich", "mark_read", "post_to", "comments"):
-            plan.add_column(col)
+        plan = Table(title=_tf("run_plan_title", n=len(targets)))
+        for col_key in (
+            "run_col_chat_id",
+            "run_col_title",
+            "run_col_preset",
+            "run_col_period",
+            "run_col_enrich",
+            "run_col_mark_read",
+            "run_col_post_to",
+            "run_col_comments",
+        ):
+            plan.add_column(_t(col_key))
         for s in targets:
-            preset_eff = preset_override or s.preset or "summary"
+            preset_eff = preset_override or s.preset or _t("run_default_preset")
             period_eff = _resolve_period(s.period, period_override)
             enrich_eff = _resolve_enrich(
                 s.enrich_kinds, enrich_override, enrich_all_override, no_enrich_override
             )
             if enrich_eff["no_enrich"]:
-                enrich_label = "none"
+                enrich_label = _t("run_enrich_none")
             elif enrich_eff["enrich_all"]:
-                enrich_label = "all"
+                enrich_label = _t("run_enrich_all")
             elif enrich_eff["enrich"]:
                 enrich_label = enrich_eff["enrich"]
             else:
-                enrich_label = "(config defaults)"
+                enrich_label = _t("run_enrich_config_defaults")
             mr_eff = mark_read_override if mark_read_override is not None else s.mark_read
-            pt_eff = post_to_override or s.post_to or "—"
-            comments_label = "✓ folded in" if with_comments_map[(int(s.chat_id), int(s.thread_id))] else "—"
+            pt_eff = post_to_override or s.post_to or _t("run_dash")
+            comments_label = (
+                _t("run_folded_in_label")
+                if with_comments_map[(int(s.chat_id), int(s.thread_id))]
+                else _t("run_dash")
+            )
             plan.add_row(
                 str(s.chat_id),
                 (s.title or "")[:40],
                 preset_eff,
                 period_eff,
                 enrich_label,
-                "yes" if mr_eff else "no",
+                _t("wiz_summary_yes") if mr_eff else _t("wiz_summary_no"),
                 pt_eff,
                 comments_label,
             )
@@ -281,16 +293,12 @@ async def cmd_run(
         # otherwise that one channel + one comments sub = one merged report.
         n_with_comments = sum(1 for v in with_comments_map.values() if v)
         if n_with_comments:
-            console.print(
-                f"[dim]→ {n_with_comments} channel(s) will have their linked discussion-group "
-                "comments pulled into the same report (one merged analysis per channel, "
-                "not two separate reports).[/]"
-            )
+            console.print(f"[dim]{_tf('run_comments_merge_note', n=n_with_comments)}[/]")
         if dry_run:
-            console.print("[dim]→ --dry-run: not running.[/]")
+            console.print(f"[dim]{_t('run_dry_run_note')}[/]")
             return
-        if not yes and not typer.confirm(f"Run analyze on {len(targets)} subscription(s)?", default=True):
-            console.print("[dim]Cancelled.[/]")
+        if not yes and not typer.confirm(_tf("run_analyze_confirm_q", n=len(targets)), default=True):
+            console.print(f"[dim]{_t('cancelled')}[/]")
             return
 
     # Re-open client/repo per sub via cmd_analyze (each opens its own).
@@ -310,10 +318,15 @@ async def cmd_run(
         with_comments = with_comments_map.get((int(s.chat_id), int(s.thread_id)), False)
 
         title = s.title or str(s.chat_id)
-        console.print(
-            f"\n[bold cyan]>>[/] [{i}/{len(targets)}] {title} "
-            f"[dim](preset={preset_eff}, period={period_eff})[/]"
+        progress = _tf(
+            "run_progress_line",
+            i=i,
+            total=len(targets),
+            title=title,
+            preset=preset_eff,
+            period=period_eff,
         )
+        console.print(f"\n[bold cyan]>>[/] {progress}")
         try:
             await cmd_analyze(
                 ref=str(s.chat_id),
@@ -356,27 +369,34 @@ async def cmd_run(
             # this sub" (e.g. zero unread); not a failure of the run as
             # a whole. Higher exit codes propagate as a per-sub error.
             if e.exit_code == 0:
-                results.append({"chat_id": s.chat_id, "title": title, "ok": True, "err": "skipped (no msgs)"})
+                results.append(
+                    {"chat_id": s.chat_id, "title": title, "ok": True, "err": _t("run_skipped_no_msgs")}
+                )
             else:
                 results.append(
-                    {"chat_id": s.chat_id, "title": title, "ok": False, "err": f"exit {e.exit_code}"}
+                    {
+                        "chat_id": s.chat_id,
+                        "title": title,
+                        "ok": False,
+                        "err": _tf("run_exit_code_label", code=e.exit_code),
+                    }
                 )
         except Exception as e:
             log.error("run.sub_failed", chat_id=s.chat_id, err=str(e)[:300])
             results.append({"chat_id": s.chat_id, "title": title, "ok": False, "err": str(e)[:200]})
 
     # Final summary.
-    summary = Table(title="`atg chats run` results")
-    for col in ("chat_id", "title", "status", "note"):
-        summary.add_column(col)
+    summary = Table(title=_t("run_results_title"))
+    for col_key in ("run_col_chat_id", "run_col_title", "run_col_status", "run_col_note"):
+        summary.add_column(_t(col_key))
     ok_count = 0
     for r in results:
-        status = "[green]OK[/]" if r["ok"] else "[red]FAIL[/]"
+        status = f"[green]{_t('run_status_ok')}[/]" if r["ok"] else f"[red]{_t('run_status_fail')}[/]"
         if r["ok"]:
             ok_count += 1
         summary.add_row(str(r["chat_id"]), r["title"][:40], status, r["err"] or "")
     console.print(summary)
-    console.print(f"[bold]{ok_count}/{len(results)} succeeded.[/]")
+    console.print(f"[bold]{_tf('run_results_summary', ok=ok_count, total=len(results))}[/]")
 
 
 async def _cmd_run_flat(
@@ -419,7 +439,7 @@ async def _cmd_run_flat(
     # "unread", and config-default enrichments.
     preset_name = preset_override or "multichat"
     if preset_name not in PRESETS:
-        console.print(f"[red]Unknown preset:[/] {preset_name}")
+        console.print(f"[red]{_t('run_unknown_preset')}[/] {preset_name}")
         raise typer.Exit(2)
     period = period_override or "unread"
     period_kwargs = _period_to_kwargs(period)
@@ -459,28 +479,30 @@ async def _cmd_run_flat(
             all_subs = [s for s in all_subs if int(s.chat_id) == int(only_chat)]
         targets = [s for s in all_subs if s.source_kind != "comments"]
         if not targets:
-            console.print("[yellow]No enabled subscriptions to run.[/]")
+            console.print(f"[yellow]{_t('run_no_enabled_subs')}[/]")
             return
 
         # Plan summary.
-        plan = Table(title=f"`atg chats run --flat` plan — {len(targets)} subscription(s)")
-        for col in ("chat_id", "title", "kind"):
-            plan.add_column(col)
+        plan = Table(title=_tf("run_flat_plan_title", n=len(targets)))
+        for col_key in ("run_col_chat_id", "run_col_title", "run_col_kind"):
+            plan.add_column(_t(col_key))
         for s in targets:
             plan.add_row(str(s.chat_id), (s.title or "")[:50], s.source_kind)
         console.print(plan)
+        if enrich_dict["enrich_all"]:
+            enrich_summary = _t("run_enrich_all")
+        elif enrich_dict["no_enrich"]:
+            enrich_summary = _t("run_enrich_none")
+        else:
+            enrich_summary = enrich_dict["enrich"] or _t("run_enrich_config_defaults")
         console.print(
-            f"[dim]→ Flat mode: one combined report. preset={preset_name}, "
-            f"period={period}, enrich="
-            f"{'all' if enrich_dict['enrich_all'] else 'none' if enrich_dict['no_enrich'] else (enrich_dict['enrich'] or 'config defaults')}.[/]"
+            f"[dim]{_tf('run_flat_mode_desc', preset=preset_name, period=period, enrich=enrich_summary)}[/]"
         )
         if dry_run:
-            console.print("[dim]→ --dry-run: not running.[/]")
+            console.print(f"[dim]{_t('run_dry_run_note')}[/]")
             return
-        if not yes and not typer.confirm(
-            f"Build one merged report from {len(targets)} chat(s)?", default=True
-        ):
-            console.print("[dim]Cancelled.[/]")
+        if not yes and not typer.confirm(_tf("run_flat_confirm_q", n=len(targets)), default=True):
+            console.print(f"[dim]{_t('cancelled')}[/]")
             return
 
         # Pull each sub's messages. For channels with a sibling comments
@@ -503,9 +525,10 @@ async def _cmd_run_flat(
             if s.source_kind == "channel":
                 with_comments = await _has_linked_comments_sub(repo, int(s.chat_id), all_subs)
             mr_eff = mark_read_override if mark_read_override is not None else s.mark_read
+            maybe_comments = _t("run_flat_with_comments_suffix") if with_comments else ""
             console.print(
-                f"[bold cyan]>>[/] [{i}/{len(targets)}] {s.title or s.chat_id} "
-                f"[dim]({s.source_kind}{', + comments' if with_comments else ''})[/]"
+                f"[bold cyan]>>[/] "
+                f"{_tf('run_flat_sub_progress', i=i, total=len(targets), title=s.title or s.chat_id, kind=s.source_kind, maybe_comments=maybe_comments)}"
             )
             try:
                 prepared = await prepare_chat_run(
@@ -528,12 +551,12 @@ async def _cmd_run_flat(
                 )
             except typer.Exit as e:
                 if e.exit_code == 0:
-                    console.print(f"[dim]→ {s.title or s.chat_id}: no messages, skipped.[/]")
+                    console.print(f"[dim]{_tf('run_flat_no_msgs', title=s.title or s.chat_id)}[/]")
                     continue
                 raise
 
             if not prepared.messages:
-                console.print(f"[dim]→ {s.title or s.chat_id}: 0 messages.[/]")
+                console.print(f"[dim]{_tf('run_flat_zero_msgs', title=s.title or s.chat_id)}[/]")
                 continue
 
             # Last_days lives on the iter-level filter rather than
@@ -571,7 +594,8 @@ async def _cmd_run_flat(
             }
             if with_comments and prepared.comments_chat_id is not None:
                 chat_groups[int(prepared.comments_chat_id)] = {
-                    "title": prepared.comments_chat_title or f"Comments {prepared.comments_chat_id}",
+                    "title": prepared.comments_chat_title
+                    or _tf("run_flat_comments_fallback_title", chat_id=prepared.comments_chat_id),
                     "link_template": build_link_template(
                         chat_username=prepared.comments_chat_username,
                         chat_internal_id=prepared.comments_chat_internal_id,
@@ -582,7 +606,7 @@ async def _cmd_run_flat(
                 marks.append(prepared.mark_read_fn)
 
         if not all_messages:
-            console.print("[yellow]No messages across any sub.[/]")
+            console.print(f"[yellow]{_t('run_no_msgs_across_subs')}[/]")
             return
 
         # One merged analysis.
@@ -591,8 +615,12 @@ async def _cmd_run_flat(
             include_transcripts=True,
             enrich=enrich_opts,
         )
-        title = f"All chats (flat) — {len(per_sub_msg_count)} chat(s), {len(all_messages)} msg(s)"
-        console.print(f"\n[dim]→ Running combined analysis on {len(all_messages)} merged message(s)...[/]")
+        title = _tf(
+            "run_flat_title",
+            n_chats=len(per_sub_msg_count),
+            n_msgs=len(all_messages),
+        )
+        console.print(f"\n[dim]{_tf('run_flat_analyzing', n=len(all_messages))}[/]")
         try:
             result = await run_analysis(
                 repo=repo,
@@ -610,7 +638,7 @@ async def _cmd_run_flat(
             )
         except Exception as e:
             log.error("run.flat_failed", err=str(e)[:300])
-            console.print(f"[red]Flat run failed:[/] {e}")
+            console.print(f"[red]{_t('run_flat_failed')}[/] {e}")
             raise
 
         # Save to a single timestamped file.
@@ -620,28 +648,38 @@ async def _cmd_run_flat(
         out_dir = Path("reports")
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"run-flat-{ts}.md"
+        cost_str = f"{float(result.total_cost_usd or 0):.4f}"
         body_lines = [
-            f"# Flat run — {len(per_sub_msg_count)} chat(s)",
+            _tf("run_flat_report_h1", n_chats=len(per_sub_msg_count)),
             "",
-            f"_Preset {preset_name}; period {period}; "
-            f"{len(all_messages)} message(s) merged; cost ${float(result.total_cost_usd or 0):.4f}_",
+            _tf(
+                "run_flat_report_meta",
+                preset=preset_name,
+                period=period,
+                n_msgs=len(all_messages),
+                cost=cost_str,
+            ),
             "",
-            "## Per-chat counts",
+            _t("run_flat_per_chat_h2"),
             "",
         ]
         for item in per_sub_msg_count:
-            primary_label = "channel" if item["kind"] == "channel" else item["kind"]
+            primary_label = _t("run_flat_kind_channel") if item["kind"] == "channel" else item["kind"]
             counts_bits = [f"{item['primary_count']} {primary_label}"]
             if item["comments_count"]:
-                comments_title = item["comments_title"] or f"comments {item['comments_chat_id']}"
-                counts_bits.append(f"{item['comments_count']} comments ({comments_title})")
+                comments_title = item["comments_title"] or _tf(
+                    "run_flat_comments_fallback_title", chat_id=item["comments_chat_id"]
+                )
+                counts_bits.append(
+                    _tf("run_flat_comments_label", n=item["comments_count"], title=comments_title)
+                )
             body_lines.append(f"- **{item['title']}** (`{item['chat_id']}`): {' + '.join(counts_bits)}")
         body_lines.append("")
         body_lines.append("---")
         body_lines.append("")
         body_lines.append(result.final_result)
         out_path.write_text("\n".join(body_lines), encoding="utf-8")
-        console.print(f"[green]Saved[/] {out_path}")
+        console.print(f"[green]{_t('run_saved_label')}[/] {out_path}")
 
         # Optionally post to a chat.
         if post_to_override:
@@ -656,7 +694,7 @@ async def _cmd_run_flat(
                     target=post_to_override,
                 )
             except Exception as e:
-                console.print(f"[yellow]post-to failed:[/] {e}")
+                console.print(f"[yellow]{_t('run_post_to_failed')}[/] {e}")
 
         # Mark read for each sub the user opted in for.
         marked = 0
@@ -666,7 +704,7 @@ async def _cmd_run_flat(
             except Exception as e:
                 log.warning("run.flat.mark_read_failed", err=str(e)[:200])
         if marked:
-            console.print(f"[dim]→ Marked read across {marked} dialog(s)/topic(s).[/]")
+            console.print(f"[dim]{_tf('run_marked_read_across', n=marked)}[/]")
 
 
 __all__ = ["cmd_run"]

@@ -1,6 +1,7 @@
 ---
 name: highlights
 prompt_version: v2
+description: Топ 5–15 самых ценных сообщений с ссылками
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

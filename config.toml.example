@@ -16,12 +16,33 @@
 # What you'll usually tune:
 chat_model_default = "gpt-5.4-mini"
 filter_model_default = "gpt-5.4-nano"
-audio_language = "ru"
+
+# Whisper transcription language. Empty = autodetect (good for mixed-language
+# corpuses). Set to "ru" / "en" / "de" / … if every audio file is the same
+# language — slightly faster + more accurate. Decoupled from [locale].language.
+# audio_language = ""
 
 # audio_model_default = "gpt-4o-mini-transcribe"
 # temperature = 0.2
 # request_timeout_sec = 120
 # max_retries = 5
+
+# ==================================================================== Locale
+#
+# Controls what the user sees: wizard, saved reports, citation headings,
+# ask labels, image/link descriptions, and analysis output language.
+# Presets live under presets/<language>/ — the loader reads from the active
+# language's directory only (no fallback). RU users opt in by setting
+# language = "ru"; the experience matches what analyzetg shipped before
+# English support landed.
+
+# [locale]
+# language = "en"           # "en", "ru" (other ISO codes work if you add
+#                           # presets/<code>/ + i18n entries).
+# content_language = ""     # Empty = follow `language`. Set to "en"/"ru"/…
+#                           # if your chats are predominantly one language
+#                           # and `language` is something else — affects
+#                           # cost estimates only.
 
 # =================================================================== Analyze
 
