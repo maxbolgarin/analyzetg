@@ -33,8 +33,10 @@ atg analyze @somegroup --console        # render in terminal instead of a file
 atg analyze @somegroup --last-days 7 --preset digest
 
 # Q&A across your synced archive (no Telegram round-trip)
-atg ask "what did Bob say about migration?" --chat @somegroup
-atg ask "open questions on the API" --folder Work --interactive
+atg ask                                              # opens the wizard
+atg ask "what did Bob say about migration?" @somegroup
+atg ask "open questions on the API" --folder Work
+atg ask "..." --global                               # all synced chats, no wizard
 
 # Cost-guarded run with citation audit blocks + Telegram Saved Messages delivery
 atg analyze @somegroup --max-cost 0.10 --cite-context 3 --post-saved
@@ -188,7 +190,7 @@ command will fail with missing credentials. Two ways to avoid that:
 | `atg init` | Interactive first-time setup. |
 | `atg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
 | `atg analyze [<ref>] [flags]` | Analyze a chat. Default window = unread. |
-| `atg ask "question" [flags]` | Q&A across your synced archive — no Telegram round-trip. |
+| `atg ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
 | `atg dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
 
 ### Sync & subscriptions
@@ -331,13 +333,23 @@ by default. Every cited claim is a clickable link back to the source:
 ## `atg ask` — Q&A across your synced archive
 
 ```bash
-atg ask "what did we decide about the migration?" --chat @somegroup --interactive
+atg ask "what did we decide about the migration?" @somegroup
+atg ask                                                 # opens the wizard
 ```
 
 Reads only your **local DB** — no Telegram round-trip during retrieval.
 The corpus is everything `analyze` / `dump` / `sync` has already pulled
 (transcripts, image descriptions, doc extracts, link summaries
 included).
+
+**Synopsis**: `atg ask "QUESTION" [<ref>] [flags]`. The positional
+`<ref>` accepts any chat reference (`@user`, `t.me` link, topic URL,
+fuzzy title, numeric id). A topic URL like
+`https://t.me/c/1234567890/4` auto-fills `--thread`. Without
+`<ref>` / `--chat` / `--folder` / `--global` the command opens the
+wizard (chat picker → period → confirm → backfill → answer); without a
+question, the wizard prompts for it inline. The four scope sources are
+mutually exclusive — pick one per call.
 
 ### Pipeline
 
@@ -353,9 +365,11 @@ included).
 
 | Flag | Meaning |
 |---|---|
-| `--chat <ref>` | Restrict to one chat. |
+| `<ref>` (positional) | Restrict to one chat — `@user`, `t.me` link, topic URL (auto-fills `--thread`), fuzzy title, numeric id. Mutually exclusive with `--chat` / `--folder` / `--global`. |
+| `--chat <ref>` | Same as positional `<ref>` but explicit. |
 | `--folder NAME` | Restrict to chats in this Telegram folder. |
-| `--thread N` | Restrict to a forum topic (used with `--chat`). |
+| `--global` / `-g` | Search every synced chat in the local DB (no wizard, no Telegram calls). The pre-wizard default. |
+| `--thread N` | Restrict to a forum topic (used with `--chat` / `<ref>`; topic URLs auto-fill this). |
 | `--since/--until/--last-days` | Date filter. |
 | `--limit N` | Max messages to retrieve (default 200; bumped to 500 when rerank is on). |
 | `--rerank/--no-rerank` | Two-stage retrieval (default on; toggled in `[ask]` config). |
@@ -363,19 +377,30 @@ included).
 | `--build-index` | Embed every body-bearing message in the scoped chat(s). Idempotent. |
 | `--refresh` | Backfill new messages from Telegram before retrieval. Requires `--chat` or `--folder`. |
 | `--show-retrieved` | Print the retrieved messages with scores before the LLM call (debug). |
-| `--interactive` / `-i` | Drop into a follow-up prompt loop after the first answer. Prior turns flow as message history. |
+| `--no-followup` | Skip the post-answer "Continue chatting?" prompt (cron / scripts / non-interactive). |
 | `--max-cost N` | Abort if the estimated USD cost exceeds N. |
 | `--model M` | Override the answering model. |
 | `-o <path>` / `--console` | Save to file / force terminal render. |
 
+After every answer the CLI prompts `Continue chatting? [y/N]` (default
+`n`). Press `y` to drop into multi-turn follow-ups (each new question
+sees prior turns as message history); press Enter to exit. Pass
+`--no-followup` to suppress the prompt entirely.
+
 ### Examples
 
 ```bash
-# Across all synced chats:
-atg ask "когда дедлайн по проекту?" --last-days 7
+# No args — opens the wizard (asks for the question, then chat → period → confirm):
+atg ask
 
-# In one chat, interactive follow-ups:
-atg ask "what did Bob say about migration?" --chat @somegroup -i
+# Positional ref — username:
+atg ask "what did Bob say about migration?" @somegroup
+
+# Positional ref — topic URL (thread auto-filled):
+atg ask "open questions on the API" https://t.me/c/1234567890/4
+
+# Across every synced chat (no wizard):
+atg ask "когда дедлайн по проекту?" --global --last-days 7
 
 # Folder scope, semantic retrieval (build index first):
 atg ask "..." --folder Work --build-index
@@ -385,7 +410,10 @@ atg ask "open questions on the API" --folder Work --semantic --rerank --last-day
 atg ask "..." --limit 50 --model gpt-5.4-nano
 
 # Debug retrieval before paying for the answer:
-atg ask "..." --chat @somegroup --show-retrieved --max-cost 0.05
+atg ask "..." @somegroup --show-retrieved --max-cost 0.05
+
+# Single answer, no follow-up prompt (script-friendly):
+atg ask "..." @somegroup --no-followup
 ```
 
 ### Cost feel
@@ -813,8 +841,8 @@ atg watch --interval 24h analyze --folder Work --preset digest --post-saved
 # Audit a high-stakes report — citations get expanded, claims verified
 atg analyze @somegroup --preset action_items --cite-context 5 --self-check
 
-# What did Bob say last week? Across one chat, with rerank + interactive follow-ups
-atg ask "what did Bob propose?" --chat @somegroup --by Bob --last-days 7 -i
+# What did Bob say last week? In one chat, with rerank + post-answer follow-ups (default)
+atg ask "what did Bob propose?" @somegroup --last-days 7
 
 # Filter analysis to one sender (with a citable result)
 atg analyze @somegroup --by Bob --preset highlights
