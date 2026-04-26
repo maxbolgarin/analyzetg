@@ -91,6 +91,11 @@ BACK = object()
 # Sentinel returned by _pick_chat when the user picks "Run on all N unread".
 ALL_UNREAD = object()
 
+# Sentinel returned by _pick_chat when the user picks "Search ALL
+# synced chats (local DB)". Triggers the no-scope local query path —
+# zero TG round-trips, retrieval reads every synced chat.
+ALL_LOCAL = object()
+
 # Rough token estimate per formatted message line (sender + timestamp + body).
 # Used only for up-front cost previews; the real pipeline counts exactly via
 # tiktoken. Cyrillic runs ~1.5x the English rate — this is a middle ground.
@@ -1320,6 +1325,7 @@ async def _pick_chat(
     client,
     *,
     offer_all_unread: bool = False,
+    offer_all_local: bool = False,
     subscribed_ids: set[int] | None = None,
 ) -> dict | None | object:
     """Show dialogs with unread (sorted by count desc), offer all-dialogs fallback.
@@ -1329,9 +1335,14 @@ async def _pick_chat(
     `atg chats list` without leaving the picker. Empty set / None
     behaves like before.
 
+    `offer_all_local` (used by the ask wizard) adds a "Search ALL synced
+    chats (local DB)" row that returns the `ALL_LOCAL` sentinel —
+    triggers the no-scope local-only path (zero TG round-trips).
+
     Returns one of:
       - dict (picked chat) — a resolved entry
       - ALL_UNREAD — user picked "Run on all N unread chats" (if offer_all_unread)
+      - ALL_LOCAL — user picked "Search ALL synced chats" (if offer_all_local)
       - None — cancelled
     """
     from analyzetg.tg.folders import chat_folder_index
@@ -1362,6 +1373,13 @@ async def _pick_chat(
             value=("all", None),
         )
     )
+    if offer_all_local:
+        choices.append(
+            questionary.Choice(
+                title=i18n_t("wiz_ask_all_local"),
+                value=ALL_LOCAL,
+            )
+        )
     if offer_all_unread:
         total = sum(d.unread_count for d in unread)
         choices.append(
@@ -1403,6 +1421,15 @@ async def _pick_chat(
 
     if result is None:
         return None
+    # ALL_LOCAL row returns the sentinel object directly (not a tuple) —
+    # short-circuit before the tuple-unpack so the ask wizard's no-scope
+    # path is reachable without breaking the existing per-chat / all /
+    # all_unread shape.
+    if result is ALL_LOCAL:
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: [bold]{i18n_t('wiz_ask_all_local')}[/]"
+        )
+        return ALL_LOCAL
     action, payload = result
     if action == "all_unread":
         _replace_last_line(
@@ -1954,6 +1981,7 @@ async def _pick_period(
 
 
 __all__ = [
+    "ALL_LOCAL",
     "ALL_UNREAD",
     "BACK",
     "InteractiveAnswers",

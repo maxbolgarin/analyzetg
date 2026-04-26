@@ -9,7 +9,11 @@ to widths / labels doesn't silently wreck the layout.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import pytest
+
+from analyzetg import interactive
 from analyzetg.interactive import (
     _COL_DATE,
     _COL_KIND,
@@ -20,6 +24,7 @@ from analyzetg.interactive import (
     _fmt_date,
     _short_kind,
 )
+from analyzetg.tg.dialogs import UnreadDialog
 
 
 def test_short_kind_folds_supergroup_to_group():
@@ -138,3 +143,142 @@ def test_column_widths_fit_expected_content():
     assert len("channel") <= _COL_KIND
     assert len("Apr 23 09:14") <= _COL_DATE
     assert len("unread") <= _COL_UNREAD
+
+
+# ---------------------------------------------------------------------------
+# _pick_chat: ALL_LOCAL sentinel
+# ---------------------------------------------------------------------------
+
+
+class _FakeAsker:
+    """Stand-in for what `questionary.select(...)` returns.
+
+    `_pick_chat` does:
+        await _bind_escape(questionary.select(..., choices=...), None).ask_async()
+    so we need an object that:
+      - exposes `application.key_bindings.add(...)` (no-op decorator),
+      - exposes `ask_async()` returning whatever the test wants.
+    """
+
+    def __init__(self, return_value: Any) -> None:
+        self._return = return_value
+        self.application = self  # so .application.key_bindings resolves
+        self.key_bindings = self  # so .key_bindings.add resolves
+
+    def add(self, *_args: Any, **_kwargs: Any):
+        # `_bind_escape` uses this as a decorator (`@question.application.key_bindings.add(...)`),
+        # which expects the result of `add(...)` to itself be a decorator.
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+    async def ask_async(self):
+        return self._return
+
+
+def _make_unread(chat_id: int, title: str, unread: int = 1) -> UnreadDialog:
+    return UnreadDialog(
+        chat_id=chat_id,
+        kind="user",
+        title=title,
+        username=None,
+        unread_count=unread,
+        read_inbox_max_id=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pick_chat_offers_all_local_when_flag_set(monkeypatch):
+    """With offer_all_local=True the picker shows the ALL_LOCAL row whose
+    value is the sentinel."""
+    captured: dict[str, Any] = {}
+
+    async def fake_list_unread_dialogs(_client):
+        return [_make_unread(1, "alpha"), _make_unread(2, "beta")]
+
+    async def fake_folder_index(_client):
+        return {}
+
+    def fake_select(_msg, *, choices, **_kwargs):
+        captured["choices"] = choices
+        return _FakeAsker(return_value=None)
+
+    monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
+    monkeypatch.setattr(
+        "analyzetg.tg.folders.chat_folder_index",
+        fake_folder_index,
+    )
+    monkeypatch.setattr(interactive.questionary, "select", fake_select)
+
+    result = await interactive._pick_chat(client=object(), offer_all_local=True)
+    # ask_async returned None → picker returns None overall
+    assert result is None
+
+    choices = captured["choices"]
+    # Find any choice whose `value` is the sentinel.
+    matches = [c for c in choices if getattr(c, "value", None) is interactive.ALL_LOCAL]
+    assert len(matches) == 1, "expected exactly one ALL_LOCAL row in the picker choices"
+
+
+@pytest.mark.asyncio
+async def test_pick_chat_no_all_local_by_default(monkeypatch):
+    """Without offer_all_local the ALL_LOCAL row must NOT appear (analyze /
+    dump wizards must not see it)."""
+    captured: dict[str, Any] = {}
+
+    async def fake_list_unread_dialogs(_client):
+        return [_make_unread(1, "alpha")]
+
+    async def fake_folder_index(_client):
+        return {}
+
+    def fake_select(_msg, *, choices, **_kwargs):
+        captured["choices"] = choices
+        return _FakeAsker(return_value=None)
+
+    monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
+    monkeypatch.setattr(
+        "analyzetg.tg.folders.chat_folder_index",
+        fake_folder_index,
+    )
+    monkeypatch.setattr(interactive.questionary, "select", fake_select)
+
+    await interactive._pick_chat(client=object())  # no flags → defaults
+
+    choices = captured["choices"]
+    assert not any(getattr(c, "value", None) is interactive.ALL_LOCAL for c in choices), (
+        "ALL_LOCAL row leaked into a default picker invocation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pick_chat_all_local_appears_above_all_unread(monkeypatch):
+    """Conservative-default-first ordering: ALL_LOCAL precedes the
+    ALL_UNREAD row when both are offered."""
+    captured: dict[str, Any] = {}
+
+    async def fake_list_unread_dialogs(_client):
+        return [_make_unread(1, "alpha"), _make_unread(2, "beta")]
+
+    async def fake_folder_index(_client):
+        return {}
+
+    def fake_select(_msg, *, choices, **_kwargs):
+        captured["choices"] = choices
+        return _FakeAsker(return_value=None)
+
+    monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
+    monkeypatch.setattr(
+        "analyzetg.tg.folders.chat_folder_index",
+        fake_folder_index,
+    )
+    monkeypatch.setattr(interactive.questionary, "select", fake_select)
+
+    await interactive._pick_chat(client=object(), offer_all_unread=True, offer_all_local=True)
+
+    values = [getattr(c, "value", None) for c in captured["choices"]]
+    # Both must be present.
+    local_idx = next(i for i, v in enumerate(values) if v is interactive.ALL_LOCAL)
+    unread_idx = next(i for i, v in enumerate(values) if isinstance(v, tuple) and v and v[0] == "all_unread")
+    assert local_idx < unread_idx, "ALL_LOCAL row must appear above the ALL_UNREAD row"

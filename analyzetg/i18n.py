@@ -836,6 +836,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "🚀  Run on ALL {n} unread chats ({total} total messages)",
         "ru": "🚀  Запустить на ВСЕХ {n} непрочитанных чатах (всего сообщений: {total})",
     },
+    "wiz_ask_all_local": {
+        "en": "🌐 Search ALL synced chats (local DB)",
+        "ru": "🌐 Поиск по всем локальным чатам (без Telegram)",
+    },
     "wiz_col_unread": {"en": "unread", "ru": "непроч."},
     "wiz_col_kind": {"en": "kind", "ru": "тип"},
     "wiz_col_last_msg": {"en": "last msg", "ru": "посл. сообщ."},
