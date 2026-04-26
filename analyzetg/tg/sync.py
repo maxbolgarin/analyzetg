@@ -289,23 +289,21 @@ async def backfill(
     iter_kwargs: dict[str, Any] = {"entity": chat_id}
     if thread_id:
         iter_kwargs["reply_to"] = thread_id
-    if from_msg_id is not None:
+    # When a date bound is set, it wins. Telethon's iter_messages does NOT
+    # apply both `min_id` and `offset_date` reliably under `reverse=True`
+    # — `min_id` dominates and the date bound silently drops, which made
+    # `--refresh --last-days 7` walk the entire chat history when local_max
+    # was older than the time window.
+    if since_date is not None and direction == "forward":
+        iter_kwargs["reverse"] = True
+        iter_kwargs["offset_date"] = since_date
+    elif from_msg_id is not None:
         if direction == "forward":
             iter_kwargs["reverse"] = True
             iter_kwargs["min_id"] = max(from_msg_id - 1, 0)
-            # When BOTH a msg-id anchor and a date anchor are given on a
-            # forward walk, apply both — the more restrictive wins. Without
-            # this, an old `local_max` plus `--last-days 7` would still
-            # walk every message > local_max (potentially the whole chat).
-            if since_date is not None:
-                iter_kwargs["offset_date"] = since_date
         else:
             iter_kwargs["reverse"] = False
             iter_kwargs["offset_id"] = from_msg_id
-    elif since_date is not None:
-        # Walk forward from a date so the iterator terminates at "now".
-        iter_kwargs["reverse"] = True
-        iter_kwargs["offset_date"] = since_date
     elif direction == "forward":
         iter_kwargs["reverse"] = True
 
@@ -316,16 +314,20 @@ async def backfill(
     t0 = asyncio.get_event_loop().time()
 
     # Try to estimate the upper bound of msgs we're about to pull so the
-    # bar is determinate. For forward walks from `min_id`, that's roughly
-    # `latest_msg_id - min_id`; for date-anchored walks we can fall back
-    # to the chat's total (rough but better than indeterminate).
+    # bar is determinate. For msg-id-anchored forward walks, that's
+    # roughly `latest_msg_id - from_msg_id`. Date-anchored walks: leave
+    # indeterminate (estimating would need an extra round-trip and the
+    # walk is already bounded by the date).
     estimated_total: int | None = None
-    try:
-        latest = await client.get_messages(chat_id, limit=1, **({"reply_to": thread_id} if thread_id else {}))
-        if latest and from_msg_id is not None and direction == "forward":
-            estimated_total = max(0, int(latest[0].id) - int(from_msg_id))
-    except Exception:
-        pass  # best-effort
+    if since_date is None and direction == "forward" and from_msg_id is not None:
+        try:
+            latest = await client.get_messages(
+                chat_id, limit=1, **({"reply_to": thread_id} if thread_id else {})
+            )
+            if latest:
+                estimated_total = max(0, int(latest[0].id) - int(from_msg_id))
+        except Exception:
+            pass  # best-effort
 
     from rich.console import Console
     from rich.progress import (
