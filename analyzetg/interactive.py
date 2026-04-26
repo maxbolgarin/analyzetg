@@ -195,7 +195,9 @@ class InteractiveAnswers:
     thread_id: int | None
     forum_all_flat: bool
     forum_all_per_topic: bool
-    preset: str
+    # `None` only in ask mode (preset is meaningless there); analyze mode
+    # always sets this and dump mode falls back to the existing default.
+    preset: str | None
     # Period keys: "unread" | "last7" | "last30" | "full" | "custom" | "from_msg"
     period: str
     custom_since: str | None
@@ -204,6 +206,7 @@ class InteractiveAnswers:
     mark_read: bool
     output_path: Path | None = None
     run_on_all_unread: bool = False  # User picked "Run on ALL N unread chats"
+    run_on_all_local: bool = False  # ask mode: "🌐 ALL synced chats" picked
     # None = "use defaults" (config.toml + preset); [] = "disable everything";
     # non-empty list = "enable exactly these kinds" (unioned with preset.enrich_kinds
     # by cmd_analyze via --enrich=<csv>).
@@ -507,19 +510,30 @@ async def run_interactive_describe() -> None:
 
 async def _collect_answers(
     *,
-    mode: str,  # "analyze" | "dump"
+    mode: str,  # "analyze" | "dump" | "ask"
     console_out: bool,
     output: Path | None,
     save_default: bool,
     mark_read: bool | None,
+    question: str | None = None,
 ) -> InteractiveAnswers | None:
     """State-machine wizard: each step can go back one without losing context.
 
-    `mode` controls which steps appear: "analyze" walks through preset;
-    "dump" skips the preset step. CLI flags pre-fill steps and skip the
-    corresponding prompt:
+    `mode` controls which steps appear:
+      - "analyze" walks chat → [comments|thread] → preset → period → enrich → output → mark_read → confirm.
+      - "dump" skips preset.
+      - "ask" skips preset / enrich / output / mark_read; runs chat → [comments|thread] → period → confirm.
+        Ask mode also offers an "ALL synced chats (local DB)" row in the
+        chat picker; picking it sets `run_on_all_local=True` and jumps
+        straight to period (no thread / comments).
+
+    CLI flags pre-fill steps and skip the corresponding prompt:
       - `console_out`, `output`, or `save_default` → skip the output step.
       - `mark_read is not None` → skip the mark-read step.
+
+    `question` is shown in the ask-mode confirm summary so the user can
+    sanity-check what they're about to run; not stored on the returned
+    `InteractiveAnswers` (callers pass the question through on the side).
     """
     settings = get_settings()
     # Whether the user already made these choices at the CLI. If so, the
@@ -577,10 +591,24 @@ async def _collect_answers(
         period_counts: dict[str, int | None] = {}
 
         run_on_all = False
+        run_on_all_local = False
         step = "chat"
         while True:
             if step == "chat":
-                result = await _pick_chat(client, offer_all_unread=True)
+                # Ask mode swaps "Run on all N unread" for "Search ALL
+                # synced chats (local DB)" — the analyze/dump batch flow
+                # doesn't make sense for ask (one question across many
+                # chats is the global ALL_LOCAL path).
+                # NOTE: when the user has zero unread dialogs, _pick_chat
+                # early-returns to _pick_from_all BEFORE the offer_all_local
+                # block runs, so the ALL_LOCAL row is hidden in exactly the
+                # case where ask-mode users would want it most. Tracked for
+                # a follow-up task; not fixed here.
+                result = await _pick_chat(
+                    client,
+                    offer_all_unread=(mode != "ask"),
+                    offer_all_local=(mode == "ask"),
+                )
                 if result is None:
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
@@ -594,6 +622,12 @@ async def _collect_answers(
                         if mode == "analyze"
                         else _next_step_after_mark_read(output_forced, mark_read_forced)
                     )
+                    continue
+                if result is ALL_LOCAL:
+                    # Ask mode only: skip thread/comments and go straight
+                    # to period over the global local corpus.
+                    run_on_all_local = True
+                    step = "period"
                     continue
                 chat = result
                 # Channels can carry a linked discussion group (comments).
@@ -630,6 +664,9 @@ async def _collect_answers(
                     step = "comments"
                 elif mode == "analyze":
                     step = "preset"
+                elif mode == "ask":
+                    # Ask mode skips preset/enrich/output/mark_read.
+                    step = "period"
                 else:
                     # Dump: skip preset (no preset for dump), go straight
                     # to enrich since media enrichment applies here too.
@@ -659,7 +696,7 @@ async def _collect_answers(
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 with_comments = bool(result)
-                step = "preset" if mode == "analyze" else "enrich"
+                step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
 
             elif step == "thread":
                 result = await _pick_thread(client, chat["chat_id"])
@@ -670,7 +707,7 @@ async def _collect_answers(
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 thread_id, forum_all_flat, forum_all_per_topic = result
-                step = "preset" if mode == "analyze" else "enrich"
+                step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
 
             elif step == "preset":
                 # Only runs for analyze mode.
@@ -694,6 +731,8 @@ async def _collect_answers(
             elif step == "period":
                 # Lazily fetch per-period counts once we know chat+thread.
                 # `unread_hint` comes from the dialog picker (chat object).
+                # ALL_LOCAL (ask mode) has no chat scope, so skip the
+                # per-chat count fetch — counts are simply absent.
                 if not period_counts and chat is not None:
                     unread_hint = int(chat.get("unread") or 0)
                     period_counts = await _fetch_period_counts(
@@ -711,7 +750,11 @@ async def _collect_answers(
                         step = "preset"
                     elif chat and chat["kind"] == "forum":
                         step = "thread"
+                    elif mode == "ask" and chat and chat["kind"] == "channel" and linked_chat_id is not None:
+                        step = "comments"
                     else:
+                        # Includes ask + ALL_LOCAL (run_on_all_local) and
+                        # ask + private/group chats: back to chat picker.
                         step = "chat"
                     continue
                 if result is None:
@@ -730,7 +773,8 @@ async def _collect_answers(
                         since=datetime.strptime(custom_since, "%Y-%m-%d") if custom_since else None,
                         until=datetime.strptime(custom_until, "%Y-%m-%d") if custom_until else None,
                     )
-                step = "enrich"
+                # Ask mode skips enrich/output/mark_read entirely.
+                step = "confirm" if mode == "ask" else "enrich"
 
             elif step == "enrich":
                 # Runs for both analyze and dump so media-to-text
@@ -815,6 +859,10 @@ async def _collect_answers(
                 summary_bits = []
                 if run_on_all:
                     summary_bits.append(i18n_t("wiz_plan_all_unread_chats"))
+                elif run_on_all_local:
+                    # Ask mode "search ALL synced chats" path. Re-uses the
+                    # picker label for consistency with the chat-step echo.
+                    summary_bits.append(i18n_t("wiz_ask_all_local"))
                 else:
                     summary_bits.append(chat.get("title") or str(chat["chat_id"]))
                 if thread_id:
@@ -848,17 +896,23 @@ async def _collect_answers(
                         )
                     elif period == "from_msg" and custom_from_msg:
                         summary_bits.append(i18n_tf("wiz_plan_from", ref=custom_from_msg))
-                summary_bits.append(
-                    i18n_t("wiz_plan_console")
-                    if chosen_console_out
-                    else (
-                        i18n_tf("wiz_plan_file_kv", path=chosen_output_path)
-                        if chosen_output_path
-                        else i18n_t("wiz_plan_save_reports")
+                # Ask mode skips output / mark_read summary lines entirely.
+                if mode != "ask":
+                    summary_bits.append(
+                        i18n_t("wiz_plan_console")
+                        if chosen_console_out
+                        else (
+                            i18n_tf("wiz_plan_file_kv", path=chosen_output_path)
+                            if chosen_output_path
+                            else i18n_t("wiz_plan_save_reports")
+                        )
                     )
-                )
-                if chosen_mark_read:
-                    summary_bits.append(i18n_t("wiz_plan_mark_read"))
+                    if chosen_mark_read:
+                        summary_bits.append(i18n_t("wiz_plan_mark_read"))
+                # Question is supplied by the ask CLI on the side; show it
+                # here so the user sees what they're about to ask.
+                if mode == "ask" and question:
+                    summary_bits.append(question)
                 # Lead with the action (analyze / dump / …) so the confirm
                 # line is unambiguous on its own — the user shouldn't have to
                 # scroll up to remember which command they invoked.
@@ -937,7 +991,11 @@ async def _collect_answers(
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 if choice is BACK:
-                    if mark_read_forced:
+                    if mode == "ask":
+                        # Ask mode confirm always backs to period (no
+                        # output/mark_read steps were ever shown).
+                        step = "period"
+                    elif mark_read_forced:
                         step = (
                             "output"
                             if not output_forced
@@ -948,13 +1006,22 @@ async def _collect_answers(
                     continue
                 break
 
+        # Ask mode keeps `preset` as None (no preset step ran). For
+        # analyze/dump the legacy fallback to "summary" stays — dump
+        # ignores the value, and analyze always sets it before reaching
+        # this point anyway.
+        if mode == "ask":
+            final_preset: str | None = preset  # always None today
+        else:
+            final_preset = preset if preset is not None else "summary"
+        no_chat_scope = run_on_all or run_on_all_local
         return InteractiveAnswers(
-            chat_ref="" if run_on_all else str(chat["chat_id"]),
-            chat_kind="" if run_on_all else chat["kind"],
+            chat_ref="" if no_chat_scope else str(chat["chat_id"]),
+            chat_kind="" if no_chat_scope else chat["kind"],
             thread_id=thread_id,
             forum_all_flat=forum_all_flat,
             forum_all_per_topic=forum_all_per_topic,
-            preset=preset if preset is not None else "summary",
+            preset=final_preset,
             period=period if period is not None else "unread",
             custom_since=custom_since,
             custom_until=custom_until,
@@ -962,6 +1029,7 @@ async def _collect_answers(
             mark_read=chosen_mark_read,
             output_path=chosen_output_path,
             run_on_all_unread=run_on_all,
+            run_on_all_local=run_on_all_local,
             enrich_kinds=enrich_kinds,
             custom_from_msg=custom_from_msg,
             with_comments=with_comments,
