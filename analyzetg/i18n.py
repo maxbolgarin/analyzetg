@@ -845,8 +845,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "🌐 Поиск по всем локальным чатам (без Telegram)",
     },
     "wiz_ask_question_prompt": {
-        "en": "Type your question:",
-        "ru": "Введите вопрос:",
+        "en": "Type your question (blank or Ctrl-D to cancel):",
+        "ru": "Введите вопрос (пустая строка или Ctrl-D — отмена):",
     },
     "wiz_col_unread": {"en": "unread", "ru": "непроч."},
     "wiz_col_kind": {"en": "kind", "ru": "тип"},
