@@ -38,6 +38,34 @@ from analyzetg.util.logging import get_logger
 console = Console()
 log = get_logger(__name__)
 
+
+async def _resolve_via_tg(client, repo, ref):
+    from analyzetg.tg.resolver import resolve as _resolve
+
+    return await _resolve(client, repo, ref)
+
+
+async def _resolve_ask_ref(
+    client,
+    repo,
+    ref: str,
+    *,
+    resolve_fn=None,
+) -> tuple[int, int | None, int | None]:
+    """Resolve a positional <ref> for ask: URL / @user / fuzzy / numeric.
+
+    Returns `(chat_id, thread_id, msg_id)`. URL forms like
+    `t.me/c/<id>/<topic>/<msg>` populate thread_id and msg_id; flat
+    references leave both as None. Caller decides whether to honour
+    thread_id (only if the user didn't pass --thread on the CLI).
+
+    `resolve_fn` is for tests — defaults to `tg.resolver.resolve`.
+    """
+    fn = resolve_fn or _resolve_via_tg
+    resolved = await fn(client, repo, ref)
+    return resolved.chat_id, resolved.thread_id, resolved.msg_id
+
+
 # Per-language system prompt for the answer call. Picked at runtime from
 # `settings.locale.language` (or the `--language` flag override). The model
 # can also switch language to match the question if it differs.
