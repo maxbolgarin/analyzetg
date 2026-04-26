@@ -164,6 +164,39 @@ async def cmd_ask(
     """
     _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
 
+    # --refresh / --build-index require an explicit chat or folder scope;
+    # they're incompatible with the wizard (which can pick ALL_LOCAL) and
+    # with --global. Fail-fast here so the user doesn't waste a wizard
+    # run on a constraint that would only fail at the end.
+    if refresh and chat is None and folder is None and ref is None:
+        raise typer.BadParameter(
+            "--refresh requires <ref>, --chat, or --folder; refusing to backfill every synced dialog."
+        )
+    if build_index and chat is None and folder is None and ref is None:
+        raise typer.BadParameter(
+            "--build-index requires <ref>, --chat, or --folder; "
+            "refusing to embed every synced dialog at once."
+        )
+
+    # The wizard doesn't honour these flags (no question yet → no scope
+    # → wizard route). Fail-fast so the user doesn't see them silently
+    # dropped.
+    _no_scope = ref is None and chat is None and folder is None and not global_scope
+    if _no_scope and (question is None or not question.strip()):
+        forbidden_with_wizard: list[str] = []
+        if since is not None or until is not None or last_days is not None:
+            forbidden_with_wizard.append("--since/--until/--last-days")
+        if thread is not None:
+            forbidden_with_wizard.append("--thread")
+        if with_comments:
+            forbidden_with_wizard.append("--with-comments")
+        if forbidden_with_wizard:
+            raise typer.BadParameter(
+                f"Cannot use {' / '.join(forbidden_with_wizard)} without a "
+                "question or scope; pass a question and a scope, or use "
+                "the wizard without these flags."
+            )
+
     # No question → drop into the wizard (which prompts inline). If user
     # passed a scope arg without a question, error out.
     if question is None or not question.strip():
@@ -213,17 +246,6 @@ async def cmd_ask(
                 "which doesn't need keyword tokens.)"
             )
             raise typer.Exit(2)
-    if refresh and not chat and not folder:
-        raise typer.BadParameter(
-            "--refresh needs --chat or --folder; refusing to backfill every "
-            "synced dialog (potentially hundreds of Telegram round-trips)."
-        )
-    if build_index and not chat and not folder:
-        raise typer.BadParameter(
-            "--build-index needs --chat or --folder; refusing to embed every "
-            "synced dialog at once (could be a lot of OpenAI calls)."
-        )
-
     settings = get_settings()
     effective_language = (language or settings.locale.language or "en").lower()
     effective_content_language = (

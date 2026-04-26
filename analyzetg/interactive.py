@@ -553,8 +553,8 @@ async def run_interactive_ask(
     """
     # If no question was supplied (bare `atg ask`), prompt for one now.
     # `_collect_answers(mode="ask")` only uses the question for the
-    # confirm-step summary; it doesn't ask the user for it. ESC / Ctrl-D
-    # / blank input cancels the run cleanly.
+    # confirm-step summary; it doesn't ask the user for it.
+    # Ctrl-D / Ctrl-C / blank input cancels the run cleanly.
     if not question.strip():
         from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import HTML
@@ -702,15 +702,19 @@ async def _collect_answers(
         step = "chat"
         while True:
             if step == "chat":
+                # Reset flags from any prior chat-step iteration. Without
+                # this, picking ALL_UNREAD/ALL_LOCAL, then pressing BACK
+                # at a downstream step (e.g. period) and picking a real
+                # chat would leave the run-on-all flags stuck True and
+                # corrupt the returned answers.
+                run_on_all = False
+                run_on_all_local = False
+                chat = None
+                linked_chat_id = None
                 # Ask mode swaps "Run on all N unread" for "Search ALL
                 # synced chats (local DB)" — the analyze/dump batch flow
                 # doesn't make sense for ask (one question across many
                 # chats is the global ALL_LOCAL path).
-                # NOTE: when the user has zero unread dialogs, _pick_chat
-                # early-returns to _pick_from_all BEFORE the offer_all_local
-                # block runs, so the ALL_LOCAL row is hidden in exactly the
-                # case where ask-mode users would want it most. Tracked for
-                # a follow-up task; not fixed here.
                 result = await _pick_chat(
                     client,
                     offer_all_unread=(mode != "ask"),
