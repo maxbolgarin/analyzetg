@@ -1,14 +1,14 @@
-"""ask-mode wizard: chat -> comments? -> thread -> period -> confirm.
+"""ask-mode wizard: chat -> comments? -> thread -> period -> enrich -> confirm.
 
 The ask wizard reuses `_collect_answers` with `mode="ask"`. Compared to
-analyze/dump it skips preset, enrich, output, and mark_read steps — the
+analyze/dump it skips preset, output, and mark_read steps — the
 ask command supplies its own question + retrieval scope on the side.
 
 Key invariants exercised here:
   - `ALL_LOCAL` sentinel from `_pick_chat` flips `run_on_all_local=True`
     and short-circuits straight to the period step (no thread/comments).
-  - A specific chat goes chat -> period -> confirm with no preset / no
-    enrich / no output prompt.
+  - A specific chat goes chat -> period -> enrich -> confirm with no
+    preset / no output prompt.
   - The returned `InteractiveAnswers.preset` stays None (the field is
     optional in ask mode); callers must not assume "summary" when ask
     mode is in play.
@@ -49,8 +49,8 @@ def _stub_bind_escape_run():
 
 
 @pytest.mark.asyncio
-async def test_ask_mode_picks_all_local_skips_thread_and_enrich():
-    """ALL_LOCAL -> no thread/enrich/preset; jump from chat to period to confirm."""
+async def test_ask_mode_picks_all_local_skips_thread_and_preset():
+    """ALL_LOCAL -> no thread/preset; jump from chat to period to enrich to confirm."""
 
     async def fake_pick_chat(*a, **kw):
         # Sanity check: ask mode must request the ALL_LOCAL row.
@@ -68,6 +68,9 @@ async def test_ask_mode_picks_all_local_skips_thread_and_enrich():
             "analyzetg.interactive._fetch_period_counts",
             new=AsyncMock(return_value={}),
         ),
+        # `_pick_enrich` returns the list of enabled kinds; `[]` means
+        # "user explicitly disabled all enrichment" (sets enrich_kinds=[]).
+        patch("analyzetg.interactive._pick_enrich", new=AsyncMock(return_value=[])),
         patch("analyzetg.interactive._bind_escape", new=_stub_bind_escape_run()),
         patch("analyzetg.interactive.tg_client") as fake_tg,
         patch("analyzetg.interactive.open_repo") as fake_repo,
@@ -92,13 +95,16 @@ async def test_ask_mode_picks_all_local_skips_thread_and_enrich():
     assert answers.chat_ref == ""
     assert answers.chat_kind == ""
     assert answers.preset is None
+    # ALL_LOCAL skips the enrich step entirely (cmd_ask refuses to
+    # enrich every synced chat globally), so enrich_kinds stays None
+    # and cmd_ask falls back to config defaults / no override.
     assert answers.enrich_kinds is None
     assert answers.period == "unread"
 
 
 @pytest.mark.asyncio
 async def test_ask_mode_picks_specific_chat_skips_preset_and_enrich():
-    """A real chat pick goes chat -> period -> confirm (no preset, no enrich)."""
+    """A real chat pick goes chat -> period -> enrich -> confirm (no preset)."""
     chat = {
         "chat_id": 12345,
         "kind": "private",
@@ -113,6 +119,9 @@ async def test_ask_mode_picks_specific_chat_skips_preset_and_enrich():
     async def fake_pick_period(*a, **kw):
         return ("last7", None, None, None)
 
+    fake_repo_obj = AsyncMock()
+    fake_repo_obj.media_breakdown = AsyncMock(return_value={})
+
     with (
         patch("analyzetg.interactive._pick_chat", new=fake_pick_chat),
         patch("analyzetg.interactive._pick_period", new=fake_pick_period),
@@ -120,13 +129,16 @@ async def test_ask_mode_picks_specific_chat_skips_preset_and_enrich():
             "analyzetg.interactive._fetch_period_counts",
             new=AsyncMock(return_value={"last7": 10}),
         ),
+        # `_pick_enrich` returns the list of enabled kinds; `[]` means
+        # "user explicitly disabled all enrichment" (sets enrich_kinds=[]).
+        patch("analyzetg.interactive._pick_enrich", new=AsyncMock(return_value=[])),
         patch("analyzetg.interactive._bind_escape", new=_stub_bind_escape_run()),
         patch("analyzetg.interactive.tg_client") as fake_tg,
         patch("analyzetg.interactive.open_repo") as fake_repo,
     ):
         fake_tg.return_value.__aenter__ = AsyncMock(return_value=object())
         fake_tg.return_value.__aexit__ = AsyncMock(return_value=False)
-        fake_repo.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+        fake_repo.return_value.__aenter__ = AsyncMock(return_value=fake_repo_obj)
         fake_repo.return_value.__aexit__ = AsyncMock(return_value=False)
 
         answers = await _collect_answers(
@@ -145,7 +157,8 @@ async def test_ask_mode_picks_specific_chat_skips_preset_and_enrich():
     assert answers.thread_id is None
     assert answers.period == "last7"
     assert answers.preset is None
-    assert answers.enrich_kinds is None
+    # The enrich step ran; the stub returned [] (no kinds selected).
+    assert answers.enrich_kinds == []
 
 
 @pytest.mark.asyncio
@@ -186,6 +199,9 @@ async def test_ask_mode_back_from_period_after_all_local_resets_flag():
             return BACK
         return ("last7", None, None, None)
 
+    fake_repo_obj = AsyncMock()
+    fake_repo_obj.media_breakdown = AsyncMock(return_value={})
+
     with (
         patch("analyzetg.interactive._pick_chat", new=fake_pick_chat),
         patch("analyzetg.interactive._pick_period", new=fake_pick_period),
@@ -193,13 +209,16 @@ async def test_ask_mode_back_from_period_after_all_local_resets_flag():
             "analyzetg.interactive._fetch_period_counts",
             new=AsyncMock(return_value={}),
         ),
+        # `_pick_enrich` returns the list of enabled kinds; `[]` means
+        # "user explicitly disabled all enrichment" (sets enrich_kinds=[]).
+        patch("analyzetg.interactive._pick_enrich", new=AsyncMock(return_value=[])),
         patch("analyzetg.interactive._bind_escape", new=_stub_bind_escape_run()),
         patch("analyzetg.interactive.tg_client") as fake_tg,
         patch("analyzetg.interactive.open_repo") as fake_repo,
     ):
         fake_tg.return_value.__aenter__ = AsyncMock(return_value=object())
         fake_tg.return_value.__aexit__ = AsyncMock(return_value=False)
-        fake_repo.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+        fake_repo.return_value.__aenter__ = AsyncMock(return_value=fake_repo_obj)
         fake_repo.return_value.__aexit__ = AsyncMock(return_value=False)
 
         answers = await _collect_answers(

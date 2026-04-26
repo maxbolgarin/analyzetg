@@ -141,6 +141,9 @@ async def cmd_ask(
     max_cost: float | None = None,
     no_followup: bool = False,
     with_comments: bool = False,
+    enrich: str | None = None,
+    enrich_all: bool = False,
+    no_enrich: bool = False,
     yes: bool = False,
     language: str | None = None,
     content_language: str | None = None,
@@ -322,6 +325,52 @@ async def cmd_ask(
 
         if refresh and chat_ids:
             await _refresh_chats(client, repo, chat_ids, thread_id=thread)
+
+        # Run media enrichment over the scoped chats + period BEFORE
+        # retrieval, so transcripts / image descriptions / link summaries
+        # become searchable in this run. Mirrors `analyze`'s enrich flags
+        # (--enrich / --enrich-all / --no-enrich); shares the same
+        # `EnrichOpts` builder + `enrich_messages` orchestrator that
+        # `core/pipeline.prepare_chat_run` uses. ask deliberately keeps
+        # its own pipeline (per CLAUDE.md invariant 9) so this is a thin
+        # call into the shared helper, not a re-implementation.
+        if chat_ids:
+            from analyzetg.analyzer.commands import build_enrich_opts as _build_enrich_opts
+            from analyzetg.enrich.pipeline import enrich_messages
+
+            enrich_opts = _build_enrich_opts(
+                cli_enrich=enrich,
+                cli_enrich_all=enrich_all,
+                cli_no_enrich=no_enrich,
+                preset=None,  # ask has no preset → no preset-declared kinds
+            )
+            if enrich_opts.any_enabled():
+                msgs_to_enrich = []
+                for cid in chat_ids:
+                    msgs_to_enrich.extend(
+                        await repo.iter_messages(
+                            cid,
+                            thread_id=thread,
+                            since=since_dt,
+                            until=until_dt,
+                        )
+                    )
+                if msgs_to_enrich:
+                    console.print(
+                        f"[dim]→ Enriching {len(msgs_to_enrich)} messages "
+                        f"({', '.join(enrich_opts.kinds_enabled())})...[/]"
+                    )
+                    stats = await enrich_messages(
+                        msgs_to_enrich,
+                        client=client,
+                        repo=repo,
+                        opts=enrich_opts,
+                        language=effective_language,
+                        content_language=effective_content_language,
+                    )
+                    summary = stats.summary()
+                    if summary:
+                        console.print(f"[dim]→ {summary}[/]")
 
         # --build-index → fill the message_embeddings table for the scoped
         # chats and exit. Idempotent. The flagship answer path is skipped.

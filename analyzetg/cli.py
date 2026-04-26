@@ -1262,6 +1262,26 @@ def ask(
             "non-channel chat."
         ),
     ),
+    enrich: str | None = typer.Option(
+        None,
+        "--enrich",
+        help=(
+            "Comma-separated media enrichments to run BEFORE retrieval: "
+            "voice, videonote, video, image, doc, link. "
+            "Overrides config defaults for this run. "
+            "Example: --enrich=voice,image,link"
+        ),
+    ),
+    enrich_all: bool = typer.Option(
+        False,
+        "--enrich-all",
+        help="Enable every enrichment (voice/videonote/video/image/doc/link) before retrieval. Spendy.",
+    ),
+    no_enrich: bool = typer.Option(
+        False,
+        "--no-enrich",
+        help="Disable all enrichments for this run, even those that would default on.",
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -1321,6 +1341,9 @@ def ask(
             build_index=build_index,
             max_cost=max_cost,
             with_comments=with_comments,
+            enrich=enrich,
+            enrich_all=enrich_all,
+            no_enrich=no_enrich,
             yes=yes,
             language=language,
             content_language=content_language,

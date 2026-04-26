@@ -347,9 +347,9 @@ included).
 fuzzy title, numeric id). A topic URL like
 `https://t.me/c/1234567890/4` auto-fills `--thread`. Without
 `<ref>` / `--chat` / `--folder` / `--global` the command opens the
-wizard (chat picker → period → confirm → backfill → answer); without a
-question, the wizard prompts for it inline. The four scope sources are
-mutually exclusive — pick one per call.
+wizard (chat picker → period → enrich → confirm → backfill → answer);
+without a question, the wizard prompts for it inline. The four scope
+sources are mutually exclusive — pick one per call.
 
 ### Pipeline
 
@@ -380,6 +380,7 @@ mutually exclusive — pick one per call.
 | `--no-followup` | Skip the post-answer "Continue chatting?" prompt (cron / scripts / non-interactive). |
 | `--max-cost N` | Abort if the estimated USD cost exceeds N. |
 | `--model M` | Override the answering model. |
+| `--enrich=voice,image,link` / `--enrich-all` / `--no-enrich` | Run media enrichment (transcripts, image descriptions, link summaries, …) over the scoped chats + period BEFORE retrieval. Same flag shape as `analyze`. The wizard offers an enrich step too. |
 | `-o <path>` / `--console` | Save to file / force terminal render. |
 
 After every answer the CLI prompts `Continue chatting? [y/N]` (default
@@ -453,6 +454,7 @@ atg dump --folder Work                     # batch-dump every unread chat in fol
 
 ```bash
 atg analyze            # → pick chat → thread (forum) → preset → period → enrich → run
+atg ask                # → pick chat → period → enrich → ask
 atg dump               # → pick chat → period → enrich → run
 atg describe           # → pick chat → show details / topics
 ```

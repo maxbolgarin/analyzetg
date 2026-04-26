@@ -89,7 +89,9 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
         output_path=None,
         run_on_all_unread=False,
         run_on_all_local=False,
-        enrich_kinds=None,
+        # User picked "voice" in the wizard's enrich step — the wizard
+        # forwards that to cmd_ask as --enrich=voice.
+        enrich_kinds=["voice"],
         custom_from_msg=None,
         with_comments=False,
     )
@@ -109,6 +111,9 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
     # Wizard mode auto-refreshes the picked chat — the user just stepped
     # through a flow expecting fresh answers, not stale local data.
     assert kwargs["refresh"] is True
+    # Wizard enrich kinds → cmd_ask --enrich CSV.
+    assert kwargs["enrich"] == "voice"
+    assert kwargs["no_enrich"] is False
 
 
 @pytest.mark.asyncio

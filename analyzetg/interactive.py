@@ -595,6 +595,8 @@ async def run_interactive_ask(
     # (no chat list to refresh; explicit local-only path).
     effective_refresh = refresh or chat_arg is not None
 
+    enrich_kwargs = _build_enrich_kwargs(answers)
+
     await cmd_ask(
         question=question,
         ref=None,
@@ -617,6 +619,7 @@ async def run_interactive_ask(
         language=language,
         content_language=content_language,
         build_index=False,
+        **enrich_kwargs,
         **period_kwargs,
     )
 
@@ -635,7 +638,7 @@ async def _collect_answers(
     `mode` controls which steps appear:
       - "analyze" walks chat → [comments|thread] → preset → period → enrich → output → mark_read → confirm.
       - "dump" skips preset.
-      - "ask" skips preset / enrich / output / mark_read; runs chat → [comments|thread] → period → confirm.
+      - "ask" skips preset / output / mark_read; runs chat → [comments|thread] → period → enrich → confirm.
         Ask mode also offers an "ALL synced chats (local DB)" row in the
         chat picker; picking it sets `run_on_all_local=True` and jumps
         straight to period (no thread / comments).
@@ -890,8 +893,12 @@ async def _collect_answers(
                         since=datetime.strptime(custom_since, "%Y-%m-%d") if custom_since else None,
                         until=datetime.strptime(custom_until, "%Y-%m-%d") if custom_until else None,
                     )
-                # Ask mode skips enrich/output/mark_read entirely.
-                step = "confirm" if mode == "ask" else "enrich"
+                # Ask mode skips output/mark_read but keeps enrich (so
+                # voice/image/link content becomes searchable mid-flow).
+                # Exception: ALL_LOCAL (run_on_all_local) skips enrich
+                # because cmd_ask refuses to enrich every synced chat —
+                # showing the picker would mislead the user.
+                step = "confirm" if mode == "ask" and run_on_all_local else "enrich"
 
             elif step == "enrich":
                 # Runs for both analyze and dump so media-to-text
@@ -937,8 +944,10 @@ async def _collect_answers(
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 enrich_kinds = list(result) if isinstance(result, list) else None
-                # Output step is next unless the user already set it via CLI.
-                step = "mark_read" if output_forced else "output"
+                # Ask mode skips output/mark_read entirely — go straight to
+                # confirm. Analyze/dump fall through to output (or mark_read
+                # if the user pre-set output via CLI flags).
+                step = "confirm" if mode == "ask" else "mark_read" if output_forced else "output"
 
             elif step == "output":
                 result = await _pick_output(
@@ -990,15 +999,16 @@ async def _collect_answers(
                     summary_bits.append(i18n_t("wiz_plan_per_topic"))
                 if mode == "analyze":
                     summary_bits.append(i18n_tf("wiz_plan_preset_kv", preset=preset))
-                    # Show the enrichment choice explicitly so the user can
-                    # sanity-check it before spending — the step happens early
-                    # in the wizard and is easy to forget by the time we hit
-                    # confirm.
-                    if enrich_kinds is not None:
-                        if enrich_kinds:
-                            summary_bits.append(i18n_tf("wiz_plan_enrich_kv", kinds=",".join(enrich_kinds)))
-                        else:
-                            summary_bits.append(i18n_t("wiz_plan_enrich_none"))
+                # Show the enrichment choice explicitly so the user can
+                # sanity-check it before spending — the step happens early
+                # in the wizard and is easy to forget by the time we hit
+                # confirm. Applies to analyze, dump, and ask (all three
+                # walk through the enrich step now).
+                if enrich_kinds is not None and not run_on_all:
+                    if enrich_kinds:
+                        summary_bits.append(i18n_tf("wiz_plan_enrich_kv", kinds=",".join(enrich_kinds)))
+                    else:
+                        summary_bits.append(i18n_t("wiz_plan_enrich_none"))
                 if not run_on_all:
                     summary_bits.append(i18n_tf("wiz_plan_period_kv", period=period))
                     if period == "custom":
@@ -1109,9 +1119,12 @@ async def _collect_answers(
                     return None
                 if choice is BACK:
                     if mode == "ask":
-                        # Ask mode confirm always backs to period (no
-                        # output/mark_read steps were ever shown).
-                        step = "period"
+                        # Ask mode confirm backs to enrich (period →
+                        # enrich → confirm); output/mark_read steps are
+                        # skipped entirely in ask mode. Exception:
+                        # ALL_LOCAL skips enrich entirely, so back from
+                        # confirm there means back to period.
+                        step = "period" if run_on_all_local else "enrich"
                     elif mark_read_forced:
                         step = (
                             "output"
