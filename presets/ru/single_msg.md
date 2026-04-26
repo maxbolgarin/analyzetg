@@ -1,6 +1,7 @@
 ---
 name: single_msg
 prompt_version: v1
+description: Саммари одного сообщения (голосовое/видео-кружок/длинный пост)
 needs_reduce: false
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

@@ -1,6 +1,7 @@
 ---
 name: reactions
 prompt_version: v1
+description: Топ-сообщения по реакциям, сгруппированные по характеру отклика
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

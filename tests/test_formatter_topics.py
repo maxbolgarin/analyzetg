@@ -46,10 +46,10 @@ def test_format_messages_groups_by_topic_when_titles_provided():
     msgs, titles = _three_topics()
     out = format_messages(msgs, topic_titles=titles)
 
-    # Every group's header appears exactly once.
-    assert out.count("=== Топик: ОБЩИЙ ЧАТ (id=1) ===") == 1
-    assert out.count("=== Топик: ТОРГОВЫЕ ИДЕИ (id=44511) ===") == 1
-    assert out.count("=== Топик: МАРАФОН (id=58776) ===") == 1
+    # Every group's header appears exactly once (English labels, EN default).
+    assert out.count("=== Topic: ОБЩИЙ ЧАТ (id=1) ===") == 1
+    assert out.count("=== Topic: ТОРГОВЫЕ ИДЕИ (id=44511) ===") == 1
+    assert out.count("=== Topic: МАРАФОН (id=58776) ===") == 1
 
     # Group order is by first-message date: topic 1 (min 0) → topic 44511
     # (min 1) → topic 58776 (min 3). We use index-of-header as a cheap proxy.
@@ -77,8 +77,9 @@ def test_format_messages_falls_back_to_topic_id_for_unknown_thread():
     ]
     titles = {1: "A"}
     out = format_messages(msgs, topic_titles=titles)
-    assert "=== Топик: A (id=1) ===" in out
-    assert "=== Топик: Topic #999 (id=999) ===" in out
+    assert "=== Topic: A (id=1) ===" in out
+    # Unknown thread → fallback `#<id>` for the name.
+    assert "=== Topic: #999 (id=999) ===" in out
 
 
 def test_format_messages_without_titles_is_byte_identical():
@@ -92,7 +93,7 @@ def test_format_messages_without_titles_is_byte_identical():
     ungrouped = format_messages(msgs)
     # Should have NO topic header and NO blank-line group separators
     # introduced by the grouped path.
-    assert "=== Топик:" not in ungrouped
+    assert "=== Topic:" not in ungrouped
     # Messages remain in input (chronological) order.
     i100 = ungrouped.index("общий чат msg 1")
     i101 = ungrouped.index("идеи msg 1")
@@ -114,17 +115,17 @@ def test_format_messages_empty_topic_titles_behaves_like_none():
 def test_preamble_includes_forum_line_when_titles_given():
     titles = {1: "Topic A", 2: "Topic B", 3: "Topic C"}
     out = chat_header_preamble("My Forum", None, topic_titles=titles)
-    assert "=== Чат: My Forum ===" in out
-    assert "Форум: 3 топик(ов)" in out
+    assert "=== Chat: My Forum ===" in out
+    assert "Forum: 3 topic(s)" in out
     assert "Topic A" in out and "Topic B" in out and "Topic C" in out
 
 
 def test_preamble_truncates_large_topic_list():
-    # 12 topics → first 8 listed, then "…и ещё 4".
+    # 12 topics → first 8 listed, then "and 4 more".
     titles = {i: f"T{i}" for i in range(1, 13)}
     out = chat_header_preamble("Forum", None, topic_titles=titles)
-    assert "Форум: 12 топик(ов)" in out
-    assert "…и ещё 4" in out
+    assert "Forum: 12 topic(s)" in out
+    assert "and 4 more" in out
     # T1..T8 should appear; T9..T12 should not (truncated).
     for i in range(1, 9):
         assert f"T{i}" in out
@@ -137,6 +138,6 @@ def test_preamble_truncates_large_topic_list():
 
 def test_preamble_omits_forum_line_when_titles_none_or_empty():
     # Regression guard symmetric to format_messages — non-forum paths
-    # must NOT gain a spurious "Форум: …" line in the static prefix.
-    assert "Форум:" not in chat_header_preamble("Chat", None)
-    assert "Форум:" not in chat_header_preamble("Chat", None, topic_titles={})
+    # must NOT gain a spurious "Forum: …" line in the static prefix.
+    assert "Forum:" not in chat_header_preamble("Chat", None)
+    assert "Forum:" not in chat_header_preamble("Chat", None, topic_titles={})

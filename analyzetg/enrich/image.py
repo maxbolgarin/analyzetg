@@ -29,16 +29,37 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-_SYSTEM_PROMPT = (
-    "Ты помощник, описывающий изображения из Telegram-чата для последующего"
-    " анализа. Опиши изображение кратко (до 3 предложений) на том же языке,"
-    " что и подпись/чат. Фокус: что изображено, текст на картинке (если есть),"
-    " ключевые детали. Без выдумок, без общих слов."
-)
+_SYSTEM_PROMPT: dict[str, str] = {
+    "en": (
+        "You're an assistant describing images from a Telegram chat for "
+        "downstream analysis. Describe the image briefly (up to 3 sentences) "
+        "in the same language as the caption / chat. Focus: what's shown, "
+        "any visible text (verbatim), key details. No invention, no fluff."
+    ),
+    "ru": (
+        "Ты помощник, описывающий изображения из Telegram-чата для последующего"
+        " анализа. Опиши изображение кратко (до 3 предложений) на том же языке,"
+        " что и подпись/чат. Фокус: что изображено, текст на картинке (если есть),"
+        " ключевые детали. Без выдумок, без общих слов."
+    ),
+}
 
-_USER_PROMPT = (
-    "Опиши это изображение. Если видно текст — передай его дословно. Ответь простым текстом, без markdown."
-)
+_USER_PROMPT: dict[str, str] = {
+    "en": (
+        "Describe this image. If text is visible, transcribe it verbatim. Reply as plain text, no markdown."
+    ),
+    "ru": (
+        "Опиши это изображение. Если видно текст — передай его дословно. "
+        "Ответь простым текстом, без markdown."
+    ),
+}
+
+
+def _resolve_prompts(language: str) -> tuple[str, str]:
+    return (
+        _SYSTEM_PROMPT.get(language, _SYSTEM_PROMPT["en"]),
+        _USER_PROMPT.get(language, _USER_PROMPT["en"]),
+    )
 
 
 def _openai_client() -> AsyncOpenAI:
@@ -75,6 +96,7 @@ async def enrich_image(
     client: TelegramClient,
     repo: Repo,
     model: str | None = None,
+    language: str | None = None,
 ) -> EnrichResult | None:
     """Return a short description of the photo attached to `msg`, or None.
 
@@ -97,6 +119,8 @@ async def enrich_image(
         )
 
     used_model = model or settings.enrich.vision_model
+    lang = (language or settings.locale.language or "en").lower()
+    sys_prompt, user_prompt = _resolve_prompts(lang)
 
     tmp_dir = settings.media.tmp_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -115,11 +139,11 @@ async def enrich_image(
         data_url = f"data:{mime};base64,{b64}"
 
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": sys_prompt},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": _USER_PROMPT},
+                    {"type": "text", "text": user_prompt},
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             },

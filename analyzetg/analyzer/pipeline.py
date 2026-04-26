@@ -20,25 +20,59 @@ from analyzetg.analyzer.hasher import batch_hash, reduce_hash, text_hash
 from analyzetg.analyzer.openai_client import build_messages, chat_complete, make_client
 from analyzetg.analyzer.prompts import (
     BASE_VERSION,
-    PRESETS,
-    REDUCE_PROMPT,
     Preset,
     compose_system_prompt,
+    get_presets,
     load_custom_preset,
 )
 from analyzetg.config import get_settings
 from analyzetg.db.repo import Repo
 from analyzetg.enrich.base import EnrichOpts
 from analyzetg.enrich.pipeline import enrich_messages
+from analyzetg.i18n import t as i18n_t
 from analyzetg.util.logging import get_logger
 
 log = get_logger(__name__)
 
 
-# Rough token estimate per formatted message line (sender + timestamp + body).
-# Used for up-front cost previews; the real pipeline counts exactly via
-# tiktoken. Cyrillic runs ~1.5x the English rate — this is a middle ground.
-AVG_TOKENS_PER_MSG = 60
+# Rough token estimate per formatted message line (sender + timestamp +
+# body). Used for up-front cost previews; the real pipeline counts exactly
+# via tiktoken. Cyrillic averages ~60 tokens/msg, Latin-script English
+# ~40, autodetect / unknown / mixed → 50 (middle ground).
+_AVG_TOKENS_BY_LANG: dict[str, int] = {"ru": 60, "en": 40}
+
+
+def _avg_tokens_per_msg(content_lang: str | None) -> int:
+    """Per-message token estimate keyed by the chat content's language.
+
+    Falls through to 50 (a midpoint) for autodetect / empty / unknown
+    codes so the preview is approximately right even without an explicit
+    setting.
+    """
+    if not content_lang:
+        return 50
+    return _AVG_TOKENS_BY_LANG.get(content_lang, 50)
+
+
+# Back-compat alias for any external caller still importing the constant.
+# Resolves at import time to the EN baseline; if anyone needs language-
+# specific accuracy they should call _avg_tokens_per_msg() directly.
+AVG_TOKENS_PER_MSG = _AVG_TOKENS_BY_LANG["en"]
+
+
+def _resolve_content_lang(settings: Any) -> str:
+    """`content_language` falls back to `language` when empty."""
+    locale = getattr(settings, "locale", None)
+    if locale is None:
+        return "en"
+    return (locale.content_language or locale.language or "en").lower()
+
+
+def _resolve_language(settings: Any) -> str:
+    locale = getattr(settings, "locale", None)
+    if locale is None:
+        return "en"
+    return (locale.language or "en").lower()
 
 
 def estimate_cost(
@@ -64,7 +98,8 @@ def estimate_cost(
     from analyzetg.util.pricing import chat_cost
     from analyzetg.util.tokens import count_tokens as _ct
 
-    total_input_body = max(1, int(n_messages * AVG_TOKENS_PER_MSG))
+    avg_tok = _avg_tokens_per_msg(_resolve_content_lang(settings))
+    total_input_body = max(1, int(n_messages * avg_tok))
 
     filter_model = preset.filter_model
     final_model = preset.final_model
@@ -194,7 +229,15 @@ class AnalysisOptions:
             "dedupe_forwards": self.dedupe_forwards
             if self.dedupe_forwards is not None
             else s.analyze.dedupe_forwards,
-            "language": s.openai.audio_language,
+            # `content_language` selects which presets/<lang>/ tree the
+            # analysis uses (and thus the language of the LLM's prompt
+            # input AND the LLM's output). `locale.language` is UI-only
+            # (saved-report headings, wizard) — it does NOT affect any
+            # LLM input, so it is intentionally OMITTED from the cache
+            # key to avoid wasted cache misses on UI-only toggles. If
+            # you ever make `language` flow into the prompt, add it back.
+            "content_language": _resolve_content_lang(s),
+            "audio_language": s.openai.audio_language or "",
             "temperature": s.openai.temperature,
             "output_budget": preset.output_budget_tokens,
             "map_output": preset.map_output_tokens,
@@ -241,14 +284,23 @@ def _with_prompt_inputs(
     return payload
 
 
-def _load_preset(opts: AnalysisOptions) -> Preset:
+def _load_preset(opts: AnalysisOptions, language: str = "en") -> Preset:
+    """Load the requested preset from `presets/<language>/`.
+
+    `language` here is the LLM-input / content language — `run_analysis`
+    passes `content_language` to it. The kwarg name is kept generic so
+    the helper stays callable from contexts that don't think in terms of
+    UI-vs-content (e.g., direct test fixtures).
+    """
     if opts.preset == "custom":
         if not opts.prompt_file:
             raise ValueError("--prompt-file is required for preset=custom")
-        return load_custom_preset(opts.prompt_file)
-    preset = PRESETS.get(opts.preset)
+        return load_custom_preset(opts.prompt_file, language=language)
+    presets = get_presets(language)
+    preset = presets.get(opts.preset)
     if not preset:
-        raise ValueError(f"Unknown preset: {opts.preset}")
+        available = ", ".join(sorted(presets.keys())) or "(none)"
+        raise ValueError(f"Unknown preset: {opts.preset!r}. Available in language {language!r}: {available}.")
     return preset
 
 
@@ -318,6 +370,8 @@ async def run_analysis(
     topic_markers: dict[int, int] | None = None,
     messages: list[Any] | None = None,
     chat_groups: dict[int, dict] | None = None,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> AnalysisResult:
     """Run the end-to-end analysis for a chat/thread/period.
 
@@ -344,7 +398,15 @@ async def run_analysis(
     back to the legacy path that does it all internally.
     """
     settings = get_settings()
-    preset = _load_preset(opts)
+    if language is None:
+        language = _resolve_language(settings)
+    if content_language is None:
+        content_language = _resolve_content_lang(settings)
+    # `content_language` selects the prompts tree (presets/<lang>/) and
+    # everything LLM-facing. `language` is only the UI / report-heading
+    # language. They can differ — e.g. EN UI analyzing a RU chat with
+    # native RU prompts. The user picks per `[locale]` config.
+    preset = _load_preset(opts, language=content_language)
 
     final_model = opts.model_override or preset.final_model or settings.openai.chat_model_default
     filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
@@ -462,6 +524,7 @@ async def run_analysis(
         link_template=link_template,
         topic_titles=topic_titles,
         chat_groups=chat_groups,
+        language=content_language,
     )
     # user_overhead: template minus {messages} — static, cacheable
     user_overhead = preset.render_user(
@@ -476,7 +539,11 @@ async def run_analysis(
     # token accounting and actual prompt stay consistent — feeding
     # preset.system to the chunker but composed_system to the LLM would
     # under-budget each chunk by the base's ~300 tokens.
-    composed_system = compose_system_prompt(preset.system, topic_titles=topic_titles)
+    composed_system = compose_system_prompt(
+        preset.system,
+        topic_titles=topic_titles,
+        language=content_language,
+    )
 
     # --- Choose chunking strategy
     chunking_model = final_model if not preset.needs_reduce else filter_model
@@ -519,6 +586,7 @@ async def run_analysis(
             link_template=link_template,
             topic_titles=topic_titles,
             chat_groups=chat_groups,
+            language=content_language,
         )
         user = preset.render_user(
             period=_fmt_period(period),
@@ -620,6 +688,7 @@ async def run_analysis(
                 link_template=link_template,
                 topic_titles=topic_titles,
                 chat_groups=chat_groups,
+                language=content_language,
             )
             user = preset.render_user(
                 period=_fmt_period(period),
@@ -662,13 +731,19 @@ async def run_analysis(
         cache_misses += int(not hit)
         any_truncated = any_truncated or tr
 
-    joined = "\n\n---\n\n".join(f"[Фрагмент {i + 1}]\n{r[1]}" for i, r in enumerate(map_results))
+    # Reduce stage prompt is fed to the LLM → labels and instructions in
+    # `content_language` so the model sees one coherent language.
+    fragment_label = i18n_t("fragment_label", content_language)
+    joined = "\n\n---\n\n".join(f"[{fragment_label} {i + 1}]\n{r[1]}" for i, r in enumerate(map_results))
+    from analyzetg.analyzer.prompts import _load_reduce_prompt as _load_reduce
+
+    reduce_prompt = _load_reduce(content_language)
     reduce_user = (
-        f"{REDUCE_PROMPT}\n\n"
-        f"Период: {_fmt_period(period)}\n"
-        f"Чат: {title or '—'}\n"
-        f"Число сообщений: {len(msgs)}\n"
-        f"Число фрагментов: {len(map_results)}\n\n"
+        f"{reduce_prompt}\n\n"
+        f"{i18n_t('period_label', content_language)}: {_fmt_period(period)}\n"
+        f"{i18n_t('chat_label', content_language)}: {title or '—'}\n"
+        f"{i18n_t('messages_label', content_language)}: {len(msgs)}\n"
+        f"{i18n_t('fragment_count_label', content_language)}: {len(map_results)}\n\n"
         f"{joined}"
     )
     reduce_options = _with_prompt_inputs(

@@ -23,6 +23,8 @@ import typer
 from rich.console import Console
 
 from analyzetg.core.run import PreparedRun
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 
 if TYPE_CHECKING:
     from analyzetg.enrich.base import EnrichOpts
@@ -53,20 +55,14 @@ async def _determine_start(
     if time_window[0] is not None or time_window[1] is not None:
         return None
     if thread_id:
-        console.print(
-            "[red]Per-topic unread isn't exposed by Telegram for arbitrary threads.[/]\n"
-            "Pass [cyan]--last-days N[/], [cyan]--from-msg <id>[/], or [cyan]--full-history[/]."
-        )
+        console.print(f"[red]{_t('per_topic_unread_unsupported')}[/]")
         raise typer.Exit(2)
-    console.print("[dim]→ Reading unread marker...[/]")
+    console.print(f"[dim]{_t('reading_unread_marker')}[/]")
     unread_count, read_marker = await get_unread_state(client, chat_id)
     if unread_count == 0:
-        console.print(
-            f"[yellow]No unread messages in chat {chat_id}.[/] "
-            "Pass --last-days / --from-msg / --full-history to analyze anyway."
-        )
+        console.print(f"[yellow]{_tf('no_unread_in_chat', chat_id=chat_id)}[/]")
         raise typer.Exit(0)
-    console.print(f"[dim]→ {unread_count} unread message(s) after msg_id={read_marker}[/]")
+    console.print(f"[dim]{_tf('unread_after_marker', n=unread_count, marker=read_marker)}[/]")
     return read_marker
 
 
@@ -100,7 +96,7 @@ async def _pull_history(
         )
         effective = floor if force_from_start else max(floor, local_max or 0)
         if local_max and local_max > floor:
-            console.print(f"[dim]→ Have up to msg_id={local_max} locally, fetching only newer[/]")
+            console.print(f"[dim]{_tf('have_up_to_local', msg_id=local_max)}[/]")
         await backfill(
             client,
             repo,
@@ -112,7 +108,7 @@ async def _pull_history(
         if full_history and start_msg_id is None:
             local_min = await repo.get_min_msg_id(chat_id, thread_param)
             if local_min and local_min > 1:
-                console.print(f"[dim]→ Have from msg_id={local_min} locally, fetching older history…[/]")
+                console.print(f"[dim]{_tf('have_from_local', msg_id=local_min)}[/]")
                 await backfill(
                     client,
                     repo,
@@ -122,7 +118,7 @@ async def _pull_history(
                     direction="back",
                 )
             elif local_min is None:
-                console.print("[dim]→ No local messages; fetching full chat history…[/]")
+                console.print(f"[dim]{_t('no_local_msgs_full_history')}[/]")
                 await backfill(
                     client,
                     repo,
@@ -193,7 +189,7 @@ def _build_mark_read_fn(
                     name=tname,
                     max_id=latest,
                 )
-        console.print(f"[dim]→ Marked read across {marked}/{len(topic_titles)} topics[/]")
+        console.print(f"[dim]{_tf('marked_read_topics', marked=marked, total=len(topic_titles))}[/]")
         return marked
 
     async def _mark_single() -> int:
@@ -202,7 +198,7 @@ def _build_mark_read_fn(
             return 0
         ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
         if ok:
-            console.print(f"[dim]→ Marked read up to msg_id={latest}[/]")
+            console.print(f"[dim]{_tf('marked_read_up_to', msg_id=latest)}[/]")
             return 1
         return 0
 
@@ -260,7 +256,7 @@ async def _pull_linked_comments(
             log.warning("comments.linked_chat_lookup_failed", chat_id=chat_id, err=str(e)[:200])
             return null_meta, []
         if linked_id is None:
-            console.print("[yellow]→ Channel has no linked discussion group; skipping comments.[/]")
+            console.print(f"[yellow]{_t('channel_no_linked')}[/]")
             return null_meta, []
         # Persist the lookup so subsequent runs short-circuit.
         await repo.upsert_chat(
@@ -307,8 +303,7 @@ async def _pull_linked_comments(
             title = title or f"Comments {linked_id}"
 
     console.print(
-        f"[dim]→ Including comments from linked chat[/] [bold]{title}[/] "
-        f"({linked_id})[dim] for window {com_since} … {com_until}[/]"
+        f"[dim]{_tf('including_comments', title=title, linked_id=linked_id, since=com_since, until=com_until)}[/]"
     )
 
     # Backfill the linked chat for the comment window. Use since_date
@@ -344,7 +339,7 @@ async def _pull_linked_comments(
         until=com_until,
     )
     if not comments_msgs:
-        console.print("[dim]→ No comments in window.[/]")
+        console.print(f"[dim]{_t('no_comments_in_window')}[/]")
 
     meta: dict[str, Any] = {
         "chat_id": linked_id,
@@ -378,6 +373,8 @@ async def prepare_chat_run(
     mark_read: bool = False,
     skip_filter: bool = False,
     with_comments: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> PreparedRun:
     """Prepare a single chat run: resolve → backfill → enrich → ready for consumer.
 
@@ -405,7 +402,7 @@ async def prepare_chat_run(
         time_window=(since_dt, until_dt),
     )
 
-    console.print("[dim]→ Fetching new messages from Telegram...[/]")
+    console.print(f"[dim]{_t('fetching_new_messages')}[/]")
     await _pull_history(
         client=client,
         repo=repo,
@@ -437,7 +434,7 @@ async def prepare_chat_run(
             or m.msg_id > topic_markers[m.thread_id]
         ]
         if before != len(msgs):
-            console.print(f"[dim]→ Filtered per-topic: kept {len(msgs)} / dropped {before - len(msgs)}[/]")
+            console.print(f"[dim]{_tf('filtered_per_topic', kept=len(msgs), dropped=before - len(msgs))}[/]")
 
     # Channel + comments: pull the linked discussion group's messages
     # from the same date range and merge them in BEFORE enrichment, so
@@ -466,7 +463,14 @@ async def prepare_chat_run(
 
     enrich_stats = None
     if enrich_opts.any_enabled() and msgs:
-        enrich_stats = await enrich_messages(msgs, client=client, repo=repo, opts=enrich_opts)
+        enrich_stats = await enrich_messages(
+            msgs,
+            client=client,
+            repo=repo,
+            opts=enrich_opts,
+            language=language,
+            content_language=content_language,
+        )
         summary = enrich_stats.summary()
         if summary:
             console.print(f"[dim]→ {summary}[/]")
@@ -533,6 +537,8 @@ async def prepare_chat_runs_per_topic(
     min_msg_chars: int | None = None,
     mark_read: bool = False,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ):
     """Yield one PreparedRun per forum topic.
 
@@ -545,35 +551,29 @@ async def prepare_chat_runs_per_topic(
 
     log = get_logger(__name__)
 
-    console.print("[dim]→ Listing forum topics...[/]")
+    console.print(f"[dim]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     explicit_period = bool(since_dt or until_dt or from_msg_id is not None or full_history)
     targets = topics if explicit_period else [t for t in topics if t.unread_count > 0]
     if not targets:
-        console.print(
-            "[yellow]No topics with unread messages.[/] "
-            "Pass --last-days / --full-history to analyze everything anyway."
-        )
+        console.print(f"[yellow]{_t('no_unread_topics')}[/]")
         return
 
     if not yes:
         total_unread = sum(t.unread_count for t in targets)
-        if not typer.confirm(
-            f"Process {len(targets)} topic(s)"
-            + (f" with {total_unread} unread" if not explicit_period else "")
-            + "?",
-            default=True,
-        ):
-            console.print("[dim]Aborted.[/]")
+        extra = "" if explicit_period else _tf("process_topics_with_unread", total=total_unread)
+        if not typer.confirm(_tf("process_topics_q", n=len(targets), extra=extra), default=True):
+            console.print(f"[dim]{_t('aborted')}[/]")
             return
 
     for t in targets:
         topic_title_display = f"{chat_title or chat_id} / {t.title}"
-        console.print(
-            f"\n[bold cyan]>>[/] {t.title} (topic_id={t.topic_id}"
-            + (f", {t.unread_count} unread" if not explicit_period else "")
-            + ")"
-        )
+        if explicit_period:
+            console.print(f"\n[bold cyan]{_tf('topic_header_no_unread', title=t.title, tid=t.topic_id)}[/]")
+        else:
+            console.print(
+                f"\n[bold cyan]{_tf('topic_header_with_unread', title=t.title, tid=t.topic_id, n=t.unread_count)}[/]"
+            )
         topic_from_msg = from_msg_id
         topic_full = full_history
         if not explicit_period:
@@ -603,6 +603,8 @@ async def prepare_chat_runs_per_topic(
                 topic_titles=None,
                 topic_markers=None,
                 mark_read=mark_read,
+                language=language,
+                content_language=content_language,
             )
             yield prepared
         except typer.Exit:
@@ -614,7 +616,7 @@ async def prepare_chat_runs_per_topic(
                 topic_id=t.topic_id,
                 err=str(e)[:300],
             )
-            console.print(f"[red]Topic {t.title} failed:[/] {e}")
+            console.print(f"[red]{_tf('topic_failed', title=t.title, err=e)}[/]")
 
 
 async def prepare_all_unread_runs(
@@ -628,6 +630,8 @@ async def prepare_all_unread_runs(
     mark_read: bool = False,
     folder: str | None = None,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ):
     """Yield one PreparedRun per chat with unread messages.
 
@@ -641,7 +645,7 @@ async def prepare_all_unread_runs(
 
     unread = await list_unread_dialogs(client)
     if not unread:
-        console.print("[yellow]No dialogs with unread messages.[/]")
+        console.print(f"[yellow]{_t('no_dialogs_with_unread')}[/]")
         return
 
     if folder:
@@ -651,38 +655,30 @@ async def prepare_all_unread_runs(
         matched = resolve_folder(folder, folders)
         if matched is None:
             titles = ", ".join(f"'{f.title}'" for f in folders) or "(none)"
-            console.print(f"[red]No folder matching[/] '{folder}'. Available folders: {titles}")
+            console.print(f"[red]{_tf('no_folder_matching', folder=folder, titles=titles)}[/]")
             raise typer.Exit(2)
         ids = matched.include_chat_ids
         if not ids and matched.has_rule_based_inclusion:
-            console.print(
-                f"[yellow]Folder '{matched.title}' uses category rules "
-                "(contacts/groups/bots/etc.) without explicit chats — "
-                "rule expansion isn't supported.[/]"
-            )
+            console.print(f"[yellow]{_tf('folder_rule_based_unsupported', title=matched.title)}[/]")
             raise typer.Exit(2)
         before = len(unread)
         unread = [d for d in unread if d.chat_id in ids]
+        emoji = " " + matched.emoticon if matched.emoticon else ""
         console.print(
-            f"[dim]→ Folder[/] [bold]{matched.title}[/]"
-            f"{' ' + matched.emoticon if matched.emoticon else ''}"
-            f" [dim]— {len(unread)}/{before} unread chats match[/]"
+            f"[dim]{_tf('folder_unread_chats', title=matched.title + emoji, n=len(unread), total=before)}[/]"
         )
         if not unread:
-            console.print("[yellow]No chats in this folder have unread messages.[/]")
+            console.print(f"[yellow]{_t('no_chats_in_folder_unread')}[/]")
             return
 
     if not yes:
         total = sum(d.unread_count for d in unread)
-        if not typer.confirm(
-            f"Process {len(unread)} chat(s) with {total} total unread message(s)?",
-            default=False,
-        ):
-            console.print("[dim]Aborted.[/]")
+        if not typer.confirm(_tf("process_chats_q", n=len(unread), total=total), default=False):
+            console.print(f"[dim]{_t('aborted')}[/]")
             return
 
     for u in unread:
-        console.print(f"\n[bold cyan]>>[/] {u.title or u.chat_id} ({u.unread_count} unread)")
+        console.print(f"\n[bold cyan]{_tf('chat_header', title=u.title or u.chat_id, n=u.unread_count)}[/]")
         try:
             # Derive internal_id for t.me/c/ link template.
             internal_id = None
@@ -699,7 +695,7 @@ async def prepare_all_unread_runs(
                 topics = await list_forum_topics(client, u.chat_id)
                 unread_topics = [t for t in topics if t.unread_count > 0]
                 if not unread_topics:
-                    console.print("[yellow]No unread forum topics after refresh.[/]")
+                    console.print(f"[yellow]{_t('no_unread_topics_after_refresh')}[/]")
                     continue
                 topic_titles = {t.topic_id: t.title for t in topics}
                 topic_markers = {t.topic_id: t.read_inbox_max_id for t in topics}
@@ -722,6 +718,8 @@ async def prepare_all_unread_runs(
                     topic_titles=topic_titles,
                     topic_markers=topic_markers,
                     mark_read=mark_read,
+                    language=language,
+                    content_language=content_language,
                 )
                 yield prepared
                 continue
@@ -748,11 +746,15 @@ async def prepare_all_unread_runs(
                         if gap > u.unread_count * 10:
                             clamped = max(latest_id - u.unread_count - 50, 1)
                             console.print(
-                                f"[yellow]→ Stale read marker[/] "
-                                f"(msg_id={u.read_inbox_max_id}, "
-                                f"latest={latest_id}, unread={u.unread_count}); "
-                                f"trusting unread badge → start at "
-                                f"msg_id={clamped}"
+                                "[yellow]"
+                                + _tf(
+                                    "stale_read_marker",
+                                    marker=u.read_inbox_max_id,
+                                    latest=latest_id,
+                                    unread=u.unread_count,
+                                    start=clamped,
+                                )
+                                + "[/]"
                             )
                             from_msg = clamped
                 except Exception as e:
@@ -778,6 +780,8 @@ async def prepare_all_unread_runs(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 mark_read=mark_read,
+                language=language,
+                content_language=content_language,
             )
             yield prepared
         except typer.Exit:
@@ -788,4 +792,4 @@ async def prepare_all_unread_runs(
                 chat_id=u.chat_id,
                 err=str(e)[:300],
             )
-            console.print(f"[red]Failed:[/] {e}")
+            console.print(f"[red]{_tf('batch_chat_failed', err=e)}[/]")

@@ -43,14 +43,23 @@ def _openai_client() -> AsyncOpenAI:
 
 
 @retry_on_429()
-async def _transcribe_file(oai: AsyncOpenAI, path: Path, model: str, language: str) -> str:
+async def _transcribe_file(
+    oai: AsyncOpenAI,
+    path: Path,
+    model: str,
+    language: str | None,
+) -> str:
+    """Transcribe one audio file. `language=None`/empty → omit the param so
+    Whisper autodetects (the API doesn't accept "auto" as a literal value)."""
     with path.open("rb") as f:
-        resp = await oai.audio.transcriptions.create(
-            file=f,
-            model=model,
-            language=language or "auto",
-            response_format="text",
-        )
+        kwargs: dict[str, object] = {
+            "file": f,
+            "model": model,
+            "response_format": "text",
+        }
+        if language:
+            kwargs["language"] = language
+        resp = await oai.audio.transcriptions.create(**kwargs)
     return resp if isinstance(resp, str) else getattr(resp, "text", str(resp))
 
 
@@ -89,7 +98,10 @@ async def enrich_audio(
         return EnrichResult(kind="transcript", content=content, model=used_model, cache_hit=True)
 
     used_model = model or settings.openai.audio_model_default
-    used_lang = language or settings.openai.audio_language
+    # Empty string in config also means "autodetect" — normalize to None so
+    # _transcribe_file omits the language param entirely.
+    cfg_lang = settings.openai.audio_language or None
+    used_lang = language or cfg_lang
 
     tmp_dir = settings.media.tmp_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)

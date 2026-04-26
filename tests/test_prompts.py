@@ -77,11 +77,13 @@ def test_all_builtin_presets_load() -> None:
 def test_builtin_presets_are_included_in_wheel() -> None:
     # Non-editable installs do not have the repository checkout next to the
     # package, so the wheel must carry the builtin preset markdown tree.
+    # Per-language directories (presets/<lang>/) — both must ship.
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     force_include = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     assert force_include.get("presets") == "presets"
-    assert (PRESETS_DIR / "summary.md").is_file()
+    assert (PRESETS_DIR / "ru" / "summary.md").is_file()
+    assert (PRESETS_DIR / "en" / "summary.md").is_file()
 
 
 def test_summary_preset_has_adequate_budget() -> None:
@@ -141,8 +143,10 @@ def test_custom_preset_without_user_marker_uses_default_tail(tmp_path: Path) -> 
     preset = load_custom_preset(p)
     assert "Just a system prompt" in preset.system
     # Default tail is appended so pipeline placeholders still render.
+    # `DEFAULT_USER_TAIL` is now per-language; assert the EN default's first
+    # line shows up (load_custom_preset defaults to language="en").
     assert "{messages}" in preset.user_template
-    assert DEFAULT_USER_TAIL.split("\n")[0] in preset.user_template
+    assert DEFAULT_USER_TAIL["en"].split("\n")[0] in preset.user_template
 
 
 def test_custom_preset_injects_missing_placeholders(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from analyzetg.analyzer.pipeline import AnalysisOptions, AnalysisResult, run_analysis
-from analyzetg.analyzer.prompts import PRESETS, Preset, load_custom_preset
+from analyzetg.analyzer.prompts import Preset, get_presets, load_custom_preset
 from analyzetg.config import get_settings
 from analyzetg.core.paths import chat_slug as _chat_slug
 from analyzetg.core.paths import compute_window as _compute_window
@@ -33,6 +33,8 @@ from analyzetg.core.paths import topic_slug as _topic_slug
 from analyzetg.core.paths import unique_path as _unique_path
 from analyzetg.db.repo import Repo, open_repo
 from analyzetg.enrich.base import EnrichOpts
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.tg.client import tg_client
 from analyzetg.tg.resolver import resolve
 from analyzetg.tg.topics import ForumTopic, list_forum_topics
@@ -52,18 +54,61 @@ _ENRICH_KINDS = ("voice", "videonote", "video", "image", "doc", "link")
 _CITATION_RE = __import__("re").compile(r"\[#(\d+)\]\(([^)]+)\)")
 
 
+_VERIFY_SYSTEM: dict[str, str] = {
+    "en": (
+        "You are a reviewer of a Telegram-chat analysis. You are given: (a) the "
+        "source messages, (b) an analytical report based on them. Your task is "
+        "to find statements in the report that are NOT supported by the cited "
+        "message or are not backed by a citation at all. Output a short "
+        "markdown bullet list: one bullet per statement + reason (no citation "
+        "/ contradicts #N / doesn't follow from the context). If everything "
+        "checks out, respond with a single line: 'All claims supported.'"
+    ),
+    "ru": (
+        "Ты — рецензент анализа Telegram-чата. Тебе даны: (а) исходные "
+        "сообщения, (б) аналитический отчёт по ним. Твоя задача — найти "
+        "в отчёте утверждения, которые НЕ подтверждаются цитируемым "
+        "сообщением или вообще не подкреплены цитатой. Выведи короткий "
+        "markdown-список таких пунктов: каждый пункт = одно утверждение + "
+        "причина (нет цитаты / противоречит #N / не следует из контекста). "
+        "Если всё подтверждено, ответь одной строкой: 'All claims supported.'"
+    ),
+}
+
+_VERIFY_USER_TEMPLATE: dict[str, tuple[str, str, str]] = {
+    "en": (
+        "Messages:\n\n",
+        "\n\nReport:\n\n",
+        "\n\nUnsupported statements (or 'All claims supported.'):",
+    ),
+    "ru": (
+        "Сообщения:\n\n",
+        "\n\nОтчёт:\n\n",
+        "\n\nНеподтверждённые утверждения (или 'All claims supported.'):",
+    ),
+}
+
+
 async def _self_check(
     *,
     result: AnalysisResult,
     messages,
     repo: Repo,
+    content_language: str = "en",
 ) -> str:
     """Cheap-model audit pass over an analysis report.
 
     Sends source messages + the produced analysis to `filter_model_default`
     (gpt-5.4-nano-class) with a system prompt asking for unsupported
     claims. Output is a short markdown bullet list, or "All claims
-    supported." for a clean run. Caller appends as `## Verification`.
+    supported." for a clean run. Caller appends as `## Verification`
+    (heading translated via i18n using the UI `language`, NOT
+    `content_language`).
+
+    `content_language` selects the verification system prompt + the
+    formatter's label language. It should match the language of the
+    analysis report being audited so the auditor and the report speak
+    the same language.
 
     Failures (network blip, parse glitch) return empty string — the
     primary report is what the user paid for; verification is a bonus.
@@ -73,21 +118,10 @@ async def _self_check(
 
     settings = get_settings()
     used_model = settings.openai.filter_model_default
-    sys_prompt = (
-        "Ты — рецензент анализа Telegram-чата. Тебе даны: (а) исходные "
-        "сообщения, (б) аналитический отчёт по ним. Твоя задача — найти "
-        "в отчёте утверждения, которые НЕ подтверждаются цитируемым "
-        "сообщением или вообще не подкреплены цитатой. Выведи короткий "
-        "markdown-список таких пунктов: каждый пункт = одно утверждение + "
-        "причина (нет цитаты / противоречит #N / не следует из контекста). "
-        "Если всё подтверждено, ответь одной строкой: 'All claims supported.'"
-    )
-    formatted_msgs = format_messages(messages)
-    user_text = (
-        f"Сообщения:\n\n{formatted_msgs}\n\n"
-        f"Отчёт:\n\n{result.final_result}\n\n"
-        "Неподтверждённые утверждения (или 'All claims supported.'):"
-    )
+    sys_prompt = _VERIFY_SYSTEM.get(content_language, _VERIFY_SYSTEM["en"])
+    head, mid, tail = _VERIFY_USER_TEMPLATE.get(content_language, _VERIFY_USER_TEMPLATE["en"])
+    formatted_msgs = format_messages(messages, language=content_language)
+    user_text = f"{head}{formatted_msgs}{mid}{result.final_result}{tail}"
     try:
         oai = make_client()
         res = await chat_complete(
@@ -112,9 +146,11 @@ async def _expand_citations(
     context_n: int,
     thread_id: int | None = None,
     cap: int = 30,
+    language: str = "en",
 ) -> str:
-    """Append a `## Источники` section with `<details>`-fold blocks for
-    every cited msg_id, showing `context_n` messages on each side.
+    """Append a `## Sources` (or its localized equivalent) section with
+    `<details>`-fold blocks for every cited msg_id, showing `context_n`
+    messages on each side.
 
     Capped at `cap` distinct citations so a runaway LLM that cites 200
     messages doesn't 10x the report file size. Falls back to the body
@@ -136,7 +172,7 @@ async def _expand_citations(
     if not seen:
         return body
 
-    blocks: list[str] = ["", "## Источники", ""]
+    blocks: list[str] = ["", f"## {_t('sources_heading', language)}", ""]
     for mid in seen:
         msgs = await repo.get_messages_around(
             chat_id, mid, before=context_n, after=context_n, thread_id=thread_id
@@ -170,19 +206,25 @@ async def _expand_citations(
     return body + "\n".join(blocks)
 
 
-def _load_preset_for_commands(preset_name: str, prompt_file: Path | None) -> Preset | None:
+def _load_preset_for_commands(
+    preset_name: str, prompt_file: Path | None, *, language: str = "en"
+) -> Preset | None:
     """Best-effort preset load — returns None if the preset isn't resolvable
     yet (e.g. `custom` without a prompt_file). Used only to read
     `enrich_kinds` for opts merging; the pipeline does its own strict load.
     """
+
     if preset_name == "custom":
         if prompt_file is None:
             return None
         try:
-            return load_custom_preset(prompt_file)
+            return load_custom_preset(prompt_file, language=language)
         except Exception:
             return None
-    return PRESETS.get(preset_name)
+    try:
+        return get_presets(language).get(preset_name)
+    except Exception:
+        return None
 
 
 def build_enrich_opts(
@@ -307,10 +349,23 @@ async def cmd_analyze(
     repeat_last: bool = False,
     with_comments: bool = False,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
+    settings_for_lang = get_settings()
+    effective_language = (language or settings_for_lang.locale.language or "en").lower()
+    effective_content_language = (
+        content_language or settings_for_lang.locale.content_language or effective_language
+    ).lower()
+
     # Default preset — overridden later for single-msg mode.
     effective_preset = preset or "summary"
-    resolved_preset = _load_preset_for_commands(effective_preset, prompt_file)
+    # Preset directory is selected by `content_language` (it determines
+    # which prompts the LLM gets); UI / report-heading language is
+    # tracked separately as `effective_language`.
+    resolved_preset = _load_preset_for_commands(
+        effective_preset, prompt_file, language=effective_content_language
+    )
     enrich_opts = build_enrich_opts(
         cli_enrich=enrich,
         cli_enrich_all=enrich_all,
@@ -362,6 +417,8 @@ async def cmd_analyze(
             enrich_opts=enrich_opts,
             yes=yes,
             folder=folder,
+            language=effective_language,
+            content_language=effective_content_language,
         )
         return
     # No ref → interactive wizard (pick chat → thread → preset → period → run).
@@ -383,6 +440,8 @@ async def cmd_analyze(
             by=by,
             post_to=post_to,
             with_comments=with_comments,
+            language=effective_language,
+            content_language=effective_content_language,
         )
         return
     # Direct path: treat mark_read=None as False (CLI tri-state default).
@@ -402,11 +461,11 @@ async def cmd_analyze(
         msg_parsed = _parse_link(msg)
         if msg_parsed.chat_id is not None or msg_parsed.username:
             if ref and ref != msg:
-                console.print(f"[dim]→ Using chat from --msg link; ignoring ref '{ref}'[/]")
+                console.print(f"[dim]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
             effective_ref = msg
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]→ Resolving[/] {effective_ref}")
+        console.print(f"[dim]{_tf('resolving', ref=effective_ref)}[/]")
         resolved = await resolve(client, repo, effective_ref)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
@@ -430,7 +489,7 @@ async def cmd_analyze(
                     "Run `atg analyze <ref>` once normally first."
                 )
                 raise typer.Exit(0)
-            console.print(f"[dim]→ Repeating last run from {saved.get('__updated_at')}[/]")
+            console.print(f"[dim]{_tf('repeating_last_run', ts=saved.get('__updated_at'))}[/]")
             # Map saved keys → local vars (only fill defaults).
             if not preset and saved.get("preset"):
                 effective_preset = saved["preset"]
@@ -456,6 +515,10 @@ async def cmd_analyze(
                 cite_context = int(saved["cite_context"])
             if not self_check and saved.get("self_check"):
                 self_check = True
+            if language is None and saved.get("language"):
+                effective_language = str(saved["language"]).lower()
+            if content_language is None and saved.get("content_language"):
+                effective_content_language = str(saved["content_language"]).lower()
             if mark_read is None and saved.get("mark_read") is not None:
                 mark_read = bool(saved["mark_read"])
                 mark_read_bool = mark_read
@@ -483,7 +546,9 @@ async def cmd_analyze(
             # User didn't specify a preset? Pick the single-msg one rather
             # than forcing a 3-topics/key-messages layout onto one message.
             single_preset_name = preset or "single_msg"
-            single_preset = _load_preset_for_commands(single_preset_name, prompt_file)
+            single_preset = _load_preset_for_commands(
+                single_preset_name, prompt_file, language=effective_content_language
+            )
             single_enrich = build_enrich_opts(
                 cli_enrich=enrich,
                 cli_enrich_all=enrich_all,
@@ -509,6 +574,8 @@ async def cmd_analyze(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 enrich_opts=single_enrich,
+                language=effective_language,
+                content_language=effective_content_language,
             )
             return
 
@@ -542,6 +609,8 @@ async def cmd_analyze(
                 min_msg_chars=min_msg_chars,
                 enrich_opts=enrich_opts,
                 yes=yes,
+                language=effective_language,
+                content_language=effective_content_language,
             )
             return
 
@@ -557,7 +626,7 @@ async def cmd_analyze(
             # API call used by _run_forum_per_topic.
             from analyzetg.tg.topics import list_forum_topics
 
-            console.print("[dim]→ Listing forum topics for flat-forum grouping...[/]")
+            console.print(f"[dim]{_t('listing_forum_topics_for_flat')}[/]")
             topics_for_flat = await list_forum_topics(client, chat_id)
             topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
             topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
@@ -597,11 +666,11 @@ async def cmd_analyze(
 
             unread_default = not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
             if unread_default:
-                console.print("[dim]→ Looking up topic's unread marker...[/]")
+                console.print(f"[dim]{_t('looking_up_topic_marker')}[/]")
             topics = await list_forum_topics(client, chat_id)
             matched = next((t for t in topics if t.topic_id == thread_id), None)
             if matched is None:
-                console.print(f"[red]Topic {thread_id} not found in this forum.[/]")
+                console.print(f"[red]{_tf('topic_not_found', thread_id=thread_id)}[/]")
                 raise typer.Exit(2)
             thread_title = matched.title
             if unread_default:
@@ -653,6 +722,8 @@ async def cmd_analyze(
             enrich_opts=enrich_opts,
             topic_titles=topic_titles,
             topic_markers=topic_markers,
+            language=effective_language,
+            content_language=effective_content_language,
         )
 
 
@@ -676,6 +747,8 @@ async def _run_single_msg(
     include_transcripts: bool,
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     """Analyze exactly one message.
 
@@ -690,10 +763,10 @@ async def _run_single_msg(
     # Try local DB first (use thread_id=None so topic filter doesn't miss it).
     existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
     if not existing:
-        console.print(f"[dim]→ Fetching message {msg_id} from Telegram...[/]")
+        console.print(f"[dim]{_tf('fetching_message', msg_id=msg_id)}[/]")
         tel_msg = await client.get_messages(chat_id, ids=msg_id)
         if tel_msg is None:
-            console.print(f"[red]Message {msg_id} not found in chat {chat_id}.[/]")
+            console.print(f"[red]{_tf('msg_not_found_in_chat', msg_id=msg_id, chat_id=chat_id)}[/]")
             raise typer.Exit(2)
         sub = await repo.get_subscription(chat_id, thread_id or 0) or Subscription(
             chat_id=chat_id,
@@ -704,7 +777,7 @@ async def _run_single_msg(
         await repo.upsert_messages([normalize(tel_msg, sub)])
         existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
         if not existing:
-            console.print(f"[red]Failed to persist message {msg_id}.[/]")
+            console.print(f"[red]{_tf('failed_persist_msg', msg_id=msg_id)}[/]")
             raise typer.Exit(2)
 
     loaded = existing[0]
@@ -740,10 +813,10 @@ async def _run_single_msg(
             hint = " It's a photo with no caption; try --enrich=image to describe it."
         elif loaded.media_type == "doc":
             hint = " It's a document; try --enrich=doc to extract text."
-        console.print(f"[yellow]Nothing to analyze for msg {msg_id}.[/]{hint}")
+        console.print(f"[yellow]{_tf('nothing_to_analyze_for_msg', msg_id=msg_id, hint=hint)}[/]")
         raise typer.Exit(0)
 
-    console.print("[dim]→ Running analysis...[/]")
+    console.print(f"[dim]{_t('running_analysis')}[/]")
     opts = AnalysisOptions(
         preset=preset,
         prompt_file=prompt_file,
@@ -767,6 +840,8 @@ async def _run_single_msg(
         chat_username=chat_username,
         chat_internal_id=chat_internal_id,
         client=client,
+        language=language,
+        content_language=content_language,
     )
     _print_and_write(result, output=output, title=title, console_out=console_out)
 
@@ -807,6 +882,8 @@ async def _run_single(
     post_to: str | None = None,
     with_comments: bool = False,
     yes: bool = False,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     """Analyze one chat or one thread via the shared pipeline."""
     from analyzetg.core.pipeline import prepare_chat_run
@@ -835,15 +912,17 @@ async def _run_single(
         topic_markers=topic_markers,
         mark_read=mark_read,
         with_comments=with_comments,
+        language=language,
+        content_language=content_language,
     )
 
     # --dry-run: print the cost estimate and exit before any LLM call.
     # Useful before a `--enrich-all --full-history` run on a busy chat.
     if dry_run:
-        loaded_preset = _load_preset_for_commands(preset, prompt_file)
+        loaded_preset = _load_preset_for_commands(preset, prompt_file, language=content_language)
         n = len(prepared.messages)
         if loaded_preset is None:
-            console.print(f"[bold]Dry run[/] — {n} message(s); preset {preset!r} not loadable.")
+            console.print(f"[bold]{_tf('dry_run_unloadable', n=n, preset=preset)}[/]")
             return
         from analyzetg.analyzer.pipeline import estimate_cost as _estimate_cost
 
@@ -853,17 +932,21 @@ async def _run_single(
             settings=get_settings(),
         )
         console.print(
-            f"[bold]Dry run[/] — would run preset [cyan]{preset}[/] over "
-            f"[bold]{n}[/] message(s) on {loaded_preset.final_model} "
-            f"(filter: {loaded_preset.filter_model})."
+            "[bold]"
+            + _tf(
+                "dry_run_summary",
+                preset=preset,
+                n=n,
+                final=loaded_preset.final_model,
+                fil=loaded_preset.filter_model,
+            )
+            + "[/]"
         )
         if hi is not None:
-            console.print(f"  Estimated cost (analysis only): [bold]${lo:.4f}–${hi:.4f}[/]")
-            console.print("  [dim]Note: enrichment cost (voice/image/video/doc/link) is NOT included.[/]")
+            console.print("  [bold]" + _tf("estimated_cost_band", lo=lo, hi=hi) + "[/]")
+            console.print(f"  [dim]{_t('estimate_enrich_note')}[/]")
         else:
-            console.print(
-                "  [yellow]Cost estimate unavailable[/] — pricing missing for one of the run's models."
-            )
+            console.print(f"  [yellow]{_t('estimate_unavailable')}[/]")
         return
 
     # Budget guard: refuse (or confirm) before any LLM call when the
@@ -871,7 +954,7 @@ async def _run_single(
     # estimator only covers the analysis itself (map+reduce); enrichment
     # spend is not folded in — caveat is in the help text.
     if max_cost is not None and prepared.messages:
-        loaded_preset = _load_preset_for_commands(preset, prompt_file)
+        loaded_preset = _load_preset_for_commands(preset, prompt_file, language=content_language)
         if loaded_preset is not None:
             from analyzetg.analyzer.pipeline import estimate_cost as _estimate_cost
 
@@ -882,22 +965,27 @@ async def _run_single(
             )
             if hi is not None and hi > max_cost:
                 console.print(
-                    f"[bold yellow]⚠ Estimated cost ${lo:.4f}–${hi:.4f} "
-                    f"exceeds --max-cost ${max_cost:.4f}[/] "
-                    f"({len(prepared.messages)} messages, preset={preset})."
+                    "[bold yellow]"
+                    + _tf(
+                        "max_cost_exceeded",
+                        lo=lo,
+                        hi=hi,
+                        max=max_cost,
+                        n=len(prepared.messages),
+                        preset=preset,
+                    )
+                    + "[/]"
                 )
                 if yes:
-                    console.print("[red]Aborting (--yes set, no confirmation possible).[/]")
+                    console.print(f"[red]{_t('aborting_yes_set')}[/]")
                     raise typer.Exit(2)
-                if not typer.confirm("Run anyway?", default=False):
-                    console.print("[yellow]Aborted.[/]")
+                if not typer.confirm(_t("run_anyway_q"), default=False):
+                    console.print(f"[yellow]{_t('aborted')}[/]")
                     raise typer.Exit(0)
             elif hi is None:
-                console.print(
-                    "[dim]→ --max-cost not enforced: pricing missing for one of the run's models.[/]"
-                )
+                console.print(f"[dim]{_t('max_cost_not_enforced')}[/]")
 
-    console.print("[dim]→ Running analysis...[/]")
+    console.print(f"[dim]{_t('running_analysis')}[/]")
     sender_id_arg = int(by) if by and by.lstrip("-").isdigit() else None
     sender_substring_arg = by if by and sender_id_arg is None else None
     opts = AnalysisOptions(
@@ -954,6 +1042,8 @@ async def _run_single(
         topic_markers=topic_markers,
         messages=prepared.messages,
         chat_groups=chat_groups,
+        language=language,
+        content_language=content_language,
     )
 
     if self_check and result.final_result and prepared.messages:
@@ -961,9 +1051,13 @@ async def _run_single(
             result=result,
             messages=prepared.messages,
             repo=repo,
+            # LLM-facing → content_language. The heading below is user-facing
+            # → language.
+            content_language=content_language,
         )
         if verification:
-            result.final_result = result.final_result.rstrip() + "\n\n## Verification\n\n" + verification
+            heading = _t("verification_heading", language)
+            result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + verification
 
     if cite_context > 0 and result.final_result:
         result.final_result = await _expand_citations(
@@ -972,6 +1066,7 @@ async def _run_single(
             repo=repo,
             context_n=cite_context,
             thread_id=thread_id,
+            language=language,
         )
 
     # Persist a JSON-safe slice of the run's flags so the wizard's
@@ -1002,6 +1097,8 @@ async def _run_single(
                     "by": by,
                     "with_comments": bool(with_comments),
                     "thread": int(thread_id) if thread_id else None,
+                    "language": language,
+                    "content_language": content_language,
                 },
             )
         except Exception as e:
@@ -1023,7 +1120,7 @@ async def _run_single(
             await _post_to_chat(client, repo, result, title=title, target=post_target)
         except Exception as e:
             log.warning("analyze.post_failed", chat_id=chat_id, target=post_target, err=str(e)[:200])
-            console.print(f"[yellow]⚠ Could not post to {post_target}:[/] {e}")
+            console.print(f"[yellow]{_tf('couldnt_post_to', target=post_target, err=e)}[/]")
 
     if prepared.mark_read_fn and result.msg_count > 0:
         # Report is already on disk; a mark-read failure (permission denied,
@@ -1033,7 +1130,7 @@ async def _run_single(
             await prepared.mark_read_fn()
         except Exception as e:
             log.warning("analyze.mark_read_failed", chat_id=chat_id, err=str(e)[:200])
-            console.print(f"[yellow]⚠ Could not mark as read:[/] {e}")
+            console.print(f"[yellow]{_tf('couldnt_mark_read', err=e)}[/]")
 
 
 async def _run_forum_per_topic(
@@ -1060,6 +1157,8 @@ async def _run_forum_per_topic(
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
     yes: bool = False,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     """One analysis per topic; reports land in reports/{chat-slug}/{topic-slug}/analyze/.
 
@@ -1079,7 +1178,7 @@ async def _run_forum_per_topic(
         if output is not None and output.exists() and output.is_dir():
             base_dir = output
         elif output is not None and output.suffix:
-            console.print(f"[red]--output {output} is a single file; per-topic mode needs a directory.[/]")
+            console.print(f"[red]{_tf('output_is_file_need_dir', path=output)}[/]")
             raise typer.Exit(2)
         else:
             base_dir = output or Path("reports")
@@ -1104,6 +1203,8 @@ async def _run_forum_per_topic(
         min_msg_chars=min_msg_chars,
         mark_read=mark_read,
         yes=yes,
+        language=language,
+        content_language=content_language,
     ):
         try:
             opts = AnalysisOptions(
@@ -1128,6 +1229,8 @@ async def _run_forum_per_topic(
                 chat_internal_id=chat_internal_id,
                 client=client,
                 messages=prepared.messages,
+                language=language,
+                content_language=content_language,
             )
             per_file: Path | None = None
             if base_dir is not None:
@@ -1151,15 +1254,15 @@ async def _run_forum_per_topic(
                 topic_id=prepared.thread_id,
                 err=str(e)[:200],
             )
-            console.print(f"[red]Topic {prepared.thread_title} failed:[/] {e}")
+            console.print(f"[red]{_tf('topic_failed', title=prepared.thread_title, err=e)}[/]")
 
 
 async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
     """Interactively pick a forum mode. Returns (all_flat, all_per_topic, thread_id)."""
-    console.print("[dim]→ Listing forum topics...[/]")
+    console.print(f"[dim]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     if not topics:
-        console.print("[yellow]No topics in this forum.[/]")
+        console.print(f"[yellow]{_t('no_topics_in_forum')}[/]")
         raise typer.Exit(0)
 
     if not sys.stdin.isatty():
@@ -1180,7 +1283,7 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
         answer = answer.strip()
         up = answer.upper()
         if up == "Q":
-            console.print("[dim]Aborted.[/]")
+            console.print(f"[dim]{_t('aborted')}[/]")
             raise typer.Exit(0)
         if up == "A":
             return True, False, 0
@@ -1190,9 +1293,9 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
             tid = int(answer)
             if any(t.topic_id == tid for t in topics):
                 return False, False, tid
-            console.print(f"[red]No topic with id={tid}.[/]")
+            console.print(f"[red]{_tf('no_topic_with_id', tid=tid)}[/]")
             continue
-        console.print("[red]Not a valid choice. Try again.[/]")
+        console.print(f"[red]{_t('not_a_valid_choice')}[/]")
 
 
 def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -> None:
@@ -1232,6 +1335,8 @@ async def _run_no_ref(
     enrich_opts: EnrichOpts | None = None,
     folder: str | None = None,
     yes: bool = False,
+    language: str = "en",
+    content_language: str = "en",
 ) -> None:
     """No <ref>: list dialogs with unread messages, confirm, analyze each.
 
@@ -1253,10 +1358,7 @@ async def _run_no_ref(
         if yes or not sys.stdin.isatty():
             mark_read_effective = False
         else:
-            mark_read_effective = typer.confirm(
-                "Mark messages as read in Telegram after each chat is analyzed?",
-                default=False,
-            )
+            mark_read_effective = typer.confirm(_t("mark_chats_read_after_analyze_q"), default=False)
     else:
         mark_read_effective = mark_read
 
@@ -1266,6 +1368,34 @@ async def _run_no_ref(
         out_dir = _resolve_output_dir(output, 0) or Path("reports")
         out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+    # Cross-chat synthesis preset: aggregate messages from all selected chats
+    # into a single run_analysis call so the LLM sees them with `=== Chat: …
+    # ===` separators (chat_groups mode) and can produce a one-shot summary
+    # of "what was happening across these chats". For other presets the
+    # batch flow stays per-chat (one report per chat).
+    if preset == "multichat":
+        await _run_multichat_batch(
+            client=client,
+            repo=repo,
+            preset=preset,
+            prompt_file=prompt_file,
+            model=model,
+            filter_model=filter_model,
+            output=output,
+            console_out=console_out,
+            no_cache=no_cache,
+            include_transcripts=include_transcripts,
+            min_msg_chars=min_msg_chars,
+            enrich_opts=effective_enrich,
+            folder=folder,
+            mark_read_effective=mark_read_effective,
+            yes=yes,
+            stamp=stamp,
+            language=language,
+            content_language=content_language,
+        )
+        return
 
     successes = 0
     failures: list[tuple[int, str | None, str]] = []
@@ -1280,6 +1410,8 @@ async def _run_no_ref(
         mark_read=mark_read_effective,
         folder=folder,
         yes=yes,
+        language=language,
+        content_language=content_language,
     ):
         try:
             opts = AnalysisOptions(
@@ -1302,6 +1434,8 @@ async def _run_no_ref(
                 chat_internal_id=prepared.chat_internal_id,
                 client=client,
                 messages=prepared.messages,
+                language=language,
+                content_language=content_language,
             )
             per_file = None
             if out_dir:
@@ -1325,11 +1459,11 @@ async def _run_no_ref(
                         chat_id=prepared.chat_id,
                         err=str(e)[:200],
                     )
-                    console.print(f"[yellow]⚠ Could not mark as read:[/] {e}")
+                    console.print(f"[yellow]{_tf('couldnt_mark_read', err=e)}[/]")
             successes += 1
         except Exception as e:
             log.error("analyze.no_ref.chat_error", chat_id=prepared.chat_id, err=str(e)[:200])
-            console.print(f"[red]Failed:[/] {e}")
+            console.print(f"[red]{_tf('batch_chat_failed', err=e)}[/]")
             failures.append((prepared.chat_id, prepared.chat_title, str(e)[:200]))
 
     total = successes + len(failures)
@@ -1343,6 +1477,124 @@ async def _run_no_ref(
             console.print(f"  [red]×[/] {ctitle or cid}: {err}")
         raise typer.Exit(1)
     console.print(f"\n[bold green]Batch complete:[/] {successes}/{total} chats succeeded.")
+
+
+async def _run_multichat_batch(
+    *,
+    client,
+    repo: Repo,
+    preset: str,
+    prompt_file: Path | None,
+    model: str | None,
+    filter_model: str | None,
+    output: Path | None,
+    console_out: bool,
+    no_cache: bool,
+    include_transcripts: bool,
+    min_msg_chars: int | None,
+    enrich_opts: EnrichOpts,
+    folder: str | None,
+    mark_read_effective: bool,
+    yes: bool,
+    stamp: str,
+    language: str,
+    content_language: str,
+) -> None:
+    """Cross-chat batch flow: gather messages across all selected chats
+    and run ONE analysis with `chat_groups` so the LLM sees per-chat
+    sections separated by `=== Chat: … ===` headers.
+
+    Used when `preset == "multichat"`. Mark-read fires per chat after the
+    single LLM call succeeds, mirroring the per-chat behavior.
+    """
+    from analyzetg.analyzer.formatter import build_link_template as _build_lt
+    from analyzetg.core.pipeline import prepare_all_unread_runs
+
+    all_messages: list = []
+    chat_groups: dict[int, dict] = {}
+    mark_fns: list = []
+
+    async for prepared in prepare_all_unread_runs(
+        client=client,
+        repo=repo,
+        settings=get_settings(),
+        enrich_opts=enrich_opts,
+        include_transcripts=include_transcripts,
+        min_msg_chars=min_msg_chars,
+        mark_read=mark_read_effective,
+        folder=folder,
+        yes=yes,
+        language=language,
+        content_language=content_language,
+    ):
+        if not prepared.messages:
+            continue
+        all_messages.extend(prepared.messages)
+        chat_groups[prepared.chat_id] = {
+            "title": prepared.chat_title or str(prepared.chat_id),
+            "link_template": _build_lt(
+                chat_username=prepared.chat_username,
+                chat_internal_id=prepared.chat_internal_id,
+                thread_id=None,
+            ),
+        }
+        if prepared.mark_read_fn is not None:
+            mark_fns.append(prepared.mark_read_fn)
+
+    if not all_messages:
+        console.print(f"[dim]{_t('no_unread_across_chats')}[/]")
+        return
+
+    console.print(
+        f"[dim]→ Cross-chat synthesis over {len(all_messages)} message(s) "
+        f"from {len(chat_groups)} chat(s)...[/]"
+    )
+    opts = AnalysisOptions(
+        preset=preset,
+        prompt_file=prompt_file,
+        model_override=model,
+        filter_model_override=filter_model,
+        use_cache=not no_cache,
+        include_transcripts=include_transcripts,
+        min_msg_chars=min_msg_chars,
+        enrich=enrich_opts,
+    )
+    primary_chat_id = next(iter(chat_groups))
+    primary_meta = chat_groups[primary_chat_id]
+    result = await run_analysis(
+        repo=repo,
+        chat_id=primary_chat_id,
+        thread_id=None,
+        title=primary_meta.get("title"),
+        opts=opts,
+        chat_username=None,
+        chat_internal_id=None,
+        client=client,
+        messages=all_messages,
+        chat_groups=chat_groups,
+        language=language,
+        content_language=content_language,
+    )
+
+    if console_out:
+        out_path: Path | None = None
+    else:
+        base = _resolve_output_dir(output, 0) or Path("reports")
+        base.mkdir(parents=True, exist_ok=True)
+        out_path = base / "multichat" / f"{preset}-{stamp}.md"
+    _print_and_write(
+        result,
+        output=out_path,
+        title=f"{len(chat_groups)} chats — multichat",
+        console_out=console_out,
+    )
+
+    # Fire each chat's mark-read after the LLM call succeeded.
+    for fn in mark_fns:
+        try:
+            await fn()
+        except Exception as e:
+            log.warning("analyze.multichat.mark_read_failed", err=str(e)[:200])
 
 
 def _resolve_output_dir(output: Path | None, n_chats: int) -> Path | None:
@@ -1381,12 +1633,11 @@ def _fmt_cost_precise(value: float) -> str:
 def _fmt_period_header(period: tuple[datetime | None, datetime | None] | None) -> str:
     """Human-readable period for the report header.
 
-    (None, None) → "unread / full history (no date filter)" since both
-    cases collapse to the same thing in the DB query. Concrete datetimes
-    render as YYYY-MM-DD HH:MM, leaving ambiguity off the page.
+    (None, None) → localised "unread / full history" string. Concrete
+    datetimes render as YYYY-MM-DD HH:MM, leaving ambiguity off the page.
     """
     if period is None or (period[0] is None and period[1] is None):
-        return "unread / full history (no date filter)"
+        return _t("report_meta_period_unread")
     a = period[0].strftime("%Y-%m-%d %H:%M") if period[0] else "…"
     b = period[1].strftime("%Y-%m-%d %H:%M") if period[1] else "…"
     return f"{a} → {b}"
@@ -1395,60 +1646,61 @@ def _fmt_period_header(period: tuple[datetime | None, datetime | None] | None) -
 def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
     """Build the fixed-format metadata block prepended to every saved report.
 
-    Lets users (and future-you) answer "what chat, what period, what model,
-    what did this cost?" in 3 seconds instead of grepping git history. Order
-    of fields is chosen so the most load-bearing facts (chat, period, count)
-    are at the top and the diagnostic details follow.
+    Labels go through `i18n.t()` so the saved-file metadata follows the
+    user's UI language (`locale.language`) — independent of the analysis
+    body's language.
     """
     lines: list[str] = ["---"]
-    lines.append(f"**Chat:** {title or result.chat_id}")
+    lines.append(f"{_t('report_meta_chat')} {title or result.chat_id}")
     if result.thread_id:
-        lines.append(f"**Thread:** {result.thread_id}")
-    lines.append(f"**Period:** {_fmt_period_header(result.period)}")
+        lines.append(f"{_t('report_meta_thread')} {result.thread_id}")
+    lines.append(f"{_t('report_meta_period')} {_fmt_period_header(result.period)}")
 
-    msg_line = f"**Messages analyzed:** {result.msg_count}"
+    msg_line = f"{_t('report_meta_messages')} {result.msg_count}"
     if result.raw_msg_count and result.raw_msg_count != result.msg_count:
         dropped = result.raw_msg_count - result.msg_count
-        msg_line += f" (from {result.raw_msg_count} raw, −{dropped} after filter/dedupe)"
+        msg_line += (
+            " (" + _tf("report_meta_messages_filtered", raw=result.raw_msg_count, dropped=dropped) + ")"
+        )
     lines.append(msg_line)
 
-    preset_line = f"**Preset:** `{result.preset}`"
+    preset_line = f"{_t('report_meta_preset')} `{result.preset}`"
     if result.prompt_version:
         preset_line += f" (v={result.prompt_version})"
     lines.append(preset_line)
 
-    model_line = f"**Model:** `{result.model}`"
+    model_line = f"{_t('report_meta_model')} `{result.model}`"
     if result.chunk_count > 1 and result.filter_model and result.filter_model != result.model:
-        model_line += f" (+ `{result.filter_model}` for map phase)"
+        model_line += f" (+ `{result.filter_model}` {_t('report_meta_model_map_phase')})"
     lines.append(model_line)
 
     if result.chunk_count:
-        lines.append(f"**Chunks:** {result.chunk_count}")
+        lines.append(f"{_t('report_meta_chunks')} {result.chunk_count}")
 
     total_calls = result.cache_hits + result.cache_misses
     if total_calls:
-        lines.append(f"**Cache:** {result.cache_hits}/{total_calls} hits")
+        lines.append(
+            f"{_t('report_meta_cache')} "
+            + _tf("report_meta_cache_hits_of", hits=result.cache_hits, total=total_calls)
+        )
 
     if result.enrich_kinds:
-        lines.append(f"**Enrichment:** {', '.join(result.enrich_kinds)}")
+        lines.append(f"{_t('report_meta_enrichment')} {', '.join(result.enrich_kinds)}")
     if result.enrich_summary:
-        lines.append(f"**Enrichment detail:** {result.enrich_summary}")
+        lines.append(f"{_t('report_meta_enrichment_detail')} {result.enrich_summary}")
 
     analysis_cost = result.total_cost_usd
     if result.enrich_cost_usd:
-        # Analysis cost already excludes enrichment (enrichment logs separately
-        # into usage_log under kind='audio'/'chat' phase labels). Show both so
-        # the user can audit where the spend went.
         total = analysis_cost + result.enrich_cost_usd
         lines.append(
-            f"**Cost:** {_fmt_cost_precise(total)} "
+            f"{_t('report_meta_cost')} {_fmt_cost_precise(total)} "
             f"(analysis {_fmt_cost_precise(analysis_cost)} + "
             f"enrichment {_fmt_cost_precise(result.enrich_cost_usd)})"
         )
     else:
-        lines.append(f"**Cost:** {_fmt_cost_precise(analysis_cost)}")
+        lines.append(f"{_t('report_meta_cost')} {_fmt_cost_precise(analysis_cost)}")
 
-    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"{_t('report_meta_generated')} {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     lines.append("---")
     lines.append("")  # blank line before the LLM body
@@ -1496,7 +1748,7 @@ def _print_and_write(
             output.parent.mkdir(parents=True, exist_ok=True)
             output = _unique_path(output)
             output.write_text(body, encoding="utf-8")
-            console.print(f"[green]Also saved:[/] {output}")
+            console.print(f"[green]{_tf('also_saved', path=output)}[/]")
         return
 
     if output is None:
@@ -1512,7 +1764,7 @@ def _print_and_write(
     # land in the same second — _unique_path appends -2/-3 to avoid overwrite.
     output = _unique_path(output)
     output.write_text(body, encoding="utf-8")
-    console.print(f"[green]Written:[/] {output}")
+    console.print(f"[green]{_tf('written_to', path=output)}[/]")
 
 
 # Telegram caps a single message at 4096 chars (UTF-16 code units, but
@@ -1556,7 +1808,7 @@ async def _post_to_chat(
 
     for chunk in chunks:
         await client.send_message(entity, chunk)
-    console.print(f"[green]Posted[/] to {label} ({len(chunks)} message(s)).")
+    console.print(f"[green]{_tf('posted_to_n_msgs', label=label, n=len(chunks))}[/]")
 
 
 # Back-compat shim: existing callers expect `_post_to_saved_messages`.
@@ -1615,13 +1867,7 @@ def _split_for_telegram(text: str, limit: int) -> list[str]:
 def _with_truncation_banner(result) -> str:
     if not getattr(result, "truncated", False):
         return result.final_result
-    banner = (
-        "> ⚠️ **Output was truncated.** The model hit "
-        "`output_budget_tokens` and stopped mid-response.\n"
-        f"> Raise the cap in `presets/{result.preset}.md` "
-        "(e.g. `output_budget_tokens: 4000`) and re-run with `--no-cache`.\n\n"
-    )
-    return banner + result.final_result
+    return _tf("truncation_banner_md", preset=result.preset) + result.final_result
 
 
 def _default_output_path(
@@ -1667,6 +1913,8 @@ async def run_all_unread_analyze(
     enrich_opts: EnrichOpts | None = None,
     folder: str | None = None,
     yes: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> None:
     """Public: run the batch-across-all-unread-chats flow (was the old no-ref default).
 
@@ -1675,6 +1923,8 @@ async def run_all_unread_analyze(
     `yes=True` skips the interactive confirmation — the wizard sets this so
     the user isn't asked twice after already approving the plan."""
     settings = get_settings()
+    lang = (language or settings.locale.language or "en").lower()
+    clang = (content_language or settings.locale.content_language or lang).lower()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _run_no_ref(
             client=client,
@@ -1692,6 +1942,8 @@ async def run_all_unread_analyze(
             enrich_opts=enrich_opts,
             yes=yes,
             folder=folder,
+            language=lang,
+            content_language=clang,
         )
 
 
@@ -1725,10 +1977,10 @@ async def cmd_stats(since: str | None, by: str) -> None:
                 f"${float(r['cost_usd'] or 0):.4f}",
             )
         console.print(t)
-        console.print(f"[bold]Total cost:[/] ${total_cost:.4f}")
+        console.print(f"[bold]{_tf('stats_total_cost', cost=total_cost)}[/]")
         if total_unpriced:
             console.print(
                 f"[yellow]⚠ {total_unpriced} call(s) had no pricing entry — total cost under-reports.[/] "
                 "Add the model to [cyan][pricing.chat][/] or [cyan][pricing.audio][/] in config.toml."
             )
-        console.print(f"[bold]Cache hit rate:[/] {hit_rate:.1%}")
+        console.print(f"[bold]{_tf('stats_hit_rate', rate=hit_rate)}[/]")

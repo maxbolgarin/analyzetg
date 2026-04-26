@@ -1,6 +1,7 @@
 ---
 name: decisions
 prompt_version: v3
+description: Принятые решения — таблица решение/кто/когда
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

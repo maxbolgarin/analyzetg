@@ -1,6 +1,7 @@
 ---
 name: questions
 prompt_version: v2
+description: Открытые вопросы, на которые стоит вернуться
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

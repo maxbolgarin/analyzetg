@@ -1,6 +1,7 @@
 ---
 name: links
 prompt_version: v3
+description: Внешние URL из чата, сгруппированные по темам
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini

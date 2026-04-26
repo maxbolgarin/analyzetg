@@ -12,6 +12,8 @@ from rich.table import Table
 
 from analyzetg.config import get_settings
 from analyzetg.db.repo import open_repo
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.models import Subscription
 from analyzetg.tg.client import (
     _chat_kind,
@@ -51,22 +53,14 @@ async def cmd_init() -> None:
     if not settings.openai.api_key:
         missing.append("OPENAI_API_KEY")
     if missing:
-        console.print(f"[red]Missing: {', '.join(missing)}.[/]")
+        console.print(f"[red]{_tf('doctor_missing', missing=', '.join(missing))}[/]")
         if env_path.exists():
-            console.print(f"Checked .env at: [cyan]{env_path}[/]")
-            console.print(
-                "  Make sure the file has lines like `TELEGRAM_API_ID=123456` "
-                "(no quotes, no spaces around `=`)."
-            )
-        else:
-            console.print(
-                f"No .env file at [cyan]{env_path}[/]. Copy .env.example to .env and fill in the values."
-            )
+            console.print(_tf("doctor_env_seen_at", path=env_path))
         # Also show what we actually see in env for debugging
         seen = {
             k: bool(os.environ.get(k)) for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "OPENAI_API_KEY")
         }
-        console.print(f"[dim]env seen: {seen}[/]")
+        console.print(f"[dim]{_tf('doctor_env_seen', seen=seen)}[/]")
         raise typer.Exit(1)
 
     # Ensure DB is migrated
@@ -77,36 +71,36 @@ async def cmd_init() -> None:
     client = build_client(settings)
 
     def _phone() -> str:
-        return typer.prompt("Phone number (international, e.g. +491711234567)")
+        return typer.prompt(_t("init_phone_prompt"))
 
     def _code() -> str:
-        return typer.prompt("Login code from Telegram")
+        return typer.prompt(_t("init_login_code_prompt"))
 
     def _password() -> str:
         # Telethon retries this callback on PasswordHashInvalidError,
         # so a wrong 2FA password only reprompts the 2FA step.
-        return typer.prompt("2FA password", hide_input=True)
+        return typer.prompt(_t("init_2fa_prompt"), hide_input=True)
 
     await client.connect()
     try:
         if await client.is_user_authorized():
-            console.print("[green]Telegram session already authorized.[/]")
+            console.print(f"[green]{_t('doctor_session_authorized')}[/]")
         else:
             await client.start(phone=_phone, code_callback=_code, password=_password)
-            console.print("[green]Logged in.[/]")
+            console.print(f"[green]{_t('doctor_logged_in')}[/]")
     finally:
         await client.disconnect()
 
     # OpenAI smoke test
-    console.print("Checking OpenAI API key ...")
+    console.print(_t("doctor_check_openai"))
     try:
         from openai import AsyncOpenAI
 
         oai = AsyncOpenAI(api_key=settings.openai.api_key, timeout=settings.openai.request_timeout_sec)
         await asyncio.wait_for(oai.models.list(), timeout=15)
-        console.print("[green]OpenAI key OK.[/]")
+        console.print(f"[green]{_t('doctor_openai_ok')}[/]")
     except Exception as e:
-        console.print(f"[yellow]OpenAI check failed:[/] {e}")
+        console.print(f"[yellow]{_tf('doctor_openai_failed', err=e)}[/]")
 
 
 # --------------------------------------------------------------------- doctor
@@ -133,7 +127,7 @@ async def cmd_doctor() -> None:
         console.print(f"  {status:<24} {label}{(' — ' + detail) if detail else ''}")
         statuses.append(status)
 
-    console.print("[bold]analyzetg doctor[/]")
+    console.print(f"[bold]{_t('tg_doctor_banner')}[/]")
 
     # 1. Config files
     cwd = _Path.cwd()
@@ -287,12 +281,12 @@ async def cmd_doctor() -> None:
     fails = sum(1 for s in statuses if "FAIL" in s)
     warns = sum(1 for s in statuses if "WARN" in s)
     if fails:
-        console.print(f"[bold red]{fails} failure(s), {warns} warning(s).[/]")
+        console.print(f"[bold red]{_tf('doctor_summary_failed', fails=fails, warns=warns)}[/]")
         raise typer.Exit(1)
     if warns:
-        console.print(f"[bold yellow]{warns} warning(s).[/] Some features may be limited.")
+        console.print(f"[bold yellow]{_tf('doctor_summary_warned', warns=warns)}[/]")
     else:
-        console.print("[bold green]All checks passed.[/]")
+        console.print(f"[bold green]{_t('doctor_all_ok')}[/]")
 
 
 # ------------------------------------------------------------------- dialogs
@@ -329,7 +323,7 @@ async def cmd_dialogs(search: str | None, kind: str | None, limit: int) -> None:
             if shown >= limit:
                 break
         console.print(table)
-        console.print(f"[dim]{shown} row(s)[/]")
+        console.print(f"[dim]{_tf('tg_n_rows', n=shown)}[/]")
 
 
 # ------------------------------------------------------------------- describe
@@ -386,7 +380,7 @@ async def _describe_overview(
 ) -> None:
     from analyzetg.tg.folders import chat_folder_index
 
-    console.print("[dim]→ Listing dialogs...[/]")
+    console.print(f"[dim]{_t('tg_listing_dialogs')}[/]")
     folder_idx = await chat_folder_index(client)
     rows: list[tuple] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
@@ -447,12 +441,12 @@ async def _describe_overview(
             folders_str,
         )
     console.print(table)
-    hint_parts = [f"{len(rows)} row(s)"]
+    hint_parts = [_tf("tg_n_rows", n=len(rows))]
     if not show_all:
-        hint_parts.append("default filter: unread + forums/groups/supergroups")
-        hint_parts.append("pass --all to see everything")
+        hint_parts.append(_t("tg_dialogs_default_filter"))
+        hint_parts.append(_t("tg_dialogs_pass_all"))
     console.print(f"[dim]{'. '.join(hint_parts)}.[/]")
-    console.print("[dim]Use `describe <ref>` for details on one chat.[/]")
+    console.print(f"[dim]{_t('tg_describe_hint')}[/]")
 
 
 async def _describe_one(client, repo, ref: str) -> None:
@@ -466,7 +460,7 @@ async def _describe_one(client, repo, ref: str) -> None:
 
     # Header
     badge = f"[bold]{resolved.title or chat_id}[/]"
-    console.print(f"\n{badge} [dim](id={chat_id}, kind={kind})[/]")
+    console.print(f"\n{badge} [dim]{_tf('tg_describe_id_kind', chat_id=chat_id, kind=kind)}[/]")
 
     # --- Left/right-ish labeled properties
     def _row(label: str, value: str | None, *, dim_label: bool = True) -> None:
@@ -586,11 +580,11 @@ async def _describe_one(client, repo, ref: str) -> None:
         )
         top = await repo.top_senders(chat_id, limit=5)
         if top:
-            console.print("[bold]Top senders[/]:")
+            console.print(f"[bold]{_t('tg_top_senders_label')}[/]:")
             for row in top:
                 console.print(f"  {row['sender_name']} — {row['count']}")
     else:
-        console.print("\n[dim]Local DB: no messages stored for this chat yet.[/]")
+        console.print(f"\n[dim]{_t('tg_no_messages_local')}[/]")
 
 
 async def _fetch_last_msg_date(client, chat_id: int):
@@ -621,7 +615,7 @@ async def cmd_topics(chat_ref: str) -> None:
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         ref = await resolve(client, repo, chat_ref, prompt_choice=_tui_choose)
         if ref.kind not in ("forum", "supergroup", "channel"):
-            console.print(f"[yellow]{ref.title}[/] is not a forum group.")
+            console.print(f"[yellow]{_tf('tg_not_a_forum', title=ref.title)}[/]")
             raise typer.Exit(1)
         topics = await list_forum_topics(client, ref.chat_id)
         t = Table(title=f"Forum topics: {ref.title}")
@@ -632,7 +626,7 @@ async def cmd_topics(chat_ref: str) -> None:
         for x in topics:
             t.add_row(str(x.topic_id), x.title, "yes" if x.closed else "", "yes" if x.pinned else "")
         console.print(t)
-        console.print(f"[dim]{len(topics)} topic(s)[/]")
+        console.print(f"[dim]{_tf('tg_n_topics', n=len(topics))}[/]")
 
 
 # -------------------------------------------------------------------- resolve
@@ -641,13 +635,13 @@ async def cmd_topics(chat_ref: str) -> None:
 async def cmd_resolve(ref: str) -> None:
     settings = get_settings()
     parsed = parse(ref)
-    console.print(f"[bold]Parsed:[/] {parsed}")
+    console.print(f"[bold]{_t('tg_resolve_parsed_label')}[/] {parsed}")
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         try:
             resolved = await resolve(client, repo, ref, prompt_choice=_tui_choose)
-            console.print(f"[bold green]Resolved:[/] {resolved}")
+            console.print(f"[bold green]{_t('tg_resolve_done_label')}[/] {resolved}")
         except Exception as e:
-            console.print(f"[red]Resolve failed:[/] {e}")
+            console.print(f"[red]{_t('tg_resolve_failed_label')}[/] {e}")
 
 
 # --------------------------------------------------------------- channel-info
@@ -658,11 +652,14 @@ async def cmd_channel_info(ref: str) -> None:
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         resolved = await resolve(client, repo, ref, prompt_choice=_tui_choose)
         info = await get_full_channel_info(client, resolved.chat_id)
-        console.print(f"[bold]{resolved.title}[/] (id={resolved.chat_id}, kind={resolved.kind})")
-        console.print(f"  participants: {info['participants_count']}")
-        console.print(f"  linked_chat_id: {info['linked_chat_id']}")
+        console.print(
+            f"[bold]{resolved.title}[/] "
+            f"{_tf('tg_describe_id_kind_inline', chat_id=resolved.chat_id, kind=resolved.kind)}"
+        )
+        console.print(_tf("tg_describe_participants", n=info["participants_count"]))
+        console.print(_tf("tg_describe_linked_chat_id", id=info["linked_chat_id"]))
         if info.get("about"):
-            console.print(f"  about: {info['about']}")
+            console.print(_tf("tg_describe_about", text=info["about"]))
 
 
 # ------------------------------------------------------------------- chats.*
@@ -708,7 +705,7 @@ async def cmd_chats_add(
                 subscribed_ids=subscribed_ids,
             )
             if picked is None or not isinstance(picked, dict):
-                console.print("[dim]Cancelled.[/]")
+                console.print(f"[dim]{_t('cancelled')}[/]")
                 return
             ref = str(picked["chat_id"])
             if int(picked["chat_id"]) in subscribed_ids:
@@ -770,7 +767,7 @@ async def cmd_chats_add(
             )
 
             def _bail() -> None:
-                console.print("[dim]Cancelled.[/]")
+                console.print(f"[dim]{_t('cancelled')}[/]")
 
             if preset is None:
                 picked_preset = await _pick_preset()
@@ -896,7 +893,9 @@ async def cmd_chats_add(
         if with_comments and resolved.kind == "channel":
             linked = await get_linked_chat_id(client, resolved.chat_id)
             if linked is None:
-                console.print(f"[yellow]Channel[/] {resolved.title} has no linked discussion group.")
+                console.print(
+                    f"[yellow]{_t('tg_channel_label')}[/] {_tf('tg_channel_no_linked', title=resolved.title)}"
+                )
             else:
                 # Record the linked chat id on the channel row, create discussion sub.
                 await repo.upsert_chat(
@@ -933,14 +932,22 @@ async def cmd_chats_add(
 
         for s in subs_to_add:
             await repo.upsert_subscription(s)
-        console.print(f"[green]Added[/] {len(subs_to_add)} subscription(s).")
+        console.print(f"[green]{_t('tg_added_label')}[/] {_tf('tg_added_msg', n=len(subs_to_add))}")
         for s in subs_to_add:
-            console.print(f"  - chat={s.chat_id} thread={s.thread_id} kind={s.source_kind} title={s.title}")
+            console.print(
+                _tf(
+                    "tg_added_sub_line",
+                    chat_id=s.chat_id,
+                    thread_id=s.thread_id,
+                    kind=s.source_kind,
+                    title=s.title,
+                )
+            )
 
         # Note --last: we apply it by pulling last N messages immediately at next sync;
         # we record start_from_msg_id = (top_msg_id - last) after the first sync pass.
         if last is not None:
-            console.print(f"[dim]--last {last} will take effect on next sync (start from newest-N).[/]")
+            console.print(f"[dim]{_tf('tg_last_take_effect', value=last)}[/]")
             _hint_last_sync(subs_to_add, last)
 
 
@@ -1049,7 +1056,7 @@ async def cmd_sync(chat: int | None, thread: int | None, dry_run: bool) -> None:
         if chat is not None:
             subs = [s for s in subs if s.chat_id == chat and (thread is None or s.thread_id == thread)]
         if not subs:
-            console.print("[yellow]No matching subscriptions.[/]")
+            console.print(f"[yellow]{_t('tg_no_matching_subs')}[/]")
             return
         total = 0
         for s in subs:
@@ -1059,7 +1066,7 @@ async def cmd_sync(chat: int | None, thread: int | None, dry_run: bool) -> None:
                 f"{'would fetch' if dry_run else 'fetched'} {added} new msgs"
             )
             total += added
-        console.print(f"[green]Done.[/] {total} message(s).")
+        console.print(f"[green]{_t('tg_done_label')}[/] {_tf('tg_done_n_msgs', n=total)}")
 
 
 async def cmd_backfill(chat: int, from_msg: str, direction: str) -> None:
@@ -1069,10 +1076,13 @@ async def cmd_backfill(chat: int, from_msg: str, direction: str) -> None:
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         msg_id = _parse_from_msg(from_msg)
         if msg_id is None:
-            console.print("[red]--from-msg must be a message link or msg_id.[/]")
+            console.print(f"[red]{_t('tg_from_msg_must_be_link_or_id')}[/]")
             raise typer.Exit(1)
         count = await run_backfill(client, repo, chat_id=chat, from_msg_id=msg_id, direction=direction)
-        console.print(f"[green]Backfilled[/] {count} message(s) chat={chat} direction={direction}.")
+        console.print(
+            f"[green]{_t('tg_backfilled_label')}[/] "
+            f"{_tf('tg_backfilled_msg', n=count, chat=chat, direction=direction)}"
+        )
 
 
 # -------------------------------------------------------- interactive helpers
@@ -1082,11 +1092,20 @@ def _tui_choose(candidates: list) -> int | None:
     """Callable passed to resolver for ambiguous fuzzy matches."""
     if not sys.stdin.isatty():
         return None
-    console.print("[yellow]Multiple candidates, pick one:[/]")
+    console.print(f"[yellow]{_t('tg_resolve_multiple_candidates')}[/]")
     for i, c in enumerate(candidates):
-        console.print(f"  [{i}] {c.title} @{c.username or ''} (score {c.score}, {c.kind})")
+        console.print(
+            _tf(
+                "tg_resolve_candidate_line",
+                i=i,
+                title=c.title,
+                username=c.username or "",
+                score=c.score,
+                kind=c.kind,
+            )
+        )
     try:
-        raw = typer.prompt("Index (Enter = top match)", default="0")
+        raw = typer.prompt(_t("tg_resolve_index_prompt"), default="0")
         return int(raw)
     except (ValueError, EOFError):
         return None
@@ -1163,16 +1182,16 @@ async def cmd_chats_manage() -> None:
         while True:
             subs = await repo.list_subscriptions(enabled_only=False)
             if not subs:
-                console.print("[yellow]No subscriptions yet.[/] Use [cyan]atg chats add[/] to create one.")
+                console.print(f"[yellow]{_t('tg_chats_no_subs')}[/] {_t('tg_chats_use_add')}")
                 return
             idx = await _comments_index(repo, subs)
 
             def _label(s: Subscription, _idx: dict = idx) -> str:
-                state = "[on]" if s.enabled else "[off]"
+                state = _t("tg_sub_state_on") if s.enabled else _t("tg_sub_state_off")
                 title = s.title or str(s.chat_id)
                 kind_bit = s.source_kind
                 if s.thread_id:
-                    kind_bit += f" thread={s.thread_id}"
+                    kind_bit += " " + _tf("tg_sub_thread_label", id=s.thread_id)
                 comments = _comments_label(s, _idx)
                 comments_bit = f"  {comments}" if comments and comments != "—" else ""
                 return f"{state}  {title}  ({kind_bit}){comments_bit}"
@@ -1184,14 +1203,15 @@ async def cmd_chats_manage() -> None:
             # round-trip cleanly.
             _DONE = object()
             choices = [questionary.Choice(_label(s), value=(int(s.chat_id), int(s.thread_id))) for s in subs]
-            choices.append(questionary.Choice("← Done", value=_DONE))
+            choices.append(questionary.Choice(_t("tg_chats_done_label"), value=_DONE))
 
             picked = await questionary.select(
-                f"Manage subscriptions ({len(subs)} total) — pick one:",
+                _tf("tg_chats_manage_q", n=len(subs)),
                 choices=choices,
                 style=LIST_STYLE,
                 use_search_filter=True,
                 use_jk_keys=False,
+                instruction=_t("wiz_filter_instruction"),
             ).ask_async()
             # Ctrl-C / ESC → questionary returns None. "← Done" → _DONE.
             if picked is None or picked is _DONE:
@@ -1199,7 +1219,7 @@ async def cmd_chats_manage() -> None:
             chat_id, thread_id = picked
             sub = await repo.get_subscription(chat_id, thread_id)
             if not sub:
-                console.print(f"[red]Subscription gone:[/] chat={chat_id} thread={thread_id}")
+                console.print(f"[red]{_t('tg_sub_gone')}[/] chat={chat_id} thread={thread_id}")
                 continue
 
             # Show the per-sub detail panel before the action menu so
@@ -1214,14 +1234,14 @@ async def cmd_chats_manage() -> None:
             # so the choice reads as the verb the user is invoking.
             # `value="back"` (not None) for the back row — same questionary
             # gotcha as above.
-            toggle_label = "Disable" if sub.enabled else "Enable"
+            toggle_label = _t("tg_sub_action_disable") if sub.enabled else _t("tg_sub_action_enable")
             action = await questionary.select(
-                f"{sub.title or sub.chat_id} — what next?",
+                _tf("tg_sub_what_next_q", title=sub.title or sub.chat_id),
                 choices=[
                     questionary.Choice(toggle_label, value="toggle"),
-                    questionary.Choice("Remove (keep messages)", value="remove_keep"),
-                    questionary.Choice("Remove + delete stored messages", value="remove_purge"),
-                    questionary.Choice("← Back", value="back"),
+                    questionary.Choice(_t("tg_sub_action_remove_keep"), value="remove_keep"),
+                    questionary.Choice(_t("tg_sub_action_remove_purge"), value="remove_purge"),
+                    questionary.Choice(_t("tg_sub_back_label"), value="back"),
                 ],
                 style=LIST_STYLE,
             ).ask_async()
@@ -1229,19 +1249,22 @@ async def cmd_chats_manage() -> None:
                 continue
             if action == "toggle":
                 await repo.set_subscription_enabled(chat_id, thread_id, not sub.enabled)
-                console.print(f"[green]→ {toggle_label}d[/] chat={chat_id} thread={thread_id}")
+                done_key = "tg_sub_disabled" if sub.enabled else "tg_sub_enabled"
+                console.print(f"[green]{_tf(done_key, chat_id=chat_id, thread_id=thread_id)}[/]")
             elif action in ("remove_keep", "remove_purge"):
                 purge = action == "remove_purge"
                 # Confirmation guard for purge — irreversible.
                 if purge:
                     confirmed = bool(
                         await questionary.confirm(
-                            f"Delete ALL stored messages for chat={chat_id}? Cannot be undone.",
+                            _tf("tg_sub_purge_confirm_q", chat_id=chat_id),
                             default=False,
                         ).ask_async()
                     )
                     if not confirmed:
-                        console.print("[dim]Skipped — kept the subscription.[/]")
+                        console.print(f"[dim]{_t('tg_sub_purge_skipped')}[/]")
                         continue
                 await repo.remove_subscription(chat_id, thread_id, purge_messages=purge)
-                console.print(f"[green]→ Removed[/] chat={chat_id} thread={thread_id} (purged={purge})")
+                console.print(
+                    f"[green]{_tf('tg_sub_removed', chat_id=chat_id, thread_id=thread_id, purge=purge)}[/]"
+                )

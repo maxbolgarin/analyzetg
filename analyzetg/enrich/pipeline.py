@@ -42,6 +42,8 @@ async def enrich_messages(
     client: TelegramClient | None,
     repo: Repo,
     opts: EnrichOpts,
+    language: str | None = None,
+    content_language: str | None = None,
 ) -> EnrichStats:
     """Run per-kind enrichers across `msgs`, respecting opts + caps.
 
@@ -65,6 +67,18 @@ async def enrich_messages(
         )
 
     settings = get_settings()
+    # Image / link enricher prompts go to the LLM → use content_language
+    # (the chat content language) so descriptions come back in that
+    # language. Mirrors `pipeline._resolve_content_lang`: explicit param
+    # → settings.locale.content_language → settings.locale.language → "en".
+    # The `language` param is accepted for symmetry with the calling
+    # signature but intentionally NOT in the fallback — the caller is
+    # responsible for picking the right content_language; falling back
+    # to the UI language here would mix layers.
+    _ = language  # kept on the signature for caller symmetry
+    enrich_language = (
+        content_language or settings.locale.content_language or settings.locale.language or "en"
+    ).lower()
     sem = asyncio.Semaphore(max(1, opts.concurrency))
     caps = _caps(opts)
     counted: dict[str, int] = {"image": 0, "link": 0}
@@ -113,7 +127,13 @@ async def enrich_messages(
                 else:
                     counted["image"] += 1
                     async with sem, lock or _null_ctx():
-                        res = await enrich_image(msg, client=client, repo=repo, model=opts.vision_model)
+                        res = await enrich_image(
+                            msg,
+                            client=client,
+                            repo=repo,
+                            model=opts.vision_model,
+                            language=enrich_language,
+                        )
                     if res:
                         stats.record("image", res)
             elif mt == "doc" and opts.doc:
@@ -147,6 +167,7 @@ async def enrich_messages(
                             model=opts.link_model,
                             timeout_sec=opts.link_fetch_timeout_sec,
                             skip_domains=opts.skip_link_domains or settings.enrich.skip_link_domains,
+                            language=enrich_language,
                         )
                     # Count one per unique URL fetched (cache hits excluded
                     # doesn't matter here — we bound network calls, not

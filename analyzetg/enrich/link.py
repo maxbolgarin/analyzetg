@@ -49,11 +49,24 @@ _SKIP_HOSTS = {
     "telegra.ph",  # already plain-text, not worth a fetch+summary round-trip
 }
 
-_SYSTEM_PROMPT = (
-    "Ты составляешь очень короткое (1–2 предложения) резюме содержимого веб-страницы"
-    " для анализа Telegram-чата. Пиши на том же языке, что и страница/чат."
-    " Без маркетинга, без воды. Только суть: о чём страница, главный факт/тезис."
-)
+_SYSTEM_PROMPT: dict[str, str] = {
+    "en": (
+        "You write a very short (1-2 sentences) summary of a web page's "
+        "content for Telegram chat analysis. Write in the same language as "
+        "the page / chat. No marketing, no fluff. Just the gist: what the "
+        "page is about, the main fact / thesis."
+    ),
+    "ru": (
+        "Ты составляешь очень короткое (1–2 предложения) резюме содержимого веб-страницы"
+        " для анализа Telegram-чата. Пиши на том же языке, что и страница/чат."
+        " Без маркетинга, без воды. Только суть: о чём страница, главный факт/тезис."
+    ),
+}
+
+_USER_LABELS: dict[str, tuple[str, str, str]] = {
+    "en": ("Title: ", "Content (excerpt):\n", "\n\nSummary:"),
+    "ru": ("Заголовок: ", "Содержимое (фрагмент):\n", "\n\nСводка:"),
+}
 
 
 def _normalize_url(url: str) -> str:
@@ -144,6 +157,7 @@ async def enrich_url(
     model: str | None = None,
     timeout_sec: int | None = None,
     skip_domains: list[str] | None = None,
+    language: str | None = None,
 ) -> EnrichResult | None:
     """Fetch + summarize a single URL. Caches per normalized URL hash.
 
@@ -188,14 +202,12 @@ async def enrich_url(
         return None
 
     used_model = model or settings.enrich.link_model or settings.openai.filter_model_default
+    lang = (language or settings.locale.language or "en").lower()
+    title_lbl, content_lbl, summary_lbl = _USER_LABELS.get(lang, _USER_LABELS["en"])
+    sys_prompt = _SYSTEM_PROMPT.get(lang, _SYSTEM_PROMPT["en"])
     oai = make_client()
-    user_text = (
-        f"URL: {normalized}\n"
-        f"{'Заголовок: ' + title if title else ''}\n\n"
-        f"Содержимое (фрагмент):\n{body}\n\n"
-        "Сводка:"
-    )
-    messages = build_messages(_SYSTEM_PROMPT, "", user_text)
+    user_text = f"URL: {normalized}\n{title_lbl + title if title else ''}\n\n{content_lbl}{body}{summary_lbl}"
+    messages = build_messages(sys_prompt, "", user_text)
     res = await chat_complete(
         oai,
         repo=repo,
@@ -239,6 +251,7 @@ async def enrich_message_links(
     model: str | None = None,
     timeout_sec: int | None = None,
     skip_domains: list[str] | None = None,
+    language: str | None = None,
 ) -> list[tuple[str, str]]:
     """Extract + enrich every unique URL in `msg.text`.
 
@@ -257,6 +270,7 @@ async def enrich_message_links(
             model=model,
             timeout_sec=timeout_sec,
             skip_domains=skip_domains,
+            language=language,
         )
         if res is None:
             continue

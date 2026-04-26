@@ -11,23 +11,35 @@ import typer
 from rich.console import Console
 
 from analyzetg.config import get_settings
-from analyzetg.db.repo import open_repo
+from analyzetg.db.repo import apply_db_overrides_sync, open_repo
+from analyzetg.i18n import t as _t
+from analyzetg.i18n import tf as _tf
 from analyzetg.util.logging import setup_logging
+
+# Bootstrap DB-saved overrides into the live settings singleton BEFORE
+# Typer constructs the app — Typer reads `help=` strings (and panel
+# names) at app-construction time. Without this early sync, `--help`
+# would render in the config-file language and ignore `atg settings`.
+# A read-only sqlite open is safe (~1ms) and degrades to no-op when the
+# DB doesn't exist yet (fresh install).
+apply_db_overrides_sync(get_settings())
+
+# Panel names — looked up once at import-time so each Typer-decorated
+# command can pin its panel to the right localized header.
+PANEL_MAIN = _t("cli_panel_main")
+PANEL_SYNC = _t("cli_panel_sync")
+PANEL_MAINT = _t("cli_panel_maint")
 
 app = typer.Typer(
     name="analyzetg",
-    help="Pull Telegram chats, enrich media (voice/images/docs/links), and analyze via OpenAI — all local.",
+    help=_t("cli_app_help"),
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
 )
 
-PANEL_MAIN = "Main"
-PANEL_SYNC = "Sync & subscriptions"
-PANEL_MAINT = "Maintenance"
-
-chats_app = typer.Typer(help="Manage subscriptions (what to sync).", no_args_is_help=True)
-cache_app = typer.Typer(help="Analysis cache maintenance.", no_args_is_help=True)
+chats_app = typer.Typer(help=_t("cmd_chats"), no_args_is_help=True)
+cache_app = typer.Typer(help=_t("cmd_cache"), no_args_is_help=True)
 app.add_typer(chats_app, name="chats", rich_help_panel=PANEL_SYNC)
 app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 
@@ -49,7 +61,7 @@ def _run(coro) -> None:
 # =============================================================== 5.1 Setup & nav
 
 
-@app.command(rich_help_panel=PANEL_MAIN)
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_init"))
 def init() -> None:
     """Interactive first-time setup: log in to Telegram and verify OpenAI key."""
     from analyzetg.tg.commands import cmd_init
@@ -57,7 +69,7 @@ def init() -> None:
     _run(cmd_init())
 
 
-@app.command(rich_help_panel=PANEL_MAIN)
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_describe"))
 def describe(
     ref: str | None = typer.Argument(
         None,
@@ -101,7 +113,7 @@ def describe(
     )
 
 
-@app.command(rich_help_panel=PANEL_MAINT)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_folders"))
 def folders() -> None:
     """List your Telegram folders (for use with `analyze --folder NAME` / `dump --folder NAME`)."""
     _run(_list_folders())
@@ -132,7 +144,7 @@ def topics(
     from analyzetg.tg.commands import cmd_topics
 
     if chat_ref is None and chat is None:
-        console.print("[red]Provide a chat reference or --chat <id>.[/]")
+        console.print(f"[red]{_t('cli_ref_or_chat_required')}[/]")
         raise typer.Exit(2)
     _run(cmd_topics(chat_ref if chat_ref is not None else str(chat)))
 
@@ -263,19 +275,23 @@ async def _list_folders() -> None:
         folders = await list_folders(client)
 
     if not folders:
-        console.print("[yellow]No folders defined in this Telegram account.[/]")
+        console.print(f"[yellow]{_t('cli_no_folders')}[/]")
         return
-    t = Table(title="Telegram folders")
-    t.add_column("id", justify="right")
-    t.add_column("title")
-    t.add_column("icon")
-    t.add_column("chats", justify="right")
-    t.add_column("kind")
+    t = Table(title=_t("cli_folders_table_title"))
+    t.add_column(_t("cli_folder_col_id"), justify="right")
+    t.add_column(_t("cli_folder_col_title"))
+    t.add_column(_t("cli_folder_col_icon"))
+    t.add_column(_t("cli_folder_col_chats"), justify="right")
+    t.add_column(_t("cli_folder_col_kind"))
     for f in folders:
         kind = (
-            "chatlist"
+            _t("cli_folder_kind_chatlist")
             if f.is_chatlist
-            else ("rule-based" if f.has_rule_based_inclusion and not f.include_chat_ids else "explicit")
+            else (
+                _t("cli_folder_kind_rule_based")
+                if f.has_rule_based_inclusion and not f.include_chat_ids
+                else _t("cli_folder_kind_explicit")
+            )
         )
         t.add_row(
             str(f.id),
@@ -285,15 +301,13 @@ async def _list_folders() -> None:
             kind,
         )
     console.print(t)
-    console.print(
-        '[dim]Use with:[/] [cyan]atg analyze --folder "Alpha"[/] — batch-analyze unread chats in that folder.'
-    )
+    console.print(f"[dim]{_t('cli_folders_use_with')}[/]")
 
 
 # ================================================================ 5.3 Sync
 
 
-@app.command(rich_help_panel=PANEL_SYNC)
+@app.command(rich_help_panel=PANEL_SYNC, help=_t("cmd_sync"))
 def sync(
     chat: int | None = typer.Option(None, "--chat"),
     thread: int | None = typer.Option(None, "--thread"),
@@ -429,7 +443,7 @@ def backfill(
 # =================================================================== 5.4 Analyze
 
 
-@app.command(rich_help_panel=PANEL_MAIN)
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_analyze"))
 def analyze(
     ref: str | None = typer.Argument(
         None,
@@ -613,6 +627,24 @@ def analyze(
             "citation links. No-op for non-channel chats."
         ),
     ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        help=(
+            "Output / report / UI language (en, ru, de, …). Picks the matching "
+            "presets/<lang>/ tree, formatter labels, and analysis output language. "
+            "Defaults to [locale] language in config (en)."
+        ),
+    ),
+    content_language: str | None = typer.Option(
+        None,
+        "--content-language",
+        help=(
+            "Chat content language hint for cost estimation only. Defaults to "
+            "--language. Set explicitly when chats are predominantly one language "
+            "but the report should be in another."
+        ),
+    ),
 ) -> None:
     """Analyze a chat. Default window = messages since your Telegram read marker.
 
@@ -662,6 +694,8 @@ def analyze(
             post_to=post_to,
             repeat_last=repeat_last,
             with_comments=with_comments,
+            language=language,
+            content_language=content_language,
         )
     )
 
@@ -730,7 +764,7 @@ def download_media(
 # ============================================================== 5.5 Maintenance
 
 
-@app.command(rich_help_panel=PANEL_MAINT)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_stats"))
 def stats(
     since: str | None = typer.Option(None, "--since"),
     by: str = typer.Option("preset", "--by", help="chat | preset | model | day | kind"),
@@ -761,14 +795,19 @@ async def _cache_purge(
     settings = get_settings()
     days = _parse_duration_days(older_than)
     if days <= 0:
-        console.print("[yellow]Skipped[/] cache purge: --older-than must be greater than 0 days.")
+        console.print(f"[yellow]{_t('cli_skipped_label')}[/] {_t('cli_cache_purge_min_days')}")
         return
     async with open_repo(settings.storage.data_path) as repo:
         removed = await repo.cache_purge(older_than_days=days, preset=preset, model=model)
-        console.print(f"[green]Purged[/] {removed} analysis_cache rows older than {days} days.")
+        console.print(
+            f"[green]{_t('cli_purged_label')}[/] {_tf('cli_cache_purged_msg', n=removed, days=days)}"
+        )
         if vacuum:
             reclaimed = await repo.vacuum()
-            console.print(f"[green]Vacuumed[/] DB — reclaimed {_fmt_bytes(reclaimed)}.")
+            console.print(
+                f"[green]{_t('cli_vacuumed_label')}[/] "
+                f"{_tf('cli_db_vacuumed_msg', size=_fmt_bytes(reclaimed))}"
+            )
 
 
 @cache_app.command("effectiveness")
@@ -793,17 +832,18 @@ async def _cache_effectiveness(since: str | None) -> None:
     async with open_repo(settings.storage.data_path) as repo:
         rows = await repo.cache_effectiveness(since=since_dt)
     if not rows:
-        console.print("[yellow]No usage logged yet[/] — run an analyze first.")
+        console.print(f"[yellow]{_t('cli_no_usage_label')}[/] — {_t('cli_no_usage_hint')}")
         return
-    t = Table(title=f"Cache effectiveness{' since ' + since if since else ''}")
-    t.add_column("chat_id")
-    t.add_column("preset")
-    t.add_column("calls", justify="right")
-    t.add_column("hit calls", justify="right")
-    t.add_column("hit rate", justify="right")
-    t.add_column("prompt tok", justify="right")
-    t.add_column("cached tok", justify="right")
-    t.add_column("cost $", justify="right")
+    since_suffix = _tf("cli_cache_eff_since", date=since) if since else ""
+    t = Table(title=_tf("cli_cache_eff_title", since=since_suffix))
+    t.add_column(_t("cli_cache_col_chat_id"))
+    t.add_column(_t("cli_cache_col_preset"))
+    t.add_column(_t("cli_cache_col_calls"), justify="right")
+    t.add_column(_t("cli_cache_col_hit_calls"), justify="right")
+    t.add_column(_t("cli_cache_col_hit_rate"), justify="right")
+    t.add_column(_t("cli_cache_col_prompt_tok"), justify="right")
+    t.add_column(_t("cli_cache_col_cached_tok"), justify="right")
+    t.add_column(_t("cli_cache_col_cost"), justify="right")
     for r in rows:
         prompt_tok = int(r["prompt_tokens"] or 0)
         cached_tok = int(r["cached_tokens"] or 0)
@@ -819,11 +859,7 @@ async def _cache_effectiveness(since: str | None) -> None:
             f"${float(r['cost_usd']):.4f}",
         )
     console.print(t)
-    console.print(
-        "[dim]Hit rate counts OpenAI server-side prompt-cache reuse "
-        "(`cached_tokens / prompt_tokens`). Local analysis_cache hits aren't "
-        "logged (they cost zero) — see `atg cache stats` for that table.[/]"
-    )
+    console.print(f"[dim]{_t('cli_cache_eff_hint')}[/]")
 
 
 @cache_app.command("stats")
@@ -839,20 +875,23 @@ async def _cache_stats() -> None:
     async with open_repo(settings.storage.data_path) as repo:
         s = await repo.cache_stats()
     if s["rows"] == 0:
-        console.print("[yellow]analysis_cache is empty.[/]")
+        console.print(f"[yellow]{_t('cli_cache_empty')}[/]")
         return
-    console.print(
-        f"[bold]analysis_cache[/] — {s['rows']} rows, "
-        f"{_fmt_bytes(s['result_bytes'])} of result text, "
-        f"saved ~${s['saved_cost_usd']:.4f} in re-runs.\n"
-        f"Age range: {s['oldest']}  →  {s['newest']}"
+    summary = _tf(
+        "cli_cache_summary",
+        rows=s["rows"],
+        size=_fmt_bytes(s["result_bytes"]),
+        saved=f"{s['saved_cost_usd']:.4f}",
+        oldest=s["oldest"],
+        newest=s["newest"],
     )
-    t = Table(title="By (preset, model)", show_lines=False)
-    t.add_column("preset")
-    t.add_column("model")
-    t.add_column("rows", justify="right")
-    t.add_column("size", justify="right")
-    t.add_column("saved $", justify="right")
+    console.print(f"[bold]analysis_cache[/] — {summary}")
+    t = Table(title=_t("cli_cache_by_group_title"), show_lines=False)
+    t.add_column(_t("cli_cache_col_preset"))
+    t.add_column(_t("cli_cache_col_model"))
+    t.add_column(_t("cli_cache_col_rows"), justify="right")
+    t.add_column(_t("cli_cache_col_size"), justify="right")
+    t.add_column(_t("cli_cache_col_saved"), justify="right")
     for r in s["by_group"]:
         t.add_row(
             str(r["preset"]),
@@ -888,16 +927,16 @@ async def _cache_ls(
     async with open_repo(settings.storage.data_path) as repo:
         rows = await repo.cache_list(preset=preset, model=model, older_than_days=days, limit=limit)
     if not rows:
-        console.print("[yellow]No matching entries.[/]")
+        console.print(f"[yellow]{_t('cli_cache_no_matches')}[/]")
         return
     t = Table(show_lines=False)
-    t.add_column("hash")
-    t.add_column("preset")
-    t.add_column("model")
-    t.add_column("ver")
-    t.add_column("size", justify="right")
-    t.add_column("cost", justify="right")
-    t.add_column("created_at")
+    t.add_column(_t("cli_cache_col_hash"))
+    t.add_column(_t("cli_cache_col_preset"))
+    t.add_column(_t("cli_cache_col_model"))
+    t.add_column(_t("cli_cache_col_ver"))
+    t.add_column(_t("cli_cache_col_size"), justify="right")
+    t.add_column(_t("cli_cache_col_cost_short"), justify="right")
+    t.add_column(_t("cli_cache_col_created_at"))
     for r in rows:
         t.add_row(
             str(r["batch_hash"])[:10],
@@ -929,10 +968,13 @@ async def _cache_show(batch_hash: str) -> None:
                 r for r in await repo.cache_list(limit=10_000) if str(r["batch_hash"]).startswith(batch_hash)
             ]
             if len(matches) == 0:
-                console.print(f"[red]No entry matching[/] {batch_hash}.")
+                console.print(f"[red]{_t('cli_cache_no_entry_label')}[/] {batch_hash}.")
                 raise typer.Exit(1)
             if len(matches) > 1:
-                console.print(f"[red]Ambiguous prefix[/] — {len(matches)} matches. Use a longer prefix.")
+                console.print(
+                    f"[red]{_t('cli_cache_ambiguous_label')}[/] — "
+                    f"{_tf('cli_cache_ambiguous_msg', n=len(matches))}"
+                )
                 raise typer.Exit(2)
             row = await repo.cache_get(matches[0]["batch_hash"])
             assert row is not None
@@ -971,7 +1013,7 @@ async def _cache_export(
         suffix = output.suffix.lower().lstrip(".")
         fmt = suffix if suffix in {"jsonl", "md"} else "jsonl"
     if fmt not in {"jsonl", "md"}:
-        console.print(f"[red]Unknown format[/] {fmt}. Use jsonl or md.")
+        console.print(f"[red]{_t('cli_unknown_format_label')}[/] {_tf('cli_unknown_format_msg', fmt=fmt)}")
         raise typer.Exit(2)
 
     settings = get_settings()
@@ -980,7 +1022,7 @@ async def _cache_export(
         rows = await repo.cache_iter_full(preset=preset, model=model, older_than_days=days)
 
     if not rows:
-        console.print("[yellow]No matching entries — nothing written.[/]")
+        console.print(f"[yellow]{_t('cli_export_no_matches')}[/]")
         return
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1000,7 +1042,10 @@ async def _cache_export(
                     f"- created_at: {r['created_at']}\n\n"
                     f"{r['result']}\n\n---\n\n"
                 )
-    console.print(f"[green]Wrote[/] {len(rows)} entries → {output} ({fmt}).")
+    console.print(
+        f"[green]{_t('cli_wrote_label')}[/] "
+        f"{_tf('cli_export_wrote_msg', n=len(rows), path=str(output), fmt=fmt)}"
+    )
 
 
 def _fmt_bytes(n: int) -> str:
@@ -1021,7 +1066,7 @@ def _parse_duration_days(s: str) -> int:
     return int(s)
 
 
-@app.command(rich_help_panel=PANEL_MAINT)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_cleanup"))
 def cleanup(
     retention: str = typer.Option("90d", "--retention"),
     chat: int | None = typer.Option(None, "--chat"),
@@ -1043,27 +1088,40 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
         )
         if preview["to_redact"] == 0:
             if preview["messages"] == 0:
-                console.print(f"[yellow]Nothing to redact[/] older than {days} days.")
-            else:
                 console.print(
-                    f"[yellow]Already clean[/] — {preview['messages']} matching rows "
-                    f"older than {days} days, but nothing left to null "
-                    f"(text already NULL{'; transcripts kept' if keep_transcripts else ''})."
+                    f"[yellow]{_t('cli_cleanup_nothing')}[/] {_tf('cli_cleanup_older_than', days=days)}"
+                )
+            else:
+                tail = _t("cli_cleanup_transcripts_kept") if keep_transcripts else ""
+                console.print(
+                    f"[yellow]{_t('cli_cleanup_already_clean_label')}[/] — "
+                    f"{_tf('cli_cleanup_already_clean_msg', n=preview['messages'], days=days, tail=tail)}"
                 )
             return
 
-        scope = f"chat={chat}" if chat is not None else "all chats"
-        transcript_line = "0 [dim](kept)[/]" if keep_transcripts else str(preview["with_transcript"])
-        console.print(
-            f"[bold]Cleanup preview[/] ({scope}, older than {days} days):\n"
-            f"  messages matched:        {preview['messages']}\n"
-            f"  [red]rows to redact[/]:          {preview['to_redact']}\n"
-            f"  [red]text to null-out[/]:        {preview['with_text']}\n"
-            f"  transcripts to null-out: {transcript_line}\n"
-            f"[dim]Row metadata (ids, dates, authors) is preserved.[/]"
+        scope = (
+            _tf("cli_cleanup_preview_scope_chat", chat=chat)
+            if chat is not None
+            else _t("cli_cleanup_preview_scope_all")
         )
-        if not yes and not typer.confirm("Proceed with redaction?", default=False):
-            console.print("[yellow]Aborted.[/]")
+        transcript_line = (
+            f"0 [dim]{_t('cli_cleanup_kept_label')}[/]"
+            if keep_transcripts
+            else str(preview["with_transcript"])
+        )
+        body = _tf(
+            "cli_cleanup_preview_lines",
+            messages=preview["messages"],
+            to_redact=preview["to_redact"],
+            with_text=preview["with_text"],
+            transcripts=transcript_line,
+        )
+        console.print(
+            f"[bold]{_t('cli_cleanup_preview_title')}[/] ({scope}, "
+            f"{_tf('cli_cleanup_older_than', days=days).rstrip('.')}):\n{body}"
+        )
+        if not yes and not typer.confirm(_t("cli_cleanup_proceed_q"), default=False):
+            console.print(f"[yellow]{_t('cli_aborted')}[/]")
             return
 
         redacted = await repo.redact_old_messages(
@@ -1071,13 +1129,14 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
             chat_id=chat,
             keep_transcripts=keep_transcripts,
         )
+        tail = _t("cli_redacted_transcripts_kept") if keep_transcripts else ""
         console.print(
-            f"[green]Redacted[/] {redacted} messages older than {days} days"
-            f"{' (transcripts kept)' if keep_transcripts else ''}."
+            f"[green]{_t('cli_redacted_label')}[/] "
+            f"{_tf('cli_redacted_msg', n=redacted, days=days, tail=tail)}"
         )
 
 
-@app.command(rich_help_panel=PANEL_MAIN)
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_ask"))
 def ask(
     question: str = typer.Argument(..., help="Free-form question, in any language."),
     chat: str | None = typer.Option(
@@ -1191,6 +1250,24 @@ def ask(
         "-y",
         help="Skip the over-budget confirmation prompt (combined with --max-cost).",
     ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        help=(
+            "Language for the answer + UI labels (en, ru, …). Defaults to "
+            "[locale] language in config (en). The model also tends to follow "
+            "the question's language when it differs."
+        ),
+    ),
+    content_language: str | None = typer.Option(
+        None,
+        "--content-language",
+        help=(
+            "Chat content language — drives the system prompt + label "
+            "language sent to the LLM. Defaults to --language. Override when "
+            "your chat is in a different language than your interface."
+        ),
+    ),
 ) -> None:
     """Answer a question about your synced Telegram archive.
 
@@ -1229,11 +1306,27 @@ def ask(
             max_cost=max_cost,
             with_comments=with_comments,
             yes=yes,
+            language=language,
+            content_language=content_language,
         )
     )
 
 
-reports_app = typer.Typer(help="Manage saved reports/", no_args_is_help=True)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_settings"))
+def settings() -> None:
+    """Open the interactive settings editor.
+
+    Single panel covering every persistable override: languages,
+    models, enrichment defaults, analysis tuning. "Show effective" and
+    "Reset all overrides" live as rows inside the menu — no separate
+    sub-commands.
+    """
+    from analyzetg.settings.commands import cmd_settings
+
+    _run(cmd_settings())
+
+
+reports_app = typer.Typer(help=_t("cmd_reports"), no_args_is_help=True)
 app.add_typer(reports_app, name="reports", rich_help_panel=PANEL_MAINT)
 
 
@@ -1270,10 +1363,12 @@ async def _reports_prune(
 
     days = _parse_duration_days(older_than)
     if days <= 0:
-        console.print("[yellow]Skipped[/] — --older-than must be > 0 days.")
+        console.print(f"[yellow]{_t('cli_skipped_label')}[/] {_t('cli_prune_min_days')}")
         return
     if not root.exists():
-        console.print(f"[yellow]No reports root[/] at {root} — nothing to prune.")
+        console.print(
+            f"[yellow]{_t('cli_prune_no_root_label')}[/] {_tf('cli_prune_no_root_msg', path=str(root))}"
+        )
         return
     cutoff = time.time() - days * 86400
     trash_root = root / ".trash"
@@ -1291,34 +1386,40 @@ async def _reports_prune(
         except OSError:
             continue
     if not candidates:
-        console.print(f"[dim]Nothing older than {days} days under {root}.[/]")
+        console.print(f"[dim]{_tf('cli_prune_nothing_old', days=days, root=str(root))}[/]")
         return
     total_bytes = sum(p.stat().st_size for p in candidates if p.exists())
     verb = (
-        "Would delete"
+        _t("cli_prune_verb_would_delete")
         if dry_run and purge
-        else ("Would trash" if dry_run else ("Delete" if purge else "Trash"))
+        else (
+            _t("cli_prune_verb_would_trash")
+            if dry_run
+            else (_t("cli_prune_verb_delete") if purge else _t("cli_prune_verb_trash"))
+        )
     )
     console.print(
-        f"[bold]{verb}[/] {len(candidates)} file(s) ({_fmt_bytes(total_bytes)}) "
-        f"older than {days} days under {root}."
+        f"[bold]{verb}[/] "
+        f"{_tf('cli_prune_summary', n=len(candidates), size=_fmt_bytes(total_bytes), days=days, root=str(root))}"
     )
     for p in candidates[:20]:
         console.print(f"  {p.relative_to(root)}")
     if len(candidates) > 20:
-        console.print(f"  [dim]… and {len(candidates) - 20} more[/]")
+        console.print(f"  [dim]{_tf('cli_prune_and_more', n=len(candidates) - 20)}[/]")
     if dry_run:
         return
-    if not yes and not typer.confirm("Proceed?", default=False):
-        console.print("[yellow]Aborted.[/]")
+    if not yes and not typer.confirm(_t("cli_prune_proceed_q"), default=False):
+        console.print(f"[yellow]{_t('cli_aborted')}[/]")
         return
     if purge:
         for p in candidates:
             try:
                 p.unlink()
             except OSError as e:
-                console.print(f"[red]Failed to delete[/] {p}: {e}")
-        console.print(f"[green]Deleted[/] {len(candidates)} file(s).")
+                console.print(f"[red]{_t('cli_prune_failed_delete_label')}[/] {p}: {e}")
+        console.print(
+            f"[green]{_t('cli_prune_deleted_label')}[/] {_tf('cli_prune_deleted_msg', n=len(candidates))}"
+        )
         return
     # Trash mode: move to reports/.trash/<ts>/, preserving relative subtree.
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -1331,12 +1432,16 @@ async def _reports_prune(
         try:
             shutil.move(str(p), str(target))
         except OSError as e:
-            console.print(f"[red]Failed to move[/] {p}: {e}")
-    console.print(f"[green]Trashed[/] {len(candidates)} file(s) → {bin_dir}")
+            console.print(f"[red]{_t('cli_prune_failed_move_label')}[/] {p}: {e}")
+    console.print(
+        f"[green]{_t('cli_prune_trashed_label')}[/] "
+        f"{_tf('cli_prune_trashed_msg', n=len(candidates), path=str(bin_dir))}"
+    )
 
 
 @app.command(
     rich_help_panel=PANEL_MAINT,
+    help=_t("cmd_watch"),
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def watch(
@@ -1365,7 +1470,7 @@ def watch(
     """
     inner = ctx.args
     if not inner:
-        console.print("[red]Pass an inner command, e.g.[/] atg watch --interval 1h analyze --folder Work")
+        console.print(f"[red]{_t('cli_watch_need_inner')}[/]")
         raise typer.Exit(2)
     _run(_watch_loop(interval, max_runs, inner))
 
@@ -1378,13 +1483,13 @@ async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> 
 
     seconds = _parse_duration_seconds(interval)
     if seconds <= 0:
-        console.print("[red]--interval must be > 0.[/]")
+        console.print(f"[red]{_t('cli_watch_interval_positive')}[/]")
         raise typer.Exit(2)
 
     runs = 0
     cmd = ["atg", *inner]
     pretty = " ".join(shlex.quote(c) for c in cmd)
-    console.print(f"[bold cyan]Watching[/] [dim]every {interval}: {pretty}[/]")
+    console.print(f"[bold cyan]{_tf('cli_watch_watching', interval=interval, cmd=pretty)}[/]")
     # Single Ctrl-C handler covers both phases (subprocess.run / sleep).
     # subprocess.run inherits stdin so child sees the SIGINT first; if
     # the child handles it cleanly, control returns here and we just
@@ -1393,24 +1498,27 @@ async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> 
     try:
         while True:
             runs += 1
-            console.print(f"\n[bold]── Run {runs}[/] [dim]{datetime.now().isoformat(timespec='seconds')}[/]")
+            console.print(
+                f"\n[bold]{_tf('cli_watch_run_n', n=runs)}[/] "
+                f"[dim]{datetime.now().isoformat(timespec='seconds')}[/]"
+            )
             try:
                 # subprocess.run blocks the event loop; that's fine — we're
                 # not racing anything here, and the inner command may itself
                 # spin up its own asyncio loop.
                 proc = subprocess.run(cmd, check=False)
                 if proc.returncode != 0:
-                    console.print(f"[yellow]Inner exited with code {proc.returncode}[/]")
+                    console.print(f"[yellow]{_tf('cli_watch_inner_exited', code=proc.returncode)}[/]")
             except FileNotFoundError:
-                console.print(f"[red]`{cmd[0]}` not on PATH.[/]")
+                console.print(f"[red]{_tf('cli_watch_not_on_path', cmd=cmd[0])}[/]")
                 raise typer.Exit(2) from None
             if max_runs is not None and runs >= max_runs:
-                console.print(f"[dim]Hit --max-runs {max_runs}; exiting.[/]")
+                console.print(f"[dim]{_tf('cli_watch_max_runs_reached', n=max_runs)}[/]")
                 return
-            console.print(f"[dim]Sleeping {interval}...[/]")
+            console.print(f"[dim]{_tf('cli_watch_sleeping', interval=interval)}[/]")
             await _asyncio.sleep(seconds)
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted; exiting.[/]")
+        console.print(f"\n[yellow]{_t('cli_watch_interrupted')}[/]")
     finally:
         _sys.stdout.flush()
 
@@ -1425,7 +1533,7 @@ def _parse_duration_seconds(s: str) -> int:
         try:
             return int(s[:-1]) * units[s[-1]]
         except ValueError as e:
-            raise typer.BadParameter(f"Invalid duration: {s!r}") from e
+            raise typer.BadParameter(_tf("cli_watch_invalid_duration", value=repr(s))) from e
     # Bare integer = seconds.
     try:
         return int(s)
@@ -1433,7 +1541,7 @@ def _parse_duration_seconds(s: str) -> int:
         raise typer.BadParameter(f"Invalid duration: {s!r}") from e
 
 
-@app.command(rich_help_panel=PANEL_MAINT)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_doctor"))
 def doctor() -> None:
     """Preflight check: Telegram session, OpenAI key, ffmpeg, DB integrity, presets, disk."""
     from analyzetg.tg.commands import cmd_doctor
@@ -1441,7 +1549,7 @@ def doctor() -> None:
     _run(cmd_doctor())
 
 
-@app.command(rich_help_panel=PANEL_MAINT)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_backup"))
 def backup(
     output: Path | None = typer.Argument(
         None,
@@ -1466,7 +1574,7 @@ async def _backup(output: Path | None, overwrite: bool) -> None:
     settings = get_settings()
     src = settings.storage.data_path
     if not src.exists():
-        console.print(f"[red]No DB at {src} — nothing to back up.[/]")
+        console.print(f"[red]{_tf('cli_backup_no_db', path=str(src))}[/]")
         raise typer.Exit(1)
     if output is None:
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -1474,15 +1582,15 @@ async def _backup(output: Path | None, overwrite: bool) -> None:
     output = output.resolve()
     if output.exists():
         if not overwrite:
-            console.print(f"[red]{output} already exists.[/] Pass --overwrite or pick a different path.")
+            console.print(f"[red]{_tf('cli_backup_already_exists', path=str(output))}[/]")
             raise typer.Exit(2)
         output.unlink()
     async with open_repo(src) as repo:
         size = await repo.backup_to(output)
-    console.print(f"[green]Backed up[/] {src} → {output} [dim]({_fmt_bytes(size)})[/]")
+    console.print(f"[green]{_t('cli_backup_done_label')}[/] {src} → {output} [dim]({_fmt_bytes(size)})[/]")
 
 
-@app.command(rich_help_panel=PANEL_MAINT)
+@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_restore"))
 def restore(
     backup_file: Path = typer.Argument(..., help="Path to a previously-created backup file."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the destructive-action prompt."),
@@ -1501,27 +1609,27 @@ async def _restore(backup_file: Path, yes: bool) -> None:
     settings = get_settings()
     dst = settings.storage.data_path
     if not backup_file.exists():
-        console.print(f"[red]Backup not found:[/] {backup_file}")
+        console.print(f"[red]{_t('cli_restore_not_found_label')}[/] {backup_file}")
         raise typer.Exit(2)
     if not yes and not typer.confirm(
-        f"Replace {dst} with {backup_file}? Current DB will be moved aside.",
+        _tf("cli_restore_confirm_q", dst=str(dst), src=str(backup_file)),
         default=False,
     ):
-        console.print("[yellow]Aborted.[/]")
+        console.print(f"[yellow]{_t('cli_aborted')}[/]")
         raise typer.Exit(0)
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         moved = dst.with_name(f"{dst.stem}-replaced-{stamp}{dst.suffix}")
         dst.rename(moved)
-        console.print(f"[dim]Moved current DB to {moved}[/]")
+        console.print(f"[dim]{_tf('cli_restore_moved_db', path=str(moved))}[/]")
     # Also clear -wal / -shm sidecars so the restored DB doesn't pick up
     # transactions from the replaced DB on next open.
     for sidecar in (dst.with_suffix(dst.suffix + "-wal"), dst.with_suffix(dst.suffix + "-shm")):
         if sidecar.exists():
             sidecar.unlink()
     shutil.copy2(backup_file, dst)
-    console.print(f"[green]Restored[/] {backup_file} → {dst}")
+    console.print(f"[green]{_t('cli_restore_done_label')}[/] {backup_file} → {dst}")
 
 
 @app.command(hidden=True)
@@ -1538,7 +1646,7 @@ def export(
     _run(cmd_export(chat=chat, fmt=fmt, output=output, since=since, until=until))
 
 
-@app.command(rich_help_panel=PANEL_MAIN)
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_dump"))
 def dump(
     ref: str | None = typer.Argument(
         None,
@@ -1661,6 +1769,21 @@ def dump(
         "-y",
         help="Skip interactive confirmations (per-topic / batch prompts).",
     ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        help=(
+            "Language for formatter labels in the dumped file (en, ru, …). "
+            "Defaults to [locale] language in config (en)."
+        ),
+    ),
+    content_language: str | None = typer.Option(
+        None,
+        "--content-language",
+        help=(
+            "Chat content language — when set, image/link enricher prompts use this. Defaults to --language."
+        ),
+    ),
 ) -> None:
     """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
@@ -1704,6 +1827,8 @@ def dump(
             folder=folder,
             with_comments=with_comments,
             yes=yes,
+            language=language,
+            content_language=content_language,
         )
     )
 
