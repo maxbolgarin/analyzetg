@@ -1138,7 +1138,17 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
 
 @app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_ask"))
 def ask(
-    question: str = typer.Argument(..., help="Free-form question, in any language."),
+    question: str | None = typer.Argument(
+        None, help="Free-form question, in any language. Omit to enter the wizard."
+    ),
+    ref: str | None = typer.Argument(
+        None,
+        help=(
+            "Optional chat reference: @user, t.me link (incl. topic links like "
+            "t.me/c/<id>/<topic>), fuzzy title, or numeric id. "
+            "Mutually exclusive with --chat / --folder / --global."
+        ),
+    ),
     chat: str | None = typer.Option(
         None,
         "--chat",
@@ -1197,14 +1207,22 @@ def ask(
             "on media-heavy chats by feeding the flagship a smaller, better-ranked set."
         ),
     ),
-    interactive: bool = typer.Option(
+    global_scope: bool = typer.Option(
         False,
-        "--interactive",
-        "-i",
+        "--global",
+        "-g",
         help=(
-            "After the first answer, drop into a follow-up prompt. Each follow-up "
-            "re-retrieves under the same scope and includes prior turns as context "
-            "(so 'tell me more' just works). Blank line or Ctrl-D exits."
+            "Search every synced chat in the local DB (no Telegram round-trips, "
+            "no wizard). The previous default of `atg ask Q` (no scope) — now "
+            "moved here so the new default opens the wizard."
+        ),
+    ),
+    no_followup: bool = typer.Option(
+        False,
+        "--no-followup",
+        help=(
+            "Skip the post-answer 'Continue chatting?' prompt. Use in scripts / "
+            "cron / non-interactive contexts."
         ),
     ),
     semantic: bool = typer.Option(
@@ -1271,25 +1289,23 @@ def ask(
 ) -> None:
     """Answer a question about your synced Telegram archive.
 
-    Retrieves the top relevant messages from the local DB by keyword match
-    (no embeddings; no Telegram or OpenAI calls during retrieval), then
-    asks one LLM call to answer with citations. Scope defaults to every
-    synced chat — narrow with `--chat`, `--folder`, `--thread`, or a
-    period flag for sharper answers (and lower cost).
-
     Examples:
-      atg ask "what did Bob say about migration?"
-      atg ask "any open questions on the API?" --folder Work --last-days 7
-      atg ask "когда дедлайн по проекту?" --chat @somegroup --refresh
+      atg ask "what did Bob say about migration?" @somegroup
+      atg ask "open Qs?" https://t.me/c/3865481227/4         # incl. topic
+      atg ask "..." --folder Work --last-days 7
+      atg ask                                                 # opens wizard
+      atg ask "..." --global                                  # all synced, no wizard
     """
     from analyzetg.ask.commands import cmd_ask
 
     _run(
         cmd_ask(
             question=question,
+            ref=ref,
             chat=chat,
             thread=thread,
             folder=folder,
+            global_scope=global_scope,
             since=since,
             until=until,
             last_days=last_days,
@@ -1300,7 +1316,7 @@ def ask(
             refresh=refresh,
             show_retrieved=show_retrieved,
             rerank=rerank,
-            interactive=interactive,
+            no_followup=no_followup,
             semantic=semantic,
             build_index=build_index,
             max_cost=max_cost,

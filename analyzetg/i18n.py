@@ -727,6 +727,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "init_2fa_prompt": {"en": "2FA password", "ru": "Пароль двухфакторной аутентификации"},
     # ---- Ask / Q&A -----------------------------------------------------
     "ask_empty_question": {"en": "Empty question.", "ru": "Пустой вопрос."},
+    "ask_continue_q": {
+        "en": "Continue chatting?",
+        "ru": "Продолжить диалог?",
+    },
     "ask_no_keywords": {
         "en": "No useful keywords in your question. Add a noun, name, or topic — stop words and short tokens are filtered. (Or pass --semantic, which doesn't need keyword tokens.)",
         "ru": "В вопросе нет полезных ключевых слов. Добавьте существительное, имя или тему — стоп-слова и короткие токены отфильтровываются. (Или передайте --semantic — он не требует ключевых слов.)",

@@ -92,12 +92,40 @@ def _resolve_system_prompt(language: str) -> str:
     return _SYSTEM_PROMPT.get(language, _SYSTEM_PROMPT["en"])
 
 
+def _validate_scope_args(
+    *,
+    ref: str | None,
+    chat: str | None,
+    folder: str | None,
+    global_scope: bool,
+) -> None:
+    """Reject impossible scope combinations early with a readable message.
+
+    A scope is "set" when its argument is non-None / True. At most one of
+    {ref, chat, folder, global} may be set; setting two raises
+    BadParameter naming both. None set is fine — caller routes to wizard.
+    """
+    set_args = []
+    if ref is not None:
+        set_args.append("ref")
+    if chat is not None:
+        set_args.append("--chat")
+    if folder is not None:
+        set_args.append("--folder")
+    if global_scope:
+        set_args.append("--global")
+    if len(set_args) > 1:
+        raise typer.BadParameter(f"Cannot combine {' and '.join(set_args)}; pick one scope.")
+
+
 async def cmd_ask(
     *,
-    question: str,
+    question: str | None,
+    ref: str | None = None,
     chat: str | None = None,
     thread: int | None = None,
     folder: str | None = None,
+    global_scope: bool = False,
     since: str | None = None,
     until: str | None = None,
     last_days: int | None = None,
@@ -111,7 +139,7 @@ async def cmd_ask(
     semantic: bool = False,
     build_index: bool = False,
     max_cost: float | None = None,
-    interactive: bool = False,
+    no_followup: bool = False,
     with_comments: bool = False,
     yes: bool = False,
     language: str | None = None,
@@ -128,20 +156,55 @@ async def cmd_ask(
     so we don't accidentally hit Telegram for every dialog you've ever
     synced.
     """
+    _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
+
+    # No question → drop into the wizard (which prompts inline). If user
+    # passed a scope arg without a question, error out.
+    if question is None or not question.strip():
+        if ref is None and chat is None and folder is None and not global_scope:
+            from analyzetg.interactive import run_interactive_ask
+
+            return await run_interactive_ask(
+                question="",  # wizard prompts for it
+                refresh=refresh,
+                semantic=semantic,
+                rerank=rerank,
+                limit=limit,
+                model=model,
+                output=output,
+                console_out=console_out,
+                show_retrieved=show_retrieved,
+                max_cost=max_cost,
+                yes=yes,
+                no_followup=no_followup,
+                language=language,
+                content_language=content_language,
+            )
+        console.print(f"[red]{_t('ask_empty_question')}[/]")
+        raise typer.Exit(2)
+
+    # If ref is set, resolve it now and overlay onto chat/thread.
+    if ref is not None:
+        _settings_for_ref = get_settings()
+        async with (
+            tg_client(_settings_for_ref) as _client_for_ref,
+            open_repo(_settings_for_ref.storage.data_path) as _repo_for_ref,
+        ):
+            _chat_id, _ref_thread_id, _msg_id = await _resolve_ask_ref(_client_for_ref, _repo_for_ref, ref)
+        chat = str(_chat_id)
+        if thread is None and _ref_thread_id is not None:
+            thread = _ref_thread_id
+
     # `--build-index` doesn't need a question; everything else does.
-    if not build_index:
-        if not question.strip():
-            console.print(f"[red]{_t('ask_empty_question')}[/]")
+    if not build_index and not semantic:
+        tokens = tokenize_question(question)
+        if not tokens:
+            console.print(
+                "[yellow]No useful keywords in your question.[/] Add a noun, name, or "
+                "topic — stop words and short tokens are filtered. (Or pass --semantic, "
+                "which doesn't need keyword tokens.)"
+            )
             raise typer.Exit(2)
-        if not semantic:
-            tokens = tokenize_question(question)
-            if not tokens:
-                console.print(
-                    "[yellow]No useful keywords in your question.[/] Add a noun, name, or "
-                    "topic — stop words and short tokens are filtered. (Or pass --semantic, "
-                    "which doesn't need keyword tokens.)"
-                )
-                raise typer.Exit(2)
     if refresh and not chat and not folder:
         raise typer.BadParameter(
             "--refresh needs --chat or --folder; refusing to backfill every "
@@ -306,10 +369,14 @@ async def cmd_ask(
         first_answer, prior_pool = await _answer_one(question, is_followup=False)
         history.append((question, first_answer))
 
-        if not interactive:
+        if no_followup:
             return
 
-        # Interactive loop: prompt for follow-ups until blank line / EOF.
+        # Post-answer prompt (default no): "Continue chatting?"
+        if not typer.confirm(_t("ask_continue_q"), default=False):
+            return
+
+        # User opted in → drop into the multi-turn follow-up loop.
         # Plain `input()` misbehaves inside the asyncio event loop on
         # macOS — Enter shows up as a literal `^M` (raw-mode carriage
         # return) and the line never submits. prompt_toolkit's async
