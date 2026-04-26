@@ -129,6 +129,7 @@ async def cmd_ask(
     since: str | None = None,
     until: str | None = None,
     last_days: int | None = None,
+    last_hours: int | None = None,
     limit: int = 200,
     model: str | None = None,
     output: Path | None = None,
@@ -188,8 +189,8 @@ async def cmd_ask(
     # accepting these flags too would silently drop or duplicate them.
     if _no_scope:
         forbidden_with_wizard: list[str] = []
-        if since is not None or until is not None or last_days is not None:
-            forbidden_with_wizard.append("--since/--until/--last-days")
+        if since is not None or until is not None or last_days is not None or last_hours is not None:
+            forbidden_with_wizard.append("--since/--until/--last-days/--last-hours")
         if thread is not None:
             forbidden_with_wizard.append("--thread")
         if with_comments:
@@ -258,7 +259,7 @@ async def cmd_ask(
     effective_content_language = (
         content_language or settings.locale.content_language or effective_language
     ).lower()
-    since_dt, until_dt = compute_window(since, until, last_days)
+    since_dt, until_dt = compute_window(since, until, last_days, last_hours)
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         # Resolve scope.

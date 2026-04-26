@@ -117,6 +117,46 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
 
 
 @pytest.mark.asyncio
+async def test_run_interactive_ask_passes_last_hours_for_last24h():
+    """Wizard's `last24h` period option threads into cmd_ask as last_hours=24.
+
+    Regression guard that the new hour-granular options are wired to the
+    new --last-hours flag (not silently dropped or coerced into days).
+    """
+    from analyzetg.interactive import InteractiveAnswers, run_interactive_ask
+
+    answers = InteractiveAnswers(
+        chat_ref="-1001234567890",
+        chat_kind="supergroup",
+        thread_id=None,
+        forum_all_flat=False,
+        forum_all_per_topic=False,
+        preset=None,
+        period="last24h",
+        custom_since=None,
+        custom_until=None,
+        console_out=False,
+        mark_read=False,
+        output_path=None,
+        run_on_all_unread=False,
+        run_on_all_local=False,
+        enrich_kinds=None,
+        custom_from_msg=None,
+        with_comments=False,
+    )
+
+    with (
+        patch("analyzetg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("analyzetg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+    ):
+        await run_interactive_ask(question="recent news?")
+
+    kwargs = fake_cmd.call_args.kwargs
+    assert kwargs["last_hours"] == 24
+    assert kwargs.get("last_days") is None
+
+
+@pytest.mark.asyncio
 async def test_run_interactive_ask_does_not_force_refresh_for_all_local():
     """ALL_LOCAL is an explicit local-only path — no Telegram backfill."""
     from analyzetg.interactive import InteractiveAnswers, run_interactive_ask

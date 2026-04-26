@@ -88,8 +88,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Unread (default) — since Telegram read marker",
         "ru": "Непрочитанные (по умолчанию) — с метки прочтения Telegram",
     },
+    "wiz_period_last24h": {"en": "Last 24 hours", "ru": "Последние 24 часа"},
+    "wiz_period_last96h": {"en": "Last 96 hours", "ru": "Последние 96 часов"},
     "wiz_period_last7": {"en": "Last 7 days", "ru": "Последние 7 дней"},
     "wiz_period_last30": {"en": "Last 30 days", "ru": "Последние 30 дней"},
+    "wiz_period_last90": {"en": "Last 90 days", "ru": "Последние 90 дней"},
+    "wiz_period_year_start": {"en": "From year beginning", "ru": "С начала года"},
     "wiz_period_full": {"en": "Full history", "ru": "Вся история"},
     "wiz_period_from_msg": {
         "en": "From a specific message (link or id)…",
@@ -966,8 +970,15 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "unread (since Telegram read marker)",
         "ru": "непрочитанные (с метки прочтения Telegram)",
     },
+    "wiz_summary_period_last24h": {"en": "last 24 hours", "ru": "последние 24 часа"},
+    "wiz_summary_period_last96h": {"en": "last 96 hours", "ru": "последние 96 часов"},
     "wiz_summary_period_last7": {"en": "last 7 days", "ru": "последние 7 дней"},
     "wiz_summary_period_last30": {"en": "last 30 days", "ru": "последние 30 дней"},
+    "wiz_summary_period_last90": {"en": "last 90 days", "ru": "последние 90 дней"},
+    "wiz_summary_period_year_start": {
+        "en": "from year beginning",
+        "ru": "с начала года",
+    },
     "wiz_summary_period_full": {"en": "full history", "ru": "вся история"},
     "wiz_summary_period_custom": {"en": "custom range", "ru": "свой диапазон"},
     "wiz_summary_period_from_msg": {

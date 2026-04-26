@@ -155,6 +155,40 @@ def test_compute_window_last_days_is_utc_aware() -> None:
     assert since.tzinfo is UTC and until.tzinfo is UTC
 
 
+def test_compute_window_last_hours_is_utc_aware() -> None:
+    """`--last-hours N` returns a UTC-aware (now-N hours, now) window.
+
+    Hour-granular flag mirrors `--last-days` semantics but at finer
+    resolution. New flag added to support `last24h` / `last96h` wizard
+    options that can't be expressed via date-granular `--since`.
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta
+
+    since, until = compute_window(None, None, None, last_hours=24)
+    assert since is not None and until is not None
+    assert since.tzinfo is UTC and until.tzinfo is UTC
+    delta = until - since
+    assert timedelta(hours=23, minutes=55) <= delta <= timedelta(hours=24, minutes=5)
+    # `until` is approximately now-UTC.
+    assert abs(_dt.now(UTC) - until) < timedelta(minutes=1)
+
+
+def test_compute_window_last_hours_wins_over_last_days() -> None:
+    """When both --last-hours and --last-days are passed, hours wins.
+
+    More-specific flag takes precedence; the helper is the resolver,
+    caller-side mutex is the validator.
+    """
+    from datetime import timedelta
+
+    since, until = compute_window(None, None, 7, last_hours=24)
+    assert since is not None and until is not None
+    delta = until - since
+    # Hours window (~24h), not days window (~168h).
+    assert timedelta(hours=23, minutes=55) <= delta <= timedelta(hours=24, minutes=5)
+
+
 # --- Truncated cache hit is re-run --------------------------------------
 
 

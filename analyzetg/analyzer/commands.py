@@ -322,7 +322,8 @@ async def cmd_analyze(
     since: str | None,
     until: str | None,
     last_days: int | None,
-    preset: str | None,
+    last_hours: int | None = None,
+    preset: str | None = None,
     prompt_file: Path | None,
     model: str | None,
     filter_model: str | None,
@@ -388,6 +389,8 @@ async def cmd_analyze(
             rejected.append("--until")
         if last_days is not None:
             rejected.append("--last-days")
+        if last_hours is not None:
+            rejected.append("--last-hours")
         if from_msg:
             rejected.append("--from-msg")
         if rejected:
@@ -448,7 +451,7 @@ async def cmd_analyze(
     mark_read_bool = bool(mark_read)
 
     settings = get_settings()
-    since_dt, until_dt = _compute_window(since, until, last_days)
+    since_dt, until_dt = _compute_window(since, until, last_days, last_hours)
     from_msg_id = _parse_from_msg(from_msg)
     msg_id = _parse_from_msg(msg)
 

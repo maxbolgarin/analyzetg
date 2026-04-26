@@ -191,7 +191,7 @@ def chats_add(
     period: str | None = typer.Option(
         None,
         "--period",
-        help="Default period for `atg chats run` on this sub: unread | last7 | last30 | full. Wizard asks if not set.",
+        help="Default period for `atg chats run` on this sub: unread | last24h | last96h | last7 | last30 | last90 | year_start | full. Wizard asks if not set.",
     ),
     enrich: str | None = typer.Option(
         None,
@@ -334,7 +334,7 @@ def chats_run(
     period: str | None = typer.Option(
         None,
         "--period",
-        help="Override every sub's stored period: unread | last7 | last30 | full.",
+        help="Override every sub's stored period: unread | last24h | last96h | last7 | last30 | last90 | year_start | full.",
     ),
     enrich: str | None = typer.Option(
         None,
@@ -469,6 +469,15 @@ def analyze(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days"),
+    last_hours: int | None = typer.Option(
+        None,
+        "--last-hours",
+        help=(
+            "Restrict to messages newer than N hours ago. Mutually "
+            "exclusive with --since/--until/--full-history; if combined "
+            "with --last-days, --last-hours wins (more specific)."
+        ),
+    ),
     preset: str | None = typer.Option(
         None,
         "--preset",
@@ -667,6 +676,7 @@ def analyze(
             since=since,
             until=until,
             last_days=last_days,
+            last_hours=last_hours,
             preset=preset,
             prompt_file=prompt_file,
             model=model,
@@ -1167,6 +1177,15 @@ def ask(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days"),
+    last_hours: int | None = typer.Option(
+        None,
+        "--last-hours",
+        help=(
+            "Restrict to messages newer than N hours ago. Mutually "
+            "exclusive with --since/--until; if combined with "
+            "--last-days, --last-hours wins (more specific)."
+        ),
+    ),
     limit: int = typer.Option(
         200,
         "--limit",
@@ -1329,6 +1348,7 @@ def ask(
             since=since,
             until=until,
             last_days=last_days,
+            last_hours=last_hours,
             limit=limit,
             model=model,
             output=output,
@@ -1706,6 +1726,15 @@ def dump(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days", help="Shortcut for --since now-N."),
+    last_hours: int | None = typer.Option(
+        None,
+        "--last-hours",
+        help=(
+            "Restrict to messages newer than N hours ago. Mutually "
+            "exclusive with --since/--until/--full-history; if combined "
+            "with --last-days, --last-hours wins (more specific)."
+        ),
+    ),
     full_history: bool = typer.Option(False, "--full-history", help="Pull the whole chat."),
     thread: int | None = typer.Option(
         None,
@@ -1847,6 +1876,7 @@ def dump(
             since=since,
             until=until,
             last_days=last_days,
+            last_hours=last_hours,
             full_history=full_history,
             thread=thread,
             from_msg=from_msg,

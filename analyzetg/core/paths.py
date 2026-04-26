@@ -95,15 +95,27 @@ def parse_ymd(s: str | None) -> datetime | None:
 
 
 def compute_window(
-    since: str | None, until: str | None, last_days: int | None
+    since: str | None,
+    until: str | None,
+    last_days: int | None,
+    last_hours: int | None = None,
 ) -> tuple[datetime | None, datetime | None]:
     """Return a UTC-aware (since, until) window.
 
-    `--last-days N` → (now-UTC - N days, now-UTC); `--since/--until`
-    are parsed as UTC-midnight by `parse_ymd`. Telethon's
-    `offset_date` and SQLite `messages.date` column are both UTC, so
-    staying UTC end-to-end avoids off-by-timezone window edges.
+    `--last-hours N` → (now-UTC - N hours, now-UTC); `--last-days N` →
+    (now-UTC - N days, now-UTC); `--since/--until` are parsed as
+    UTC-midnight by `parse_ymd`. Telethon's `offset_date` and SQLite
+    `messages.date` column are both UTC, so staying UTC end-to-end
+    avoids off-by-timezone window edges.
+
+    Precedence within this helper: `last_hours` > `last_days` >
+    `since/until`. The hour-granular flag is the more specific one,
+    so when both are passed it wins. Caller-side flag mutex still
+    holds — this helper is the *resolver*, not the validator.
     """
+    if last_hours:
+        until_dt = datetime.now(UTC)
+        return until_dt - timedelta(hours=last_hours), until_dt
     if last_days:
         until_dt = datetime.now(UTC)
         return until_dt - timedelta(days=last_days), until_dt

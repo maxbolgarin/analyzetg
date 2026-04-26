@@ -198,7 +198,8 @@ class InteractiveAnswers:
     # `None` only in ask mode (preset is meaningless there); analyze mode
     # always sets this and dump mode falls back to the existing default.
     preset: str | None
-    # Period keys: "unread" | "last7" | "last30" | "full" | "custom" | "from_msg"
+    # Period keys: "unread" | "last24h" | "last96h" | "last7" | "last30" |
+    # "last90" | "year_start" | "full" | "custom" | "from_msg"
     period: str
     custom_since: str | None
     custom_until: str | None
@@ -241,10 +242,19 @@ def _period_to_db_filters(
         marker = int(chat.get("read_inbox_max_id") or 0)
         if marker > 0:
             out["min_msg_id"] = marker
+    elif period == "last24h":
+        out["since"] = datetime.now(UTC) - timedelta(hours=24)
+    elif period == "last96h":
+        out["since"] = datetime.now(UTC) - timedelta(hours=96)
     elif period == "last7":
         out["since"] = datetime.now(UTC) - timedelta(days=7)
     elif period == "last30":
         out["since"] = datetime.now(UTC) - timedelta(days=30)
+    elif period == "last90":
+        out["since"] = datetime.now(UTC) - timedelta(days=90)
+    elif period == "year_start":
+        now_utc = datetime.now(UTC)
+        out["since"] = datetime(now_utc.year, 1, 1, tzinfo=UTC)
     elif period == "custom":
         if custom_since:
             out["since"] = datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
@@ -274,14 +284,25 @@ def _build_period_kwargs(answers: InteractiveAnswers, *, include_from_msg: bool)
     don't drift on period semantics.
     """
     last_days: int | None = None
+    last_hours: int | None = None
     full_history = False
     since: str | None = None
     until: str | None = None
     from_msg: str | None = None
-    if answers.period == "last7":
+    if answers.period == "last24h":
+        last_hours = 24
+    elif answers.period == "last96h":
+        last_hours = 96
+    elif answers.period == "last7":
         last_days = 7
     elif answers.period == "last30":
         last_days = 30
+    elif answers.period == "last90":
+        last_days = 90
+    elif answers.period == "year_start":
+        # `since=YYYY-01-01` flows through CLI's --since path; UTC-midnight
+        # parse happens in core.paths.parse_ymd.
+        since = f"{datetime.now(UTC).year}-01-01"
     elif answers.period == "full":
         full_history = True
     elif answers.period == "custom":
@@ -291,6 +312,7 @@ def _build_period_kwargs(answers: InteractiveAnswers, *, include_from_msg: bool)
         from_msg = answers.custom_from_msg
     out: dict[str, Any] = {
         "last_days": last_days,
+        "last_hours": last_hours,
         "full_history": full_history,
         "since": since,
         "until": until,
@@ -515,10 +537,18 @@ def _period_to_cli_kwargs(answers: InteractiveAnswers) -> dict[str, Any]:
     --from-msg, so those wizard choices collapse to "no period filter".
     """
     p = answers.period
+    if p == "last24h":
+        return {"last_hours": 24}
+    if p == "last96h":
+        return {"last_hours": 96}
     if p == "last7":
         return {"last_days": 7}
     if p == "last30":
         return {"last_days": 30}
+    if p == "last90":
+        return {"last_days": 90}
+    if p == "year_start":
+        return {"since": f"{datetime.now(UTC).year}-01-01"}
     if p == "custom":
         return {"since": answers.custom_since, "until": answers.custom_until}
     if p == "from_msg":
@@ -1260,12 +1290,32 @@ async def _fetch_period_counts(
             return None
 
     latest_task = _latest_msg_id()
+    last24h_start_task = _first_id_after(now - timedelta(hours=24))
+    last96h_start_task = _first_id_after(now - timedelta(hours=96))
     last7_start_task = _first_id_after(now - timedelta(days=7))
     last30_start_task = _first_id_after(now - timedelta(days=30))
+    last90_start_task = _first_id_after(now - timedelta(days=90))
+    year_start_task = _first_id_after(datetime(now.year, 1, 1, tzinfo=UTC))
     full_start_task = _first_id_after(None)
 
-    latest, last7_start, last30_start, full_start = await _asyncio.gather(
-        latest_task, last7_start_task, last30_start_task, full_start_task
+    (
+        latest,
+        last24h_start,
+        last96h_start,
+        last7_start,
+        last30_start,
+        last90_start,
+        year_start_id,
+        full_start,
+    ) = await _asyncio.gather(
+        latest_task,
+        last24h_start_task,
+        last96h_start_task,
+        last7_start_task,
+        last30_start_task,
+        last90_start_task,
+        year_start_task,
+        full_start_task,
     )
 
     def _count(start: int | None) -> int | None:
@@ -1274,8 +1324,12 @@ async def _fetch_period_counts(
         return max(0, latest - start + 1)
 
     out: dict[str, int | None] = {
+        "last24h": _count(last24h_start),
+        "last96h": _count(last96h_start),
         "last7": _count(last7_start),
         "last30": _count(last30_start),
+        "last90": _count(last90_start),
+        "year_start": _count(year_start_id),
         "full": _count(full_start),
         # For "unread" we already have a hint from the dialog row.
         "unread": unread_hint if unread_hint else None,
@@ -1284,7 +1338,7 @@ async def _fetch_period_counts(
     # period it falls inside (best-effort — unread_hint is server-authoritative
     # and trumps our approximation, so we only clamp the other direction).
     if out.get("full") is not None:
-        for key in ("last7", "last30"):
+        for key in ("last24h", "last96h", "last7", "last30", "last90", "year_start"):
             if out[key] is not None and out[key] > out["full"]:
                 out[key] = out["full"]
     if out.get("unread") is not None and out.get("full") is not None and out["unread"] > out["full"]:
@@ -2146,8 +2200,12 @@ async def _pick_period(
 
     options: list[Any] = [
         questionary.Choice(title=_label(i18n_t("wiz_period_unread"), "unread"), value="unread"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last24h"), "last24h"), value="last24h"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last96h"), "last96h"), value="last96h"),
         questionary.Choice(title=_label(i18n_t("wiz_period_last7"), "last7"), value="last7"),
         questionary.Choice(title=_label(i18n_t("wiz_period_last30"), "last30"), value="last30"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last90"), "last90"), value="last90"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_year_start"), "year_start"), value="year_start"),
         questionary.Choice(title=_label(i18n_t("wiz_period_full"), "full"), value="full"),
     ]
     if not static_only:
@@ -2171,8 +2229,12 @@ async def _pick_period(
         return BACK
     _period_label_keys = {
         "unread": "wiz_summary_period_unread",
+        "last24h": "wiz_summary_period_last24h",
+        "last96h": "wiz_summary_period_last96h",
         "last7": "wiz_summary_period_last7",
         "last30": "wiz_summary_period_last30",
+        "last90": "wiz_summary_period_last90",
+        "year_start": "wiz_summary_period_year_start",
         "full": "wiz_summary_period_full",
         "custom": "wiz_summary_period_custom",
         "from_msg": "wiz_summary_period_from_msg",

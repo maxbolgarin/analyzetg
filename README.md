@@ -253,10 +253,10 @@ atg analyze [<ref>] [period] [output] [enrichment] [budget] [audit] [delivery]
 |---|---|
 | `--full-history` | Whole chat |
 | `--from-msg <id>` / message link | Start at a specific message, inclusive |
-| `--since YYYY-MM-DD` / `--until YYYY-MM-DD` / `--last-days N` | Date range (UTC) |
+| `--since YYYY-MM-DD` / `--until YYYY-MM-DD` / `--last-days N` / `--last-hours N` | Date / hour range (UTC) |
 | _(none)_ | Unread only — `msg_id > read_marker` |
 
-Precedence (first match wins): `--full-history` > `--from-msg` > `--since/--until/--last-days` > unread.
+Precedence (first match wins): `--full-history` > `--from-msg` > `--last-hours` > `--since/--until/--last-days` > unread. (When both `--last-hours` and `--last-days` are passed, the hour-granular flag wins.)
 
 ### Output
 
@@ -659,12 +659,13 @@ read marker. To change that:
 
 | Flag | Meaning |
 |---|---|
+| `--last-hours N` | Last N hours (UTC) — finer than `--last-days` |
 | `--last-days N` | Last N days (UTC) |
 | `--since YYYY-MM-DD --until YYYY-MM-DD` | Explicit date range (either end optional) |
 | `--from-msg <id>` / message link | Start at a specific message, inclusive |
 | `--full-history` | Entire chat |
 
-Precedence: `--full-history` > `--from-msg` > `--since/--until/--last-days` > unread.
+Precedence: `--full-history` > `--from-msg` > `--last-hours` > `--since/--until/--last-days` > unread. When both `--last-hours` and `--last-days` are set, `--last-hours` wins.
 
 YYYY-MM-DD strings are interpreted as **UTC** days (matches how
 `messages.date` is stored).

@@ -45,10 +45,20 @@ def _resolve_period(sub_value: str, override: str | None) -> str:
 
 def _period_to_kwargs(period: str) -> dict[str, Any]:
     """Translate the wizard's period key into cmd_analyze kwargs."""
+    if period == "last24h":
+        return {"last_hours": 24, "full_history": False}
+    if period == "last96h":
+        return {"last_hours": 96, "full_history": False}
     if period == "last7":
         return {"last_days": 7, "full_history": False}
     if period == "last30":
         return {"last_days": 30, "full_history": False}
+    if period == "last90":
+        return {"last_days": 90, "full_history": False}
+    if period == "year_start":
+        from datetime import UTC, datetime
+
+        return {"since": f"{datetime.now(UTC).year}-01-01", "full_history": False}
     if period == "full":
         return {"full_history": True}
     # "unread" / unknown → no flags, defaults to read-marker semantics.
