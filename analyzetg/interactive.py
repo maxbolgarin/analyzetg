@@ -551,6 +551,25 @@ async def run_interactive_ask(
     picked scope. The wizard never builds the embeddings index or
     invokes --build-index — that's an explicit user decision.
     """
+    # If no question was supplied (bare `atg ask`), prompt for one now.
+    # `_collect_answers(mode="ask")` only uses the question for the
+    # confirm-step summary; it doesn't ask the user for it. ESC / Ctrl-D
+    # / blank input cancels the run cleanly.
+    if not question.strip():
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import HTML
+
+        session: PromptSession = PromptSession()
+        console.print(f"[bold cyan]{i18n_t('wiz_ask_question_prompt')}[/]")
+        try:
+            question = (await session.prompt_async(HTML("<ansicyan>?</ansicyan> "))).strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            return
+        if not question:
+            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            return
+
     answers = await _collect_answers(
         mode="ask",
         console_out=console_out,

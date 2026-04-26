@@ -147,14 +147,20 @@ async def cmd_ask(
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
 
-    `--chat` / `--thread` / `--folder` narrow the search corpus. With none
-    of those, every synced message in the local DB is eligible.
+    Scoping (mutually exclusive — at most one):
+      - positional <ref>: @user / t.me link / topic URL / fuzzy / numeric
+      - --chat <ref>: same forms as positional
+      - --folder NAME: every chat in the folder
+      - --global: every synced chat in the local DB
 
-    `--refresh` runs an incremental backfill on the scoped chat(s) before
-    retrieval — useful when you suspect new messages have arrived since
-    the last `analyze` / `dump` / `sync`. Requires `--chat` or `--folder`
-    so we don't accidentally hit Telegram for every dialog you've ever
-    synced.
+    Empty question + no scope → opens the wizard (chat picker, period,
+    confirm). Empty question + scope set → exits with an error.
+
+    `--refresh` runs an incremental backfill before retrieval; needs
+    --chat or --folder.
+
+    After every answer, prompts "Continue chatting?" (default no). Use
+    --no-followup to suppress (cron / scripts).
     """
     _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
 
@@ -190,7 +196,9 @@ async def cmd_ask(
             tg_client(_settings_for_ref) as _client_for_ref,
             open_repo(_settings_for_ref.storage.data_path) as _repo_for_ref,
         ):
-            _chat_id, _ref_thread_id, _msg_id = await _resolve_ask_ref(_client_for_ref, _repo_for_ref, ref)
+            # msg_id from URL is intentionally discarded; ask scopes to chat/topic,
+            # not a single message.
+            _chat_id, _ref_thread_id, _ = await _resolve_ask_ref(_client_for_ref, _repo_for_ref, ref)
         chat = str(_chat_id)
         if thread is None and _ref_thread_id is not None:
             thread = _ref_thread_id
