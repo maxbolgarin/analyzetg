@@ -508,6 +508,96 @@ async def run_interactive_describe() -> None:
     await cmd_describe(chat_ref)
 
 
+def _period_to_cli_kwargs(answers: InteractiveAnswers) -> dict[str, Any]:
+    """Map the wizard's period choice to cmd_ask's CLI kwargs.
+
+    cmd_ask doesn't expose --full-history (use --global instead) or
+    --from-msg, so those wizard choices collapse to "no period filter".
+    """
+    p = answers.period
+    if p == "last7":
+        return {"last_days": 7}
+    if p == "last30":
+        return {"last_days": 30}
+    if p == "custom":
+        return {"since": answers.custom_since, "until": answers.custom_until}
+    if p == "from_msg":
+        return {}  # ask doesn't honour from_msg
+    if p == "full":
+        return {}
+    return {}  # "unread" or anything else
+
+
+async def run_interactive_ask(
+    *,
+    question: str,
+    refresh: bool = False,
+    semantic: bool = False,
+    rerank: bool | None = None,
+    limit: int = 200,
+    model: str | None = None,
+    output: Path | None = None,
+    console_out: bool = False,
+    show_retrieved: bool = False,
+    max_cost: float | None = None,
+    yes: bool = False,
+    no_followup: bool = False,
+    language: str | None = None,
+    content_language: str | None = None,
+) -> None:
+    """Default UX for `atg ask` (no <ref>, no --chat/--folder/--global).
+
+    Walks the ask-mode wizard, then dispatches to `cmd_ask` with the
+    picked scope. The wizard never builds the embeddings index or
+    invokes --build-index — that's an explicit user decision.
+    """
+    answers = await _collect_answers(
+        mode="ask",
+        console_out=console_out,
+        output=output,
+        save_default=False,
+        mark_read=None,
+        question=question,
+    )
+    if answers is None:
+        return
+
+    from analyzetg.ask.commands import cmd_ask
+
+    period_kwargs = _period_to_cli_kwargs(answers)
+
+    chat_arg: str | None = None
+    if answers.chat_ref:  # non-empty ref → use it
+        chat_arg = answers.chat_ref
+
+    # Task 4 will add ref/global_scope/no_followup parameters on cmd_ask.
+    # Until then, `run_interactive_ask` is unreachable from the live CLI.
+    await cmd_ask(
+        question=question,
+        ref=None,
+        chat=chat_arg,
+        thread=answers.thread_id,
+        folder=None,
+        global_scope=answers.run_on_all_local,
+        refresh=refresh,
+        semantic=semantic,
+        rerank=rerank,
+        limit=limit,
+        model=model,
+        output=answers.output_path or output,
+        console_out=answers.console_out or console_out,
+        show_retrieved=show_retrieved,
+        max_cost=max_cost,
+        with_comments=bool(answers.with_comments),
+        yes=yes,
+        no_followup=no_followup,
+        language=language,
+        content_language=content_language,
+        build_index=False,
+        **period_kwargs,
+    )
+
+
 async def _collect_answers(
     *,
     mode: str,  # "analyze" | "dump" | "ask"
@@ -2057,6 +2147,7 @@ __all__ = [
     "build_analyze_args",
     "build_dump_args",
     "run_interactive_analyze",
+    "run_interactive_ask",
     "run_interactive_describe",
     "run_interactive_dump",
 ]
