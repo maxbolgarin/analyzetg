@@ -589,6 +589,12 @@ async def run_interactive_ask(
     if answers.chat_ref:  # non-empty ref → use it
         chat_arg = answers.chat_ref
 
+    # Wizard mode always backfills the picked chat from Telegram before
+    # retrieval — the user just stepped through a flow expecting fresh
+    # answers, not whatever's stale in the local DB. ALL_LOCAL skips this
+    # (no chat list to refresh; explicit local-only path).
+    effective_refresh = refresh or chat_arg is not None
+
     await cmd_ask(
         question=question,
         ref=None,
@@ -596,7 +602,7 @@ async def run_interactive_ask(
         thread=answers.thread_id,
         folder=None,
         global_scope=answers.run_on_all_local,
-        refresh=refresh,
+        refresh=effective_refresh,
         semantic=semantic,
         rerank=rerank,
         limit=limit,

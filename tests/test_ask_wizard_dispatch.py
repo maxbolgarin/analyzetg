@@ -106,3 +106,40 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
     assert kwargs["thread"] == 42
     assert kwargs["last_days"] == 7
     assert kwargs["global_scope"] is False
+    # Wizard mode auto-refreshes the picked chat — the user just stepped
+    # through a flow expecting fresh answers, not stale local data.
+    assert kwargs["refresh"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_interactive_ask_does_not_force_refresh_for_all_local():
+    """ALL_LOCAL is an explicit local-only path — no Telegram backfill."""
+    from analyzetg.interactive import InteractiveAnswers, run_interactive_ask
+
+    answers = InteractiveAnswers(
+        chat_ref="",
+        chat_kind="",
+        thread_id=None,
+        forum_all_flat=False,
+        forum_all_per_topic=False,
+        preset=None,
+        period="unread",
+        custom_since=None,
+        custom_until=None,
+        console_out=False,
+        mark_read=False,
+        output_path=None,
+        run_on_all_unread=False,
+        run_on_all_local=True,
+        enrich_kinds=None,
+        custom_from_msg=None,
+        with_comments=False,
+    )
+
+    with (
+        patch("analyzetg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("analyzetg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+    ):
+        await run_interactive_ask(question="что нового?")
+
+    assert fake_cmd.call_args.kwargs["refresh"] is False
