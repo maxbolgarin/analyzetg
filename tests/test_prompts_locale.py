@@ -50,9 +50,9 @@ def test_compose_uses_language_to_pick_preset_directory():
     even when the UI is in another language."""
     composed_ru = prompts.compose_system_prompt("X", topic_titles=None, language="ru")
     composed_en = prompts.compose_system_prompt("X", topic_titles=None, language="en")
-    # The cyrillic ID for "the user's chat" appears only in the RU base.
-    assert "Telegram-чатов" in composed_ru
-    assert "Telegram-чатов" not in composed_en
+    # The cyrillic phrasing appears only in the RU base.
+    assert "потока сообщений" in composed_ru
+    assert "потока сообщений" not in composed_en
 
 
 def test_base_version_is_v4_or_higher():

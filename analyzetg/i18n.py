@@ -23,6 +23,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # ---- Formatter preamble (saved reports + LLM prompt) ----
     "period_label": {"en": "Period", "ru": "Период"},
     "chat_label": {"en": "Chat", "ru": "Чат"},
+    "video_label": {"en": "Video", "ru": "Видео"},
+    "video_period_label": {"en": "Single video", "ru": "Одно видео"},
     "messages_label": {"en": "Messages", "ru": "Сообщений"},
     "messages_in_group": {"en": "Messages in this group", "ru": "Сообщений в этой группе"},
     "topic_label": {"en": "Topic", "ru": "Топик"},

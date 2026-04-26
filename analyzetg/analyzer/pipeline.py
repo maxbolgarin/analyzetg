@@ -216,6 +216,15 @@ class AnalysisOptions:
     # flag produces different cached results for the same channel+period.
     with_comments: bool = False
     comments_chat_id: int | None = None
+    # YouTube analysis: when set, the cache key includes the video id so
+    # re-analyzing a different video under the same preset doesn't collide
+    # in `analysis_cache`. Telegram runs leave this None.
+    youtube_video_id: str | None = None
+    # Source kind hint: "chat" (default) or "video". Drives the preamble
+    # label and base prompt's video addendum. In options_payload so a
+    # cache row from a chat run can't be served to a video run with the
+    # same msg_ids (extremely unlikely but cheap to lock down).
+    source_kind: str = "chat"
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
         """Hash ingredients that must bust cache when toggled."""
@@ -251,6 +260,8 @@ class AnalysisOptions:
             # a re-link would invalidate.
             "with_comments": self.with_comments,
             "comments_chat_id": self.comments_chat_id if self.with_comments else None,
+            "youtube_video_id": self.youtube_video_id,
+            "source_kind": self.source_kind,
         }
         if self.enrich:
             payload["enrich_options"] = {
@@ -372,6 +383,7 @@ async def run_analysis(
     chat_groups: dict[int, dict] | None = None,
     language: str | None = None,
     content_language: str | None = None,
+    link_template_override: str | None = None,
 ) -> AnalysisResult:
     """Run the end-to-end analysis for a chat/thread/period.
 
@@ -509,11 +521,14 @@ async def run_analysis(
         )
 
     period = (opts.since, opts.until)
-    link_template = build_link_template(
-        chat_username=chat_username,
-        chat_internal_id=chat_internal_id,
-        thread_id=thread_id,
-    )
+    if link_template_override is not None:
+        link_template = link_template_override
+    else:
+        link_template = build_link_template(
+            chat_username=chat_username,
+            chat_internal_id=chat_internal_id,
+            thread_id=thread_id,
+        )
     # When `chat_groups` is set the formatter renders a header per chat
     # group inline; the preamble's single-template path is suppressed
     # (`chat_header_preamble` knows). format_messages similarly drops
@@ -525,6 +540,7 @@ async def run_analysis(
         topic_titles=topic_titles,
         chat_groups=chat_groups,
         language=content_language,
+        source_kind=opts.source_kind,
     )
     # user_overhead: template minus {messages} — static, cacheable
     user_overhead = preset.render_user(
@@ -543,6 +559,7 @@ async def run_analysis(
         preset.system,
         topic_titles=topic_titles,
         language=content_language,
+        source_kind=opts.source_kind,
     )
 
     # --- Choose chunking strategy
@@ -587,6 +604,7 @@ async def run_analysis(
             topic_titles=topic_titles,
             chat_groups=chat_groups,
             language=content_language,
+            source_kind=opts.source_kind,
         )
         user = preset.render_user(
             period=_fmt_period(period),
@@ -689,6 +707,7 @@ async def run_analysis(
                 topic_titles=topic_titles,
                 chat_groups=chat_groups,
                 language=content_language,
+                source_kind=opts.source_kind,
             )
             user = preset.render_user(
                 period=_fmt_period(period),

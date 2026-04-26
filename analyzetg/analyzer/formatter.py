@@ -218,6 +218,7 @@ def format_messages(
     topic_titles: dict[int, str] | None = None,
     chat_groups: dict[int, dict] | None = None,
     language: str = "en",
+    source_kind: str = "chat",
 ) -> str:
     """Dense text format for a list of messages.
 
@@ -244,7 +245,8 @@ def format_messages(
         return ""
     date_fmt = _pick_date_format(msgs)
     idx = {m.msg_id: m for m in msgs}
-    chat_lbl = i18n_t("chat_label", language)
+    label_key = "video_label" if source_kind == "video" else "chat_label"
+    chat_lbl = i18n_t(label_key, language)
     period_lbl = i18n_t("period_label", language)
     msgs_lbl = i18n_t("messages_label", language)
     msg_link_lbl = i18n_t("msg_link_label", language)
@@ -255,6 +257,8 @@ def format_messages(
         a = period[0].strftime("%Y-%m-%d %H:%M") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d %H:%M") if period[1] else "…"
         lines.append(f"{period_lbl}: {a} — {b}")
+    elif source_kind == "video":
+        lines.append(f"{period_lbl}: {i18n_t('video_period_label', language)}")
     lines.append(f"{msgs_lbl}: {len(msgs)}")
     if link_template and not chat_groups:
         lines.append(f"{msg_link_lbl}: {link_template}")
@@ -343,6 +347,7 @@ def chat_header_preamble(
     topic_titles: dict[int, str] | None = None,
     chat_groups: dict[int, dict] | None = None,
     language: str = "en",
+    source_kind: str = "chat",
 ) -> str:
     """Static (cacheable) portion of the prompt — appears before dynamic messages.
 
@@ -356,7 +361,8 @@ def chat_header_preamble(
     where each msg_id range comes from. Used by `--with-comments` runs
     (channel + linked discussion group).
     """
-    chat_lbl = i18n_t("chat_label", language)
+    label_key = "video_label" if source_kind == "video" else "chat_label"
+    chat_lbl = i18n_t(label_key, language)
     period_lbl = i18n_t("period_label", language)
     msg_link_lbl = i18n_t("msg_link_label", language)
     link_lbl = i18n_t("link_label", language)
@@ -367,6 +373,8 @@ def chat_header_preamble(
         a = period[0].strftime("%Y-%m-%d") if period[0] else "…"
         b = period[1].strftime("%Y-%m-%d") if period[1] else "…"
         parts.append(f"{period_lbl}: {a} — {b}")
+    elif source_kind == "video":
+        parts.append(f"{period_lbl}: {i18n_t('video_period_label', language)}")
     if topic_titles:
         parts.append(_forum_line(topic_titles, language=language))
     if chat_groups:

@@ -352,6 +352,7 @@ async def cmd_analyze(
     yes: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    youtube_source: str = "auto",
 ) -> None:
     settings_for_lang = get_settings()
     effective_language = (language or settings_for_lang.locale.language or "en").lower()
@@ -466,6 +467,74 @@ async def cmd_analyze(
             if ref and ref != msg:
                 console.print(f"[dim]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
             effective_ref = msg
+
+    # YouTube branch: detect a YouTube URL early and dispatch to the
+    # dedicated handler. No Telegram resolve / backfill / mark_read.
+    from analyzetg.youtube.urls import is_youtube_url as _is_yt
+
+    if effective_ref and _is_yt(effective_ref):
+        _rejected_yt = []
+        if folder:
+            _rejected_yt.append("--folder")
+        if thread is not None:
+            _rejected_yt.append("--thread")
+        if all_flat:
+            _rejected_yt.append("--all-flat")
+        if all_per_topic:
+            _rejected_yt.append("--all-per-topic")
+        if with_comments:
+            _rejected_yt.append("--with-comments")
+        if from_msg:
+            _rejected_yt.append("--from-msg")
+        if full_history:
+            _rejected_yt.append("--full-history")
+        if since:
+            _rejected_yt.append("--since")
+        if until:
+            _rejected_yt.append("--until")
+        if last_days is not None:
+            _rejected_yt.append("--last-days")
+        if last_hours is not None:
+            _rejected_yt.append("--last-hours")
+        if msg:
+            _rejected_yt.append("--msg")
+        if repeat_last:
+            _rejected_yt.append("--repeat-last")
+        if mark_read is not None:
+            _rejected_yt.append("--mark-read/--no-mark-read")
+        if _rejected_yt:
+            raise typer.BadParameter(
+                f"YouTube URLs do not support {', '.join(_rejected_yt)}. "
+                "These flags only apply to Telegram chats."
+            )
+        if youtube_source not in ("auto", "captions", "audio"):
+            raise typer.BadParameter(
+                f"Invalid --youtube-source={youtube_source!r}. Valid: auto, captions, audio."
+            )
+
+        from analyzetg.youtube.commands import cmd_analyze_youtube
+
+        await cmd_analyze_youtube(
+            url=effective_ref,
+            preset=preset,
+            prompt_file=prompt_file,
+            model=model,
+            filter_model=filter_model,
+            output=output,
+            console_out=console_out,
+            no_cache=no_cache,
+            max_cost=max_cost,
+            dry_run=dry_run,
+            self_check=self_check,
+            cite_context=cite_context,
+            post_to=post_to,
+            post_saved=post_saved,
+            language=effective_language,
+            content_language=effective_content_language,
+            youtube_source=youtube_source,  # type: ignore[arg-type]
+            yes=yes,
+        )
+        return
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         console.print(f"[dim]{_tf('resolving', ref=effective_ref)}[/]")
@@ -820,6 +889,17 @@ async def _run_single_msg(
         raise typer.Exit(0)
 
     console.print(f"[dim]{_t('running_analysis')}[/]")
+    # When the single message is a video / videonote, mark the run as
+    # `source_kind="video"` so the formatter renders `=== Video: <title> ===`
+    # and the base prompt's video framing applies. Voice messages stay
+    # `chat` — the "Video" label would be misleading. The preset itself
+    # (single_msg by default) already handles a one-message transcript
+    # body cleanly, so we don't swap it.
+    inferred_source_kind = "video" if loaded.media_type in ("video", "videonote") else "chat"
+    if inferred_source_kind == "video" and preset == "single_msg":
+        # Tiny UX touch — surface the auto-detected reframing so users
+        # know why the report looks like a video summary.
+        console.print(f"[dim]Detected {loaded.media_type} — analyzing as a video transcript[/]")
     opts = AnalysisOptions(
         preset=preset,
         prompt_file=prompt_file,
@@ -831,6 +911,7 @@ async def _run_single_msg(
         min_msg_id=msg_id - 1,
         max_msg_id=msg_id,
         enrich=enrich_opts,
+        source_kind=inferred_source_kind,
     )
     # Pass thread_id=None: msg_id is chat-unique; thread filter would risk
     # excluding a forum-topic message we just fetched outside the subscription.

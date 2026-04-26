@@ -164,6 +164,10 @@ class Repo:
         )
         await self._add_missing_columns("analysis_cache", {"truncated": "INTEGER NOT NULL DEFAULT 0"})
         await self._add_missing_columns("usage_log", {"cached_tokens": "INTEGER"})
+        await self._add_missing_columns(
+            "youtube_videos",
+            {"transcript_timed_json": "TEXT"},
+        )
         await self._migrate_legacy_media_transcripts()
         await self._conn.commit()
 
@@ -910,6 +914,116 @@ class Repo:
             (url_hash, url, summary, title, model, cost_usd, _utcnow()),
         )
         await self._conn.commit()
+
+    # ---------------------------------------------------------- YouTube cache
+
+    async def get_youtube_video(self, video_id: str) -> dict[str, Any] | None:
+        """Fetch a cached YouTube video row (metadata + transcript), or None."""
+        cur = await self._conn.execute(
+            "SELECT * FROM youtube_videos WHERE video_id=?",
+            (video_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def put_youtube_video(
+        self,
+        *,
+        video_id: str,
+        url: str,
+        title: str | None,
+        channel_id: str | None,
+        channel_title: str | None,
+        channel_url: str | None,
+        description: str | None,
+        upload_date: str | None,
+        duration_sec: int | None,
+        view_count: int | None,
+        like_count: int | None,
+        tags: list[str] | None,
+        language: str | None,
+        transcript: str | None,
+        transcript_source: str | None,
+        transcript_model: str | None,
+        transcript_cost_usd: float | None,
+        transcript_timed: list[tuple[int, str]] | None = None,
+    ) -> None:
+        """Upsert a YouTube video row. `tags` flattens to a JSON array.
+
+        `transcript_timed` is `[(start_sec, text), …]` from the captions
+        track. Stored as JSON under `transcript_timed_json` so re-runs can
+        rebuild time-stamped synthetic messages without re-fetching.
+        """
+        tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
+        timed_json = json.dumps(transcript_timed, ensure_ascii=False) if transcript_timed else None
+        now = _utcnow()
+        transcribed_at = now if transcript else None
+        await self._conn.execute(
+            """
+            INSERT INTO youtube_videos(
+                video_id, url, title, channel_id, channel_title, channel_url,
+                description, upload_date, duration_sec, view_count, like_count,
+                tags, language, transcript, transcript_source, transcript_model,
+                transcript_cost_usd, transcript_timed_json,
+                fetched_at, transcribed_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(video_id) DO UPDATE SET
+                url=excluded.url,
+                title=excluded.title,
+                channel_id=excluded.channel_id,
+                channel_title=excluded.channel_title,
+                channel_url=excluded.channel_url,
+                description=excluded.description,
+                upload_date=excluded.upload_date,
+                duration_sec=excluded.duration_sec,
+                view_count=excluded.view_count,
+                like_count=excluded.like_count,
+                tags=excluded.tags,
+                language=excluded.language,
+                transcript=COALESCE(excluded.transcript, youtube_videos.transcript),
+                transcript_source=COALESCE(excluded.transcript_source, youtube_videos.transcript_source),
+                transcript_model=COALESCE(excluded.transcript_model, youtube_videos.transcript_model),
+                transcript_cost_usd=COALESCE(excluded.transcript_cost_usd, youtube_videos.transcript_cost_usd),
+                transcript_timed_json=COALESCE(excluded.transcript_timed_json, youtube_videos.transcript_timed_json),
+                fetched_at=excluded.fetched_at,
+                transcribed_at=COALESCE(excluded.transcribed_at, youtube_videos.transcribed_at)
+            """,
+            (
+                video_id,
+                url,
+                title,
+                channel_id,
+                channel_title,
+                channel_url,
+                description,
+                upload_date,
+                duration_sec,
+                view_count,
+                like_count,
+                tags_json,
+                language,
+                transcript,
+                transcript_source,
+                transcript_model,
+                transcript_cost_usd,
+                timed_json,
+                now,
+                transcribed_at,
+            ),
+        )
+        await self._conn.commit()
+
+    async def has_youtube_transcript(self, video_id: str) -> bool:
+        """Cheap exists-check for the cmd_analyze_youtube cache fast-path."""
+        cur = await self._conn.execute(
+            "SELECT 1 FROM youtube_videos WHERE video_id=? AND transcript IS NOT NULL LIMIT 1",
+            (video_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return row is not None
 
     # ----------------------------------------------- last-run-args (wizard)
 

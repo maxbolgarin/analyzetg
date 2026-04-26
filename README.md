@@ -234,10 +234,63 @@ command will fail with missing credentials. Two ways to avoid that:
 | Invite link | `https://t.me/+AbCdEf...` (add `--join` to join it) |
 | Numeric `chat_id` | `-1001234567890` or `1001234567890` |
 | Fuzzy title | `"Bull Trading"` — substring match across your dialogs |
+| YouTube URL | `https://www.youtube.com/watch?v=...` (see below) |
 
 The wizard's chat picker accepts non-Latin type-to-filter (Cyrillic,
 Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
 `finanças` works the same as `crypto`.
+
+### YouTube videos
+
+`atg analyze <youtube-url>` analyzes a single video end-to-end. Flow:
+
+1. yt-dlp fetches metadata (title, channel, duration, captions index).
+2. A summary panel shows up + an interactive picker asks for the
+   transcript source — captions (free), audio + Whisper (paid, with a
+   cost estimate), or cancel. Skipped when stdin isn't a TTY, when
+   `--yes` is passed, or when an explicit `--youtube-source` flag was set.
+3. Captions are fetched as VTT (or audio is downloaded → Whisper), and
+   each cue's start-second becomes that segment's `msg_id`.
+4. The bundled `video` preset runs over the time-stamped synthetic
+   messages. Citations land as `[#754](https://www.youtube.com/watch?v=ID&t=754s)`
+   — every citation in the report is a clickable jump to that moment.
+5. Re-runs hit the `youtube_videos` cache (metadata + transcript +
+   timed cues) — no yt-dlp, no Whisper, no LLM-side re-spend if cached.
+
+```bash
+# Interactive default: shows metadata + asks for source.
+atg analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"
+
+# Scripted (skip prompts, auto-pick captions / Whisper as needed):
+atg analyze "https://youtu.be/dQw4w9WgXcQ" --yes
+
+# Force Whisper (slower; ~$0.003/min):
+atg analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio
+
+# Different preset; see `atg analyze --help` for the full list.
+atg analyze "https://www.youtube.com/watch?v=..." --preset summary --console
+```
+
+Reports land under `reports/youtube/<channel-slug>/<video-slug>-<preset>-<ts>.md`.
+Default preset for YouTube is `video` (system prompt tuned for transcripts,
+time-stamped citations).
+
+Telegram videos / video-circles (single-message mode) auto-flag as
+`source_kind="video"` too: `=== Video: <title> ===` in the preamble and
+the LLM is told it's analyzing a video transcript, not a chat snippet.
+
+Supported URL shapes: `youtube.com/watch?v=…` (with arbitrary `&list=`,
+`start_radio`, `t=` params, all stripped), `youtu.be/`, `youtube.com/shorts/`,
+`youtube.com/embed/`, `youtube.com/live/`, `m.youtube.com`, `music.youtube.com`.
+Playlist-only and channel-only links are rejected with a clean error
+(playlist support is on the roadmap).
+
+Telegram-only flags (`--folder`, `--thread`, `--all-flat`, `--all-per-topic`,
+`--with-comments`, `--from-msg`, `--full-history`, `--since/--until/--last-days/--last-hours`,
+`--msg`, `--repeat-last`, `--mark-read`) are rejected for YouTube refs with
+a clear error.
+
+`atg doctor` warns if `yt-dlp` isn't installed.
 
 ---
 

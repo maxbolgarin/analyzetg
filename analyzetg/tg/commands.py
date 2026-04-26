@@ -163,6 +163,18 @@ async def cmd_doctor() -> None:
             "voice/videonote/video enrichment will skip; install ffmpeg or set [media] ffmpeg_path",
         )
 
+    # 3b. yt-dlp (YouTube analysis)
+    try:
+        import yt_dlp  # type: ignore[import-not-found]
+
+        _line(ok, "yt-dlp installed", getattr(yt_dlp, "__version__", "?"))
+    except ImportError:
+        _line(
+            warn,
+            "yt-dlp not installed",
+            "`atg analyze <youtube-url>` will fail; run `uv sync` to install",
+        )
+
     # 4. Storage paths + disk
     storage_dir = settings.storage.data_path.parent
     if storage_dir.exists():

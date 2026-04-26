@@ -206,3 +206,36 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value      TEXT NOT NULL,
     updated_at TIMESTAMP NOT NULL
 );
+
+-- One row per analyzed YouTube video. Reused across runs: a re-analyze of
+-- the same `video_id` skips both yt-dlp metadata and Whisper. Transcript
+-- is stored inline; the audio file itself is not retained.
+--
+-- `transcript_source` ∈ {'captions', 'audio'} captures whether the text
+-- came from YouTube's own captions (free) or Whisper transcription
+-- (Whisper model + cost recorded separately).
+CREATE TABLE IF NOT EXISTS youtube_videos (
+    video_id            TEXT PRIMARY KEY,
+    url                 TEXT NOT NULL,
+    title               TEXT,
+    channel_id          TEXT,
+    channel_title       TEXT,
+    channel_url         TEXT,
+    description         TEXT,
+    upload_date         TEXT,        -- yt-dlp returns YYYYMMDD; stored as-is
+    duration_sec        INTEGER,
+    view_count          INTEGER,
+    like_count          INTEGER,
+    tags                TEXT,        -- JSON array
+    language            TEXT,
+    transcript          TEXT,
+    transcript_source   TEXT,        -- 'captions' | 'audio'
+    transcript_model    TEXT,        -- whisper model id when source='audio'
+    transcript_cost_usd REAL,
+    transcript_timed_json TEXT,      -- JSON [[start_sec, "text"], …]; only for captions
+    fetched_at          TIMESTAMP NOT NULL,
+    transcribed_at      TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_youtube_channel
+    ON youtube_videos(channel_id, fetched_at);
