@@ -321,6 +321,59 @@ def test_video_preset_loads_for_both_languages() -> None:
     assert "video" in en_video.system.lower() or "transcript" in en_video.system.lower()
 
 
+def test_video_preset_has_chunk_cap() -> None:
+    """`max_chunk_input_tokens` cap on video preset prevents single-call TPM blowups."""
+    en_video = get_presets("en")["video"]
+    ru_video = get_presets("ru")["video"]
+    assert en_video.max_chunk_input_tokens is not None
+    assert en_video.max_chunk_input_tokens <= 100_000  # well under 200k TPM ceilings
+    assert ru_video.max_chunk_input_tokens == en_video.max_chunk_input_tokens
+
+
+def test_chunker_respects_max_chunk_input_tokens() -> None:
+    """A long transcript with the cap forces multi-chunk, even on a 400k-context model."""
+    from datetime import UTC, datetime
+
+    from analyzetg.analyzer.chunker import build_chunks
+    from analyzetg.models import Message
+
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    # 400 messages * ~150 words each => roughly 60k+ tokens — well under
+    # gpt-5.4-mini's 400k context (so without the cap it'd be a single
+    # chunk) but firmly above the 35k cap (so the cap forces a split).
+    msgs = [
+        Message(
+            chat_id=0,
+            msg_id=i,
+            date=base,
+            sender_name="x",
+            text="Lorem ipsum dolor sit amet consectetur adipiscing elit. " * 25,
+        )
+        for i in range(1, 401)
+    ]
+    # Without cap: 1 chunk on a 400k-context model.
+    plain = build_chunks(
+        msgs,
+        model="gpt-5.4-mini",
+        system_prompt="sys",
+        user_overhead="overhead",
+        output_budget=4000,
+        safety_margin=2000,
+    )
+    assert len(plain) == 1
+    # With a 35k cap: forced multi-chunk.
+    capped = build_chunks(
+        msgs,
+        model="gpt-5.4-mini",
+        system_prompt="sys",
+        user_overhead="overhead",
+        output_budget=4000,
+        safety_margin=2000,
+        max_chunk_input_tokens=35_000,
+    )
+    assert len(capped) >= 2
+
+
 def test_options_payload_is_telegram_back_compat() -> None:
     """Plain Telegram run (no youtube_video_id) keeps the field=None.
 

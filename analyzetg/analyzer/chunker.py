@@ -55,6 +55,7 @@ def build_chunks(
     safety_margin: int = 2000,
     soft_break_minutes: int = 30,
     soft_break_min_tokens: int = 500,
+    max_chunk_input_tokens: int | None = None,
 ) -> list[Chunk]:
     """Greedily pack messages into chunks under the model's token budget.
 
@@ -62,12 +63,24 @@ def build_chunks(
     `soft_break_minutes` AND the current chunk has at least
     `soft_break_min_tokens` worth of content, roll over into a new chunk
     even if the hard budget isn't full yet.
+
+    `max_chunk_input_tokens` (optional) is an extra cap *below* the model's
+    full context window. Use it to force map-reduce for huge inputs so a
+    single request doesn't blow per-minute TPM ceilings or wash out the
+    LLM's focus. None = use the full effective budget.
     """
     if not msgs:
         return []
     context = model_context_window(model)
     overhead = count_tokens(system_prompt, model) + count_tokens(user_overhead, model)
     budget = context - overhead - output_budget - safety_margin
+    if max_chunk_input_tokens is not None and max_chunk_input_tokens > 0:
+        # Subtract per-chunk overhead once — the cap should bound the
+        # *whole request* (system + user_overhead + body + output reserve),
+        # not just the body. Without this, a 35k cap on a request with
+        # ~3k of overhead silently lets through ~38k-token requests.
+        cap_budget = max_chunk_input_tokens - overhead - output_budget - safety_margin
+        budget = min(budget, max(2000, cap_budget))
     if budget < 2000:
         # Silently clamping to 500 here used to produce 200+ pathological
         # tiny chunks and a runaway bill. Surface the misconfiguration so

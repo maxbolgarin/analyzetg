@@ -240,6 +240,13 @@ class Preset:
     # individual chunks can produce richer mini-summaries without inflating
     # the final answer budget.
     map_output_tokens: int = 1500
+    # Hard cap on per-chunk *input* tokens, applied on TOP of the model's
+    # context window. Set this when a preset works with very long inputs
+    # (video transcripts) and you'd rather force map-reduce earlier than
+    # let one giant call hit per-minute TPM ceilings or wash out the LLM's
+    # focus. None = use the model's full effective budget. Typical values:
+    # 30_000-50_000 for video.
+    max_chunk_input_tokens: int | None = None
     # Short one-liner shown by the wizard's preset picker. Read from the
     # preset's frontmatter so adding a new preset is metadata-only.
     description: str | None = None
@@ -328,6 +335,8 @@ def _load_preset_file(path: Path, *, language: str = "en") -> Preset:
             f"Preset {path}: frontmatter name {name!r} does not match filename stem "
             f"{path.stem!r}. Rename the file or update the name field so the two match."
         )
+    max_chunk_raw = meta.get("max_chunk_input_tokens")
+    max_chunk_input_tokens = int(max_chunk_raw) if max_chunk_raw else None
     return Preset(
         name=name,
         prompt_version=meta.get("prompt_version", "v1"),
@@ -338,6 +347,7 @@ def _load_preset_file(path: Path, *, language: str = "en") -> Preset:
         final_model=meta.get("final_model", "gpt-5.4"),
         output_budget_tokens=int(meta.get("output_budget_tokens", "1500")),
         map_output_tokens=int(meta.get("map_output_tokens", "1500")),
+        max_chunk_input_tokens=max_chunk_input_tokens,
         description=meta.get("description") or None,
         enrich_kinds=_coerce_list(meta.get("enrich", "")),
     )
@@ -480,6 +490,8 @@ def load_custom_preset(prompt_file: Path, *, language: str = "en") -> Preset:
     _validate_user_template(user_instr, path=prompt_file)
 
     version = meta.get("prompt_version") or "custom-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+    custom_max_chunk_raw = meta.get("max_chunk_input_tokens")
+    custom_max_chunk = int(custom_max_chunk_raw) if custom_max_chunk_raw else None
     return Preset(
         name=meta.get("name", "custom"),
         prompt_version=version,
@@ -490,6 +502,7 @@ def load_custom_preset(prompt_file: Path, *, language: str = "en") -> Preset:
         final_model=meta.get("final_model", "gpt-5.4"),
         output_budget_tokens=int(meta.get("output_budget_tokens", "1500")),
         map_output_tokens=int(meta.get("map_output_tokens", "1500")),
+        max_chunk_input_tokens=custom_max_chunk,
         description=meta.get("description") or None,
         enrich_kinds=_coerce_list(meta.get("enrich", "")),
     )

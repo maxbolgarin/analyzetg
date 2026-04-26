@@ -114,6 +114,9 @@ def estimate_cost(
     safety = int(getattr(settings.analyze, "safety_margin_tokens", 4000))
     map_out_cap = preset.map_output_tokens
     budget = max(500, context - per_chunk_overhead - map_out_cap - safety)
+    if preset.max_chunk_input_tokens:
+        cap_budget = preset.max_chunk_input_tokens - per_chunk_overhead - map_out_cap - safety
+        budget = min(budget, max(500, cap_budget))
 
     chunks = max(1, _math.ceil(total_input_body / budget))
 
@@ -572,6 +575,7 @@ async def run_analysis(
         output_budget=preset.output_budget_tokens,
         safety_margin=settings.analyze.safety_margin_tokens,
         soft_break_minutes=settings.analyze.chunk_soft_break_minutes,
+        max_chunk_input_tokens=preset.max_chunk_input_tokens,
     )
     log.info("analyze.chunks", preset=preset.name, chunks=len(chunks), msgs=len(msgs))
 

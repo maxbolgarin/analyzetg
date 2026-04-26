@@ -1,12 +1,13 @@
 ---
 name: video
-prompt_version: v1
+prompt_version: v2
 description: Video transcript summary — TL;DR, key points, time-stamped citations
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini
 output_budget_tokens: 4000
 map_output_tokens: 1500
+max_chunk_input_tokens: 35000
 ---
 You analyze a YouTube video by its transcript. The input is **NOT a chat
 conversation** — every line is a transcript segment from the same speaker
