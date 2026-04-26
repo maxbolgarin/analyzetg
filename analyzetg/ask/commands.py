@@ -118,6 +118,43 @@ def _validate_scope_args(
         raise typer.BadParameter(f"Cannot combine {' and '.join(set_args)}; pick one scope.")
 
 
+async def _ask_continue() -> bool:
+    """Single-keypress 'Continue chatting?' prompt.
+
+    Bindings: Enter / y → continue (True); n / Esc / Ctrl-C / Ctrl-D →
+    exit (False). Default is continue — the user just got an answer
+    and Enter should naturally move to the next turn.
+    """
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("y")
+    @kb.add("Y")
+    @kb.add("enter")
+    def _continue(event):
+        event.app.exit(result=True)
+
+    @kb.add("n")
+    @kb.add("N")
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    @kb.add("c-d")
+    def _exit(event):
+        event.app.exit(result=False)
+
+    label = _t("ask_continue_q")
+    console.print(f"[bold cyan]{label}[/] [dim](Enter/y to continue, n/Esc to exit)[/] ", end="")
+    session: PromptSession = PromptSession()
+    try:
+        result = await session.prompt_async("", key_bindings=kb)
+    except (EOFError, KeyboardInterrupt):
+        result = False
+    console.print()  # newline after the keypress
+    return bool(result)
+
+
 async def cmd_ask(
     *,
     question: str | None,
@@ -456,8 +493,10 @@ async def cmd_ask(
         if no_followup:
             return
 
-        # Post-answer prompt (default no): "Continue chatting?"
-        if not typer.confirm(_t("ask_continue_q"), default=False):
+        # Post-answer prompt — Enter or `y` continues, `n` or Esc exits.
+        # Default = continue (the user just got an answer; the cheap path
+        # is "press Enter for more").
+        if not await _ask_continue():
             return
 
         # User opted in → drop into the multi-turn follow-up loop.
@@ -468,11 +507,21 @@ async def cmd_ask(
         # supports Cyrillic / non-ASCII typing out of the box.
         from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.key_binding import KeyBindings
 
         console.print(
-            "\n[bold cyan]Interactive mode[/] — type a follow-up question (blank or Ctrl-D to exit)."
+            "\n[bold cyan]Interactive mode[/] — type a follow-up question (Esc / blank / Ctrl-D to exit)."
         )
-        prompt_session: PromptSession = PromptSession()
+        # Esc inside the loop's input → submit empty → break (consistent
+        # with blank Enter). Without this binding, prompt_toolkit's
+        # default Esc starts an emacs meta-key prefix and doesn't exit.
+        loop_kb = KeyBindings()
+
+        @loop_kb.add("escape", eager=True)
+        def _(event):
+            event.app.exit(result="")
+
+        prompt_session: PromptSession = PromptSession(key_bindings=loop_kb)
 
         while True:
             try:
