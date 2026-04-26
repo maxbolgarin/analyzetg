@@ -50,7 +50,11 @@ USER_MARKER = "---USER---"
 # old `content_language` informational hint (redundant now that prompts
 # are natively in content_language). Cached rows from v4 used the old
 # meaning and must be re-run.
-BASE_VERSION = "v5"
+# v6: _base.md generalized from "Telegram chats" to "chat OR video
+# transcript" — adds a video addendum block and timestamp-aware citation
+# guidance. compose_system_prompt now takes `source_kind`. Cached rows
+# from v5 are still semantically valid for chats but get re-keyed.
+BASE_VERSION = "v6"
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +414,7 @@ def compose_system_prompt(
     *,
     topic_titles: dict[int, str] | None = None,
     language: str = "en",
+    source_kind: str = "chat",
 ) -> str:
     """Merge the shared base rules with a preset-specific system prompt.
 
@@ -418,6 +423,12 @@ def compose_system_prompt(
     in `pipeline.run_analysis` pass `content_language` (not the UI
     `language`) so the LLM gets a natively-language prompt while the UI
     can be in something else.
+
+    `source_kind` ∈ {"chat", "video"} hints whether the input is a
+    chat / forum stream or a video transcript. Drives the preamble's
+    label ("Chat:" vs. "Video:") in `format_messages` /
+    `chat_header_preamble`. The base prompt itself is source-neutral
+    since v6 — no per-kind system addendum is appended here.
 
     Order of concatenation matters for the model:
       1. BASE — global rules (citation format, reactions, media tags,
@@ -430,6 +441,7 @@ def compose_system_prompt(
     Build order is `system → static_context → dynamic` (CLAUDE.md
     invariant #2) — unchanged.
     """
+    _ = source_kind  # currently informational; preset bodies handle kind-specific guidance
     parts: list[str] = [_load_base_system(language)]
     if topic_titles:
         parts.append(_FORUM_CONTEXT.get(language, _FORUM_CONTEXT["en"]))

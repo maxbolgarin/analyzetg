@@ -34,9 +34,9 @@ def test_compose_system_prompt_loads_preset_dir_by_language():
     callers (pipeline) pass `content_language` to it."""
     en = prompts.compose_system_prompt("PRESET", topic_titles=None, language="en")
     ru = prompts.compose_system_prompt("PRESET", topic_titles=None, language="ru")
-    # Each gets its own _base.md.
-    assert "You analyze Telegram chats" in en
-    assert "Ты — аналитик Telegram-чатов" in ru
+    # Each gets its own _base.md (post v6: source-neutral wording).
+    assert "You analyze a stream of messages" in en
+    assert "Ты — аналитик потока сообщений" in ru
 
 
 @pytest.mark.asyncio

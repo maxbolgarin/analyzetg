@@ -654,6 +654,15 @@ def analyze(
             "but the report should be in another."
         ),
     ),
+    youtube_source: str = typer.Option(
+        "auto",
+        "--youtube-source",
+        help=(
+            "YouTube transcript source: auto (captions, fallback to Whisper), "
+            "captions (fail if none), audio (always Whisper). Used only when "
+            "<ref> is a YouTube URL."
+        ),
+    ),
 ) -> None:
     """Analyze a chat. Default window = messages since your Telegram read marker.
 
@@ -706,6 +715,7 @@ def analyze(
             with_comments=with_comments,
             language=language,
             content_language=content_language,
+            youtube_source=youtube_source,
         )
     )
 
