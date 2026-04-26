@@ -198,7 +198,8 @@ class InteractiveAnswers:
     # `None` only in ask mode (preset is meaningless there); analyze mode
     # always sets this and dump mode falls back to the existing default.
     preset: str | None
-    # Period keys: "unread" | "last7" | "last30" | "full" | "custom" | "from_msg"
+    # Period keys: "unread" | "last24h" | "last96h" | "last7" | "last30" |
+    # "last90" | "year_start" | "full" | "custom" | "from_msg"
     period: str
     custom_since: str | None
     custom_until: str | None
@@ -241,10 +242,19 @@ def _period_to_db_filters(
         marker = int(chat.get("read_inbox_max_id") or 0)
         if marker > 0:
             out["min_msg_id"] = marker
+    elif period == "last24h":
+        out["since"] = datetime.now(UTC) - timedelta(hours=24)
+    elif period == "last96h":
+        out["since"] = datetime.now(UTC) - timedelta(hours=96)
     elif period == "last7":
         out["since"] = datetime.now(UTC) - timedelta(days=7)
     elif period == "last30":
         out["since"] = datetime.now(UTC) - timedelta(days=30)
+    elif period == "last90":
+        out["since"] = datetime.now(UTC) - timedelta(days=90)
+    elif period == "year_start":
+        now_utc = datetime.now(UTC)
+        out["since"] = datetime(now_utc.year, 1, 1, tzinfo=UTC)
     elif period == "custom":
         if custom_since:
             out["since"] = datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
@@ -274,14 +284,25 @@ def _build_period_kwargs(answers: InteractiveAnswers, *, include_from_msg: bool)
     don't drift on period semantics.
     """
     last_days: int | None = None
+    last_hours: int | None = None
     full_history = False
     since: str | None = None
     until: str | None = None
     from_msg: str | None = None
-    if answers.period == "last7":
+    if answers.period == "last24h":
+        last_hours = 24
+    elif answers.period == "last96h":
+        last_hours = 96
+    elif answers.period == "last7":
         last_days = 7
     elif answers.period == "last30":
         last_days = 30
+    elif answers.period == "last90":
+        last_days = 90
+    elif answers.period == "year_start":
+        # `since=YYYY-01-01` flows through CLI's --since path; UTC-midnight
+        # parse happens in core.paths.parse_ymd.
+        since = f"{datetime.now(UTC).year}-01-01"
     elif answers.period == "full":
         full_history = True
     elif answers.period == "custom":
@@ -291,6 +312,7 @@ def _build_period_kwargs(answers: InteractiveAnswers, *, include_from_msg: bool)
         from_msg = answers.custom_from_msg
     out: dict[str, Any] = {
         "last_days": last_days,
+        "last_hours": last_hours,
         "full_history": full_history,
         "since": since,
         "until": until,
@@ -515,10 +537,18 @@ def _period_to_cli_kwargs(answers: InteractiveAnswers) -> dict[str, Any]:
     --from-msg, so those wizard choices collapse to "no period filter".
     """
     p = answers.period
+    if p == "last24h":
+        return {"last_hours": 24}
+    if p == "last96h":
+        return {"last_hours": 96}
     if p == "last7":
         return {"last_days": 7}
     if p == "last30":
         return {"last_days": 30}
+    if p == "last90":
+        return {"last_days": 90}
+    if p == "year_start":
+        return {"since": f"{datetime.now(UTC).year}-01-01"}
     if p == "custom":
         return {"since": answers.custom_since, "until": answers.custom_until}
     if p == "from_msg":
@@ -544,6 +574,7 @@ async def run_interactive_ask(
     no_followup: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    mark_read: bool | None = None,
 ) -> None:
     """Default UX for `atg ask` (no <ref>, no --chat/--folder/--global).
 
@@ -551,12 +582,31 @@ async def run_interactive_ask(
     picked scope. The wizard never builds the embeddings index or
     invokes --build-index — that's an explicit user decision.
     """
+    # If no question was supplied (bare `atg ask`), prompt for one now.
+    # `_collect_answers(mode="ask")` only uses the question for the
+    # confirm-step summary; it doesn't ask the user for it.
+    # Ctrl-D / Ctrl-C / blank input cancels the run cleanly.
+    if not question.strip():
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import HTML
+
+        session: PromptSession = PromptSession()
+        console.print(f"[bold cyan]{i18n_t('wiz_ask_question_prompt')}[/]")
+        try:
+            question = (await session.prompt_async(HTML("<ansicyan>?</ansicyan> "))).strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            return
+        if not question:
+            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            return
+
     answers = await _collect_answers(
         mode="ask",
         console_out=console_out,
         output=output,
         save_default=False,
-        mark_read=None,
+        mark_read=mark_read,
         question=question,
     )
     if answers is None:
@@ -570,8 +620,19 @@ async def run_interactive_ask(
     if answers.chat_ref:  # non-empty ref → use it
         chat_arg = answers.chat_ref
 
-    # TODO(task-4): add ref/global_scope/no_followup parameters on cmd_ask;
-    # until then, `run_interactive_ask` is unreachable from the live CLI.
+    # Wizard mode always backfills the picked chat from Telegram before
+    # retrieval — the user just stepped through a flow expecting fresh
+    # answers, not whatever's stale in the local DB. ALL_LOCAL skips this
+    # (no chat list to refresh; explicit local-only path).
+    effective_refresh = refresh or chat_arg is not None
+
+    enrich_kwargs = _build_enrich_kwargs(answers)
+
+    # Mark-read is only meaningful when a specific chat is picked. ALL_LOCAL
+    # has no single chat to mark, so suppress it there even if the user
+    # ticked "yes" (the wizard step is skipped for ALL_LOCAL anyway).
+    effective_mark_read: bool | None = None if answers.run_on_all_local else answers.mark_read
+
     await cmd_ask(
         question=question,
         ref=None,
@@ -579,7 +640,7 @@ async def run_interactive_ask(
         thread=answers.thread_id,
         folder=None,
         global_scope=answers.run_on_all_local,
-        refresh=refresh,
+        refresh=effective_refresh,
         semantic=semantic,
         rerank=rerank,
         limit=limit,
@@ -594,6 +655,8 @@ async def run_interactive_ask(
         language=language,
         content_language=content_language,
         build_index=False,
+        mark_read=effective_mark_read,
+        **enrich_kwargs,
         **period_kwargs,
     )
 
@@ -612,10 +675,11 @@ async def _collect_answers(
     `mode` controls which steps appear:
       - "analyze" walks chat → [comments|thread] → preset → period → enrich → output → mark_read → confirm.
       - "dump" skips preset.
-      - "ask" skips preset / enrich / output / mark_read; runs chat → [comments|thread] → period → confirm.
+      - "ask" skips preset / output; runs chat → [comments|thread] → period → enrich → mark_read → confirm.
         Ask mode also offers an "ALL synced chats (local DB)" row in the
         chat picker; picking it sets `run_on_all_local=True` and jumps
-        straight to period (no thread / comments).
+        straight to period (no thread / comments). ALL_LOCAL also skips
+        the mark_read step (no single chat to mark).
 
     CLI flags pre-fill steps and skip the corresponding prompt:
       - `console_out`, `output`, or `save_default` → skip the output step.
@@ -670,11 +734,13 @@ async def _collect_answers(
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
         chosen_output_path: Path | None = output
-        # Default mark-read to True in the wizard: if the user ran analyze
-        # on unread messages they've effectively "seen" them now, so
-        # advancing Telegram's read marker matches intent. CLI
-        # `--no-mark-read` can still override.
-        chosen_mark_read: bool = bool(mark_read) if mark_read is not None else True
+        # Default mark-read to True in the wizard for analyze/dump: if the
+        # user ran analyze on unread messages they've effectively "seen"
+        # them now, so advancing Telegram's read marker matches intent.
+        # Ask mode defaults to False — answering a question is often
+        # exploratory and shouldn't silently consume the unread state.
+        # CLI `--mark-read` / `--no-mark-read` can still override.
+        chosen_mark_read = bool(mark_read) if mark_read is not None else (mode != "ask")
         # Per-period message counts for the current chat (filled once we
         # know the chat and, for forums, the thread). Used by `_pick_period`
         # to decorate choices and by the confirm step to estimate cost.
@@ -685,15 +751,19 @@ async def _collect_answers(
         step = "chat"
         while True:
             if step == "chat":
+                # Reset flags from any prior chat-step iteration. Without
+                # this, picking ALL_UNREAD/ALL_LOCAL, then pressing BACK
+                # at a downstream step (e.g. period) and picking a real
+                # chat would leave the run-on-all flags stuck True and
+                # corrupt the returned answers.
+                run_on_all = False
+                run_on_all_local = False
+                chat = None
+                linked_chat_id = None
                 # Ask mode swaps "Run on all N unread" for "Search ALL
                 # synced chats (local DB)" — the analyze/dump batch flow
                 # doesn't make sense for ask (one question across many
                 # chats is the global ALL_LOCAL path).
-                # NOTE: when the user has zero unread dialogs, _pick_chat
-                # early-returns to _pick_from_all BEFORE the offer_all_local
-                # block runs, so the ALL_LOCAL row is hidden in exactly the
-                # case where ask-mode users would want it most. Tracked for
-                # a follow-up task; not fixed here.
                 result = await _pick_chat(
                     client,
                     offer_all_unread=(mode != "ask"),
@@ -863,8 +933,12 @@ async def _collect_answers(
                         since=datetime.strptime(custom_since, "%Y-%m-%d") if custom_since else None,
                         until=datetime.strptime(custom_until, "%Y-%m-%d") if custom_until else None,
                     )
-                # Ask mode skips enrich/output/mark_read entirely.
-                step = "confirm" if mode == "ask" else "enrich"
+                # Ask mode skips output/mark_read but keeps enrich (so
+                # voice/image/link content becomes searchable mid-flow).
+                # Exception: ALL_LOCAL (run_on_all_local) skips enrich
+                # because cmd_ask refuses to enrich every synced chat —
+                # showing the picker would mislead the user.
+                step = "confirm" if mode == "ask" and run_on_all_local else "enrich"
 
             elif step == "enrich":
                 # Runs for both analyze and dump so media-to-text
@@ -910,8 +984,14 @@ async def _collect_answers(
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 enrich_kinds = list(result) if isinstance(result, list) else None
-                # Output step is next unless the user already set it via CLI.
-                step = "mark_read" if output_forced else "output"
+                # Ask mode skips output but still asks about mark-read when
+                # a single chat is picked (ALL_LOCAL is a no-op since
+                # there's no single chat to mark, and CLI passing
+                # --mark-read/--no-mark-read also suppresses the step).
+                if mode == "ask":
+                    step = "confirm" if (run_on_all_local or mark_read_forced) else "mark_read"
+                else:
+                    step = "mark_read" if output_forced else "output"
 
             elif step == "output":
                 result = await _pick_output(
@@ -932,7 +1012,12 @@ async def _collect_answers(
             elif step == "mark_read":
                 result = await _pick_mark_read(default=chosen_mark_read)
                 if result is BACK:
-                    if output_forced:
+                    if mode == "ask":
+                        # Ask mode goes enrich → mark_read → confirm
+                        # (skipping output entirely). BACK from mark_read
+                        # returns to enrich.
+                        step = "enrich"
+                    elif output_forced:
                         # No output step → go back to enrich (or preset/chat
                         # for run-on-all where period+enrich are skipped).
                         step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
@@ -963,15 +1048,16 @@ async def _collect_answers(
                     summary_bits.append(i18n_t("wiz_plan_per_topic"))
                 if mode == "analyze":
                     summary_bits.append(i18n_tf("wiz_plan_preset_kv", preset=preset))
-                    # Show the enrichment choice explicitly so the user can
-                    # sanity-check it before spending — the step happens early
-                    # in the wizard and is easy to forget by the time we hit
-                    # confirm.
-                    if enrich_kinds is not None:
-                        if enrich_kinds:
-                            summary_bits.append(i18n_tf("wiz_plan_enrich_kv", kinds=",".join(enrich_kinds)))
-                        else:
-                            summary_bits.append(i18n_t("wiz_plan_enrich_none"))
+                # Show the enrichment choice explicitly so the user can
+                # sanity-check it before spending — the step happens early
+                # in the wizard and is easy to forget by the time we hit
+                # confirm. Applies to analyze, dump, and ask (all three
+                # walk through the enrich step now).
+                if enrich_kinds is not None and not run_on_all:
+                    if enrich_kinds:
+                        summary_bits.append(i18n_tf("wiz_plan_enrich_kv", kinds=",".join(enrich_kinds)))
+                    else:
+                        summary_bits.append(i18n_t("wiz_plan_enrich_none"))
                 if not run_on_all:
                     summary_bits.append(i18n_tf("wiz_plan_period_kv", period=period))
                     if period == "custom":
@@ -986,7 +1072,11 @@ async def _collect_answers(
                         )
                     elif period == "from_msg" and custom_from_msg:
                         summary_bits.append(i18n_tf("wiz_plan_from", ref=custom_from_msg))
-                # Ask mode skips output / mark_read summary lines entirely.
+                # Ask mode skips the output line (no save step) but DOES
+                # surface the mark-read pick when applicable — single-chat
+                # ask scope is the only case it matters, and ALL_LOCAL
+                # skips the step entirely so chosen_mark_read stays at its
+                # CLI / default value (False) and isn't shown.
                 if mode != "ask":
                     summary_bits.append(
                         i18n_t("wiz_plan_console")
@@ -999,6 +1089,9 @@ async def _collect_answers(
                     )
                     if chosen_mark_read:
                         summary_bits.append(i18n_t("wiz_plan_mark_read"))
+                elif not run_on_all_local and chosen_mark_read:
+                    # ask + single-chat scope only: report the toggle.
+                    summary_bits.append(i18n_t("wiz_plan_mark_read"))
                 # Question is supplied by the ask CLI on the side; show it
                 # here so the user sees what they're about to ask.
                 if mode == "ask" and question:
@@ -1082,9 +1175,17 @@ async def _collect_answers(
                     return None
                 if choice is BACK:
                     if mode == "ask":
-                        # Ask mode confirm always backs to period (no
-                        # output/mark_read steps were ever shown).
-                        step = "period"
+                        # Ask mode walks period → enrich → mark_read →
+                        # confirm (output step always skipped). ALL_LOCAL
+                        # skips both enrich and mark_read so it backs all
+                        # the way to period. CLI --mark-read/--no-mark-read
+                        # suppresses the mark_read step (back to enrich).
+                        if run_on_all_local:
+                            step = "period"
+                        elif mark_read_forced:
+                            step = "enrich"
+                        else:
+                            step = "mark_read"
                     elif mark_read_forced:
                         step = (
                             "output"
@@ -1220,12 +1321,32 @@ async def _fetch_period_counts(
             return None
 
     latest_task = _latest_msg_id()
+    last24h_start_task = _first_id_after(now - timedelta(hours=24))
+    last96h_start_task = _first_id_after(now - timedelta(hours=96))
     last7_start_task = _first_id_after(now - timedelta(days=7))
     last30_start_task = _first_id_after(now - timedelta(days=30))
+    last90_start_task = _first_id_after(now - timedelta(days=90))
+    year_start_task = _first_id_after(datetime(now.year, 1, 1, tzinfo=UTC))
     full_start_task = _first_id_after(None)
 
-    latest, last7_start, last30_start, full_start = await _asyncio.gather(
-        latest_task, last7_start_task, last30_start_task, full_start_task
+    (
+        latest,
+        last24h_start,
+        last96h_start,
+        last7_start,
+        last30_start,
+        last90_start,
+        year_start_id,
+        full_start,
+    ) = await _asyncio.gather(
+        latest_task,
+        last24h_start_task,
+        last96h_start_task,
+        last7_start_task,
+        last30_start_task,
+        last90_start_task,
+        year_start_task,
+        full_start_task,
     )
 
     def _count(start: int | None) -> int | None:
@@ -1234,8 +1355,12 @@ async def _fetch_period_counts(
         return max(0, latest - start + 1)
 
     out: dict[str, int | None] = {
+        "last24h": _count(last24h_start),
+        "last96h": _count(last96h_start),
         "last7": _count(last7_start),
         "last30": _count(last30_start),
+        "last90": _count(last90_start),
+        "year_start": _count(year_start_id),
         "full": _count(full_start),
         # For "unread" we already have a hint from the dialog row.
         "unread": unread_hint if unread_hint else None,
@@ -1244,7 +1369,7 @@ async def _fetch_period_counts(
     # period it falls inside (best-effort — unread_hint is server-authoritative
     # and trumps our approximation, so we only clamp the other direction).
     if out.get("full") is not None:
-        for key in ("last7", "last30"):
+        for key in ("last24h", "last96h", "last7", "last30", "last90", "year_start"):
             if out[key] is not None and out[key] > out["full"]:
                 out[key] = out["full"]
     if out.get("unread") is not None and out.get("full") is not None and out["unread"] > out["full"]:
@@ -1510,7 +1635,11 @@ async def _pick_chat(
 
     if not unread:
         console.print(f"[yellow]{i18n_t('wiz_no_unread_showing_all')}[/]")
-        return await _pick_from_all(client, subscribed_ids=sub_set)
+        return await _pick_from_all(
+            client,
+            subscribed_ids=sub_set,
+            offer_all_local=offer_all_local,
+        )
 
     # Folder index: empty dict if the user hasn't defined any folders or
     # the lookup fails (we don't want to abort the picker over a side-info
@@ -1615,11 +1744,22 @@ async def _pick_chat(
     }
 
 
-async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> dict | None:
+async def _pick_from_all(
+    client,
+    *,
+    subscribed_ids: set[int] | None = None,
+    offer_all_local: bool = False,
+) -> dict | None | object:
     """Scan every dialog and present a searchable list.
 
     `subscribed_ids` prefixes each subscribed row with a `★` so the
     `atg chats add` flow shows what's already on the subscription list.
+
+    `offer_all_local` (used by the ask wizard) prepends a "Search ALL
+    synced chats (local DB)" row that returns the `ALL_LOCAL` sentinel.
+    Honouring it here matters for the zero-unread fallback: `_pick_chat`
+    short-circuits to this helper when there are no unread dialogs, and
+    that's exactly when ask-wizard users most want the option.
     """
     from analyzetg.tg.client import _chat_kind, entity_id, entity_title, entity_username
     from analyzetg.tg.dialogs import UnreadDialog, correct_forum_unread
@@ -1683,7 +1823,18 @@ async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> d
     # iter_dialogs here without extra fetches — leave it blank.
     sub_set = subscribed_ids or set()
     header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'folder':<{_COL_FOLDER}}    title"
-    choices: list[Any] = [questionary.Separator(header_line)]
+    choices: list[Any] = []
+    # ALL_LOCAL sits above the table so the ask-wizard's no-scope path
+    # is reachable here too — see the zero-unread fallback in _pick_chat.
+    if offer_all_local:
+        choices.append(
+            questionary.Choice(
+                title=i18n_t("wiz_ask_all_local"),
+                value=ALL_LOCAL,
+            )
+        )
+        choices.append(questionary.Separator())
+    choices.append(questionary.Separator(header_line))
     choices.extend(
         questionary.Choice(
             title=(
@@ -1709,6 +1860,13 @@ async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> d
         ),
         None,
     ).ask_async()
+    # ALL_LOCAL is a sentinel object — short-circuit before the dict
+    # access so the ask wizard's no-scope path is reachable from here.
+    if picked is ALL_LOCAL:
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: [bold]{i18n_t('wiz_ask_all_local')}[/]"
+        )
+        return ALL_LOCAL
     if picked is not None:
         _replace_last_line(
             f"[bold cyan]?[/] chat: [bold]{picked['title'] or picked['chat_id']}[/] "
@@ -2073,8 +2231,12 @@ async def _pick_period(
 
     options: list[Any] = [
         questionary.Choice(title=_label(i18n_t("wiz_period_unread"), "unread"), value="unread"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last24h"), "last24h"), value="last24h"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last96h"), "last96h"), value="last96h"),
         questionary.Choice(title=_label(i18n_t("wiz_period_last7"), "last7"), value="last7"),
         questionary.Choice(title=_label(i18n_t("wiz_period_last30"), "last30"), value="last30"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_last90"), "last90"), value="last90"),
+        questionary.Choice(title=_label(i18n_t("wiz_period_year_start"), "year_start"), value="year_start"),
         questionary.Choice(title=_label(i18n_t("wiz_period_full"), "full"), value="full"),
     ]
     if not static_only:
@@ -2098,8 +2260,12 @@ async def _pick_period(
         return BACK
     _period_label_keys = {
         "unread": "wiz_summary_period_unread",
+        "last24h": "wiz_summary_period_last24h",
+        "last96h": "wiz_summary_period_last96h",
         "last7": "wiz_summary_period_last7",
         "last30": "wiz_summary_period_last30",
+        "last90": "wiz_summary_period_last90",
+        "year_start": "wiz_summary_period_year_start",
         "full": "wiz_summary_period_full",
         "custom": "wiz_summary_period_custom",
         "from_msg": "wiz_summary_period_from_msg",

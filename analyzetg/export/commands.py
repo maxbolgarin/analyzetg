@@ -83,8 +83,9 @@ async def cmd_dump(
     since: str | None,
     until: str | None,
     last_days: int | None,
-    full_history: bool,
-    thread: int | None,
+    last_hours: int | None = None,
+    full_history: bool = False,
+    thread: int | None = None,
     from_msg: str | None,
     join: bool,
     with_transcribe: bool,
@@ -125,6 +126,7 @@ async def cmd_dump(
                 ("--since", bool(since)),
                 ("--until", bool(until)),
                 ("--last-days", last_days is not None),
+                ("--last-hours", last_hours is not None),
                 ("--from-msg", bool(from_msg)),
             )
             if present
@@ -191,7 +193,7 @@ async def cmd_dump(
     )
 
     settings = get_settings()
-    since_dt, until_dt = _compute_window(since, until, last_days)
+    since_dt, until_dt = _compute_window(since, until, last_days, last_hours)
     from_msg_id = _parse_from_msg(from_msg)
 
     # Parse save_media_types CSV once; None → all kinds.

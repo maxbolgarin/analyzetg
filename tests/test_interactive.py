@@ -219,3 +219,90 @@ async def test_dump_all_unread_wizard_skips_second_confirm_and_forwards_enrich(m
     assert captured["yes"] is True
     assert captured["enrich"] == "image"
     assert captured["mark_read"] is True
+
+
+# --- New period options: last24h / last96h / last90 / year_start ----------
+
+
+def test_last24h_sets_last_hours_for_analyze() -> None:
+    kw = build_analyze_args(_answers(period="last24h"))
+    assert kw["last_hours"] == 24
+    assert kw["last_days"] is None
+    assert kw["full_history"] is False
+    assert kw["since"] is None and kw["until"] is None
+
+
+def test_last96h_sets_last_hours_for_analyze() -> None:
+    kw = build_analyze_args(_answers(period="last96h"))
+    assert kw["last_hours"] == 96
+    assert kw["last_days"] is None
+    assert kw["full_history"] is False
+
+
+def test_last90_sets_last_days_for_analyze() -> None:
+    kw = build_analyze_args(_answers(period="last90"))
+    assert kw["last_days"] == 90
+    assert kw["last_hours"] is None
+    assert kw["full_history"] is False
+
+
+def test_year_start_sets_since_to_jan1_for_analyze() -> None:
+    from datetime import UTC, datetime
+
+    kw = build_analyze_args(_answers(period="year_start"))
+    expected = f"{datetime.now(UTC).year}-01-01"
+    assert kw["since"] == expected
+    assert kw["until"] is None
+    assert kw["last_days"] is None
+    assert kw["last_hours"] is None
+    assert kw["full_history"] is False
+
+
+def test_dump_period_flags_passthrough_for_new_options() -> None:
+    kw24 = build_dump_args(_answers(period="last24h"), **_dump_kwargs())
+    assert kw24["last_hours"] == 24
+    kw96 = build_dump_args(_answers(period="last96h"), **_dump_kwargs())
+    assert kw96["last_hours"] == 96
+    kw90 = build_dump_args(_answers(period="last90"), **_dump_kwargs())
+    assert kw90["last_days"] == 90
+    from datetime import UTC, datetime
+
+    kwy = build_dump_args(_answers(period="year_start"), **_dump_kwargs())
+    assert kwy["since"] == f"{datetime.now(UTC).year}-01-01"
+
+
+def test_period_to_cli_kwargs_for_ask_new_options() -> None:
+    from datetime import UTC, datetime
+
+    from analyzetg.interactive import _period_to_cli_kwargs
+
+    assert _period_to_cli_kwargs(_answers(period="last24h")) == {"last_hours": 24}
+    assert _period_to_cli_kwargs(_answers(period="last96h")) == {"last_hours": 96}
+    assert _period_to_cli_kwargs(_answers(period="last90")) == {"last_days": 90}
+    expected_since = f"{datetime.now(UTC).year}-01-01"
+    assert _period_to_cli_kwargs(_answers(period="year_start")) == {"since": expected_since}
+
+
+def test_period_to_db_filters_for_new_options() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from analyzetg.interactive import _period_to_db_filters
+
+    base = {"custom_since": None, "custom_until": None, "custom_from_msg": None, "chat": None}
+    now = datetime.now(UTC)
+
+    out24 = _period_to_db_filters(period="last24h", **base)
+    assert out24["since"].tzinfo is UTC
+    delta24 = now - out24["since"]
+    assert timedelta(hours=23, minutes=55) <= delta24 <= timedelta(hours=24, minutes=5)
+
+    out96 = _period_to_db_filters(period="last96h", **base)
+    delta96 = now - out96["since"]
+    assert timedelta(hours=95, minutes=55) <= delta96 <= timedelta(hours=96, minutes=5)
+
+    out90 = _period_to_db_filters(period="last90", **base)
+    delta90 = now - out90["since"]
+    assert timedelta(days=89, hours=23) <= delta90 <= timedelta(days=90, hours=1)
+
+    out_y = _period_to_db_filters(period="year_start", **base)
+    assert out_y["since"] == datetime(now.year, 1, 1, tzinfo=UTC)

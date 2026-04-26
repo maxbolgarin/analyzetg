@@ -92,15 +92,81 @@ def _resolve_system_prompt(language: str) -> str:
     return _SYSTEM_PROMPT.get(language, _SYSTEM_PROMPT["en"])
 
 
+def _validate_scope_args(
+    *,
+    ref: str | None,
+    chat: str | None,
+    folder: str | None,
+    global_scope: bool,
+) -> None:
+    """Reject impossible scope combinations early with a readable message.
+
+    A scope is "set" when its argument is non-None / True. At most one of
+    {ref, chat, folder, global} may be set; setting two raises
+    BadParameter naming both. None set is fine — caller routes to wizard.
+    """
+    set_args = []
+    if ref is not None:
+        set_args.append("ref")
+    if chat is not None:
+        set_args.append("--chat")
+    if folder is not None:
+        set_args.append("--folder")
+    if global_scope:
+        set_args.append("--global")
+    if len(set_args) > 1:
+        raise typer.BadParameter(f"Cannot combine {' and '.join(set_args)}; pick one scope.")
+
+
+async def _ask_continue() -> bool:
+    """Single-keypress 'Continue chatting?' prompt.
+
+    Bindings: Enter / y → continue (True); n / Esc / Ctrl-C / Ctrl-D →
+    exit (False). Default is continue — the user just got an answer
+    and Enter should naturally move to the next turn.
+    """
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("y")
+    @kb.add("Y")
+    @kb.add("enter")
+    def _continue(event):
+        event.app.exit(result=True)
+
+    @kb.add("n")
+    @kb.add("N")
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    @kb.add("c-d")
+    def _exit(event):
+        event.app.exit(result=False)
+
+    label = _t("ask_continue_q")
+    console.print(f"[bold cyan]{label}[/] [dim](Enter/y to continue, n/Esc to exit)[/] ", end="")
+    session: PromptSession = PromptSession()
+    try:
+        result = await session.prompt_async("", key_bindings=kb)
+    except (EOFError, KeyboardInterrupt):
+        result = False
+    console.print()  # newline after the keypress
+    return bool(result)
+
+
 async def cmd_ask(
     *,
-    question: str,
+    question: str | None,
+    ref: str | None = None,
     chat: str | None = None,
     thread: int | None = None,
     folder: str | None = None,
+    global_scope: bool = False,
     since: str | None = None,
     until: str | None = None,
     last_days: int | None = None,
+    last_hours: int | None = None,
     limit: int = 200,
     model: str | None = None,
     output: Path | None = None,
@@ -111,54 +177,133 @@ async def cmd_ask(
     semantic: bool = False,
     build_index: bool = False,
     max_cost: float | None = None,
-    interactive: bool = False,
+    no_followup: bool = False,
     with_comments: bool = False,
+    enrich: str | None = None,
+    enrich_all: bool = False,
+    no_enrich: bool = False,
     yes: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    mark_read: bool | None = None,
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
 
-    `--chat` / `--thread` / `--folder` narrow the search corpus. With none
-    of those, every synced message in the local DB is eligible.
+    Scoping (mutually exclusive — at most one):
+      - positional <ref>: @user / t.me link / topic URL / fuzzy / numeric
+      - --chat <ref>: same forms as positional
+      - --folder NAME: every chat in the folder
+      - --global: every synced chat in the local DB
 
-    `--refresh` runs an incremental backfill on the scoped chat(s) before
-    retrieval — useful when you suspect new messages have arrived since
-    the last `analyze` / `dump` / `sync`. Requires `--chat` or `--folder`
-    so we don't accidentally hit Telegram for every dialog you've ever
-    synced.
+    Empty question + no scope → opens the wizard (chat picker, period,
+    confirm). Empty question + scope set → exits with an error.
+
+    `--refresh` runs an incremental backfill before retrieval; needs
+    --chat or --folder.
+
+    After every answer, prompts "Continue chatting?" (default no). Use
+    --no-followup to suppress (cron / scripts).
+
+    `mark_read` (tri-state): True advances Telegram's read marker once
+    the user exits the conversation; False / None skip. Only meaningful
+    when the scope resolves to a single chat — folder / global scopes
+    silently no-op since there's no single chat to mark.
     """
-    # `--build-index` doesn't need a question; everything else does.
-    if not build_index:
-        if not question.strip():
-            console.print(f"[red]{_t('ask_empty_question')}[/]")
-            raise typer.Exit(2)
-        if not semantic:
-            tokens = tokenize_question(question)
-            if not tokens:
-                console.print(
-                    "[yellow]No useful keywords in your question.[/] Add a noun, name, or "
-                    "topic — stop words and short tokens are filtered. (Or pass --semantic, "
-                    "which doesn't need keyword tokens.)"
-                )
-                raise typer.Exit(2)
-    if refresh and not chat and not folder:
+    _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
+
+    _no_scope = ref is None and chat is None and folder is None and not global_scope
+
+    # --refresh / --build-index require an explicit chat or folder scope;
+    # they're incompatible with the wizard (which can pick ALL_LOCAL) and
+    # with --global (which has no chat list to backfill / index). Fail-fast
+    # so the user doesn't waste a wizard run on a constraint that would
+    # only fail at the end.
+    if refresh and chat is None and folder is None and ref is None:
         raise typer.BadParameter(
-            "--refresh needs --chat or --folder; refusing to backfill every "
-            "synced dialog (potentially hundreds of Telegram round-trips)."
+            "--refresh requires <ref>, --chat, or --folder; refusing to backfill every synced dialog."
         )
-    if build_index and not chat and not folder:
+    if build_index and chat is None and folder is None and ref is None:
         raise typer.BadParameter(
-            "--build-index needs --chat or --folder; refusing to embed every "
-            "synced dialog at once (could be a lot of OpenAI calls)."
+            "--build-index requires <ref>, --chat, or --folder; "
+            "refusing to embed every synced dialog at once."
         )
 
+    # The wizard collects period / thread / with-comments interactively;
+    # accepting these flags too would silently drop or duplicate them.
+    if _no_scope:
+        forbidden_with_wizard: list[str] = []
+        if since is not None or until is not None or last_days is not None or last_hours is not None:
+            forbidden_with_wizard.append("--since/--until/--last-days/--last-hours")
+        if thread is not None:
+            forbidden_with_wizard.append("--thread")
+        if with_comments:
+            forbidden_with_wizard.append("--with-comments")
+        if forbidden_with_wizard:
+            raise typer.BadParameter(
+                f"Cannot use {' / '.join(forbidden_with_wizard)} without a scope; "
+                "pass <ref> / --chat / --folder / --global, or drop these flags "
+                "and let the wizard collect them."
+            )
+
+    # No scope → drop into the wizard. The wizard handles the question
+    # (prompts if empty) and the scope decision (chat picker / ALL_LOCAL),
+    # then dispatches back into cmd_ask with both populated.
+    if _no_scope:
+        from analyzetg.interactive import run_interactive_ask
+
+        return await run_interactive_ask(
+            question=question or "",
+            refresh=refresh,
+            semantic=semantic,
+            rerank=rerank,
+            limit=limit,
+            model=model,
+            output=output,
+            console_out=console_out,
+            show_retrieved=show_retrieved,
+            max_cost=max_cost,
+            yes=yes,
+            no_followup=no_followup,
+            language=language,
+            content_language=content_language,
+            mark_read=mark_read,
+        )
+
+    # Scope is set; an empty question here is a user error.
+    if question is None or not question.strip():
+        console.print(f"[red]{_t('ask_empty_question')}[/]")
+        raise typer.Exit(2)
+
+    # If ref is set, resolve it now and overlay onto chat/thread.
+    if ref is not None:
+        _settings_for_ref = get_settings()
+        async with (
+            tg_client(_settings_for_ref) as _client_for_ref,
+            open_repo(_settings_for_ref.storage.data_path) as _repo_for_ref,
+        ):
+            # msg_id from URL is intentionally discarded; ask scopes to chat/topic,
+            # not a single message.
+            _chat_id, _ref_thread_id, _ = await _resolve_ask_ref(_client_for_ref, _repo_for_ref, ref)
+        chat = str(_chat_id)
+        if thread is None and _ref_thread_id is not None:
+            thread = _ref_thread_id
+
+    # `--build-index` doesn't need a question; everything else does.
+    if not build_index and not semantic:
+        tokens = tokenize_question(question)
+        if not tokens:
+            console.print(
+                "[yellow]No useful keywords in your question.[/] Add a noun, name, or "
+                "topic — stop words and short tokens are filtered. (Or pass --semantic, "
+                "which doesn't need keyword tokens.)"
+            )
+            raise typer.Exit(2)
     settings = get_settings()
     effective_language = (language or settings.locale.language or "en").lower()
     effective_content_language = (
         content_language or settings.locale.content_language or effective_language
     ).lower()
-    since_dt, until_dt = compute_window(since, until, last_days)
+    since_dt, until_dt = compute_window(since, until, last_days, last_hours)
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         # Resolve scope.
@@ -224,7 +369,53 @@ async def cmd_ask(
         # else: chat_ids stays None → search all synced chats.
 
         if refresh and chat_ids:
-            await _refresh_chats(client, repo, chat_ids, thread_id=thread)
+            await _refresh_chats(client, repo, chat_ids, thread_id=thread, since_date=since_dt)
+
+        # Run media enrichment over the scoped chats + period BEFORE
+        # retrieval, so transcripts / image descriptions / link summaries
+        # become searchable in this run. Mirrors `analyze`'s enrich flags
+        # (--enrich / --enrich-all / --no-enrich); shares the same
+        # `EnrichOpts` builder + `enrich_messages` orchestrator that
+        # `core/pipeline.prepare_chat_run` uses. ask deliberately keeps
+        # its own pipeline (per CLAUDE.md invariant 9) so this is a thin
+        # call into the shared helper, not a re-implementation.
+        if chat_ids:
+            from analyzetg.analyzer.commands import build_enrich_opts as _build_enrich_opts
+            from analyzetg.enrich.pipeline import enrich_messages
+
+            enrich_opts = _build_enrich_opts(
+                cli_enrich=enrich,
+                cli_enrich_all=enrich_all,
+                cli_no_enrich=no_enrich,
+                preset=None,  # ask has no preset → no preset-declared kinds
+            )
+            if enrich_opts.any_enabled():
+                msgs_to_enrich = []
+                for cid in chat_ids:
+                    msgs_to_enrich.extend(
+                        await repo.iter_messages(
+                            cid,
+                            thread_id=thread,
+                            since=since_dt,
+                            until=until_dt,
+                        )
+                    )
+                if msgs_to_enrich:
+                    console.print(
+                        f"[dim]→ Enriching {len(msgs_to_enrich)} messages "
+                        f"({', '.join(enrich_opts.kinds_enabled())})...[/]"
+                    )
+                    stats = await enrich_messages(
+                        msgs_to_enrich,
+                        client=client,
+                        repo=repo,
+                        opts=enrich_opts,
+                        language=effective_language,
+                        content_language=effective_content_language,
+                    )
+                    summary = stats.summary()
+                    if summary:
+                        console.print(f"[dim]→ {summary}[/]")
 
         # --build-index → fill the message_embeddings table for the scoped
         # chats and exit. Idempotent. The flagship answer path is skipped.
@@ -306,10 +497,48 @@ async def cmd_ask(
         first_answer, prior_pool = await _answer_one(question, is_followup=False)
         history.append((question, first_answer))
 
-        if not interactive:
+        async def _maybe_mark_read() -> None:
+            """Advance Telegram's read marker for the single-chat scope.
+
+            Only meaningful when `chat_ids` resolves to exactly one chat —
+            multi-chat folder scope and global scope have nothing single
+            to mark, so this is a silent no-op there. Failures log + warn
+            but never abort the answer (the report is already on screen
+            / on disk).
+            """
+            if not mark_read or not chat_ids or len(chat_ids) != 1:
+                return
+            try:
+                target_chat = chat_ids[0]
+                # Prefer the highest msg_id from the retrieved pool so we
+                # only mark what the user actually saw cited; fall back to
+                # the chat's local max if retrieval was empty / reused.
+                max_id = max((m.msg_id for m, _ in prior_pool), default=None)
+                if max_id is None:
+                    max_id = await repo.get_max_msg_id(target_chat, thread_id=thread)
+                if not max_id:
+                    return
+                from analyzetg.tg.dialogs import mark_as_read as _mark_as_read
+
+                ok = await _mark_as_read(client, target_chat, int(max_id), thread_id=thread)
+                if ok:
+                    console.print(f"[dim]{_tf('marked_read_up_to', msg_id=max_id)}[/]")
+            except Exception as e:
+                log.warning("ask.mark_read_failed", chat_id=chat_ids[0], err=str(e)[:200])
+                console.print(f"[yellow]{_tf('couldnt_mark_read', err=e)}[/]")
+
+        if no_followup:
+            await _maybe_mark_read()
             return
 
-        # Interactive loop: prompt for follow-ups until blank line / EOF.
+        # Post-answer prompt — Enter or `y` continues, `n` or Esc exits.
+        # Default = continue (the user just got an answer; the cheap path
+        # is "press Enter for more").
+        if not await _ask_continue():
+            await _maybe_mark_read()
+            return
+
+        # User opted in → drop into the multi-turn follow-up loop.
         # Plain `input()` misbehaves inside the asyncio event loop on
         # macOS — Enter shows up as a literal `^M` (raw-mode carriage
         # return) and the line never submits. prompt_toolkit's async
@@ -317,11 +546,21 @@ async def cmd_ask(
         # supports Cyrillic / non-ASCII typing out of the box.
         from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.key_binding import KeyBindings
 
         console.print(
-            "\n[bold cyan]Interactive mode[/] — type a follow-up question (blank or Ctrl-D to exit)."
+            "\n[bold cyan]Interactive mode[/] — type a follow-up question (Esc / blank / Ctrl-D to exit)."
         )
-        prompt_session: PromptSession = PromptSession()
+        # Esc inside the loop's input → submit empty → break (consistent
+        # with blank Enter). Without this binding, prompt_toolkit's
+        # default Esc starts an emacs meta-key prefix and doesn't exit.
+        loop_kb = KeyBindings()
+
+        @loop_kb.add("escape", eager=True)
+        def _(event):
+            event.app.exit(result="")
+
+        prompt_session: PromptSession = PromptSession(key_bindings=loop_kb)
 
         while True:
             try:
@@ -340,6 +579,11 @@ async def cmd_ask(
                     continue
                 raise
             history.append((follow, ans))
+
+        # User exited the follow-up loop (blank Enter / Esc / Ctrl-D /
+        # Ctrl-C). Mark read using the latest pool so any messages cited
+        # across follow-ups also count toward the read marker.
+        await _maybe_mark_read()
 
 
 async def _run_single_turn(
@@ -648,13 +892,27 @@ async def _refresh_chats(
     chat_ids: list[int],
     *,
     thread_id: int | None = None,
+    since_date: datetime | None = None,
 ) -> None:
-    """Forward-direction backfill from each chat's local high-water mark.
+    """Forward-direction backfill bounded by the user's time window.
 
-    Walks `[max(local msg_id), now]` per chat in parallel (capped at 3
-    concurrent backfills to stay friendly to Telegram). Per-chat failures
-    log a warning but don't abort the rest of the refresh — `ask` can
-    still answer over whatever's already synced.
+    Walks per chat in parallel (capped at 3 concurrent backfills to stay
+    friendly to Telegram). Per-chat failures log a warning but don't
+    abort the rest of the refresh — `ask` can still answer over
+    whatever's already synced.
+
+    Bounding rules:
+      - `since_date` set + chat has local data: forward-walk from
+        `local_max` (only NEW messages since the last sync are fetched —
+        cheap incremental).
+      - `since_date` set + chat is empty locally: forward-walk from
+        `since_date` (bounded to the user's window — avoids pulling the
+        entire chat history on first --refresh).
+      - `since_date` not set + chat has local data: forward-walk from
+        `local_max` (existing incremental behavior).
+      - `since_date` not set + chat is empty locally: full history
+        (Telethon default, used when the user explicitly asked for no
+        time filter).
     """
     import asyncio as _asyncio
 
@@ -667,19 +925,22 @@ async def _refresh_chats(
         async with sem:
             try:
                 local_max = await repo.get_max_msg_id(chat_id, thread_id=thread_id)
-                # `from_msg_id=None` with direction=forward would walk from
-                # the chat's start; instead pull from local_max forward so
-                # we only fetch what's new. If the DB has nothing yet, we
-                # still pull recent history (sync.backfill defaults via
-                # determine_start when from_msg_id is None).
-                fetched = await backfill(
-                    client,
-                    repo,
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    from_msg_id=local_max,
-                    direction="forward",
-                )
+                kwargs: dict = {
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "direction": "forward",
+                }
+                # Pass both bounds when available; backfill combines them
+                # (more restrictive wins). Critical when local_max is much
+                # older than since_date — without `since_date` the walk
+                # would pull every message since local_max (potentially
+                # the whole chat).
+                if local_max:
+                    kwargs["from_msg_id"] = local_max
+                if since_date is not None:
+                    kwargs["since_date"] = since_date
+                # When neither is set: full-history walk (Telethon default).
+                fetched = await backfill(client, repo, **kwargs)
                 return chat_id, fetched, None
             except Exception as e:
                 log.warning("ask.refresh_failed", chat_id=chat_id, err=str(e)[:200])

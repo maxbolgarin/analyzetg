@@ -191,7 +191,7 @@ def chats_add(
     period: str | None = typer.Option(
         None,
         "--period",
-        help="Default period for `atg chats run` on this sub: unread | last7 | last30 | full. Wizard asks if not set.",
+        help="Default period for `atg chats run` on this sub: unread | last24h | last96h | last7 | last30 | last90 | year_start | full. Wizard asks if not set.",
     ),
     enrich: str | None = typer.Option(
         None,
@@ -334,7 +334,7 @@ def chats_run(
     period: str | None = typer.Option(
         None,
         "--period",
-        help="Override every sub's stored period: unread | last7 | last30 | full.",
+        help="Override every sub's stored period: unread | last24h | last96h | last7 | last30 | last90 | year_start | full.",
     ),
     enrich: str | None = typer.Option(
         None,
@@ -469,6 +469,15 @@ def analyze(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days"),
+    last_hours: int | None = typer.Option(
+        None,
+        "--last-hours",
+        help=(
+            "Restrict to messages newer than N hours ago. Mutually "
+            "exclusive with --since/--until/--full-history; if combined "
+            "with --last-days, --last-hours wins (more specific)."
+        ),
+    ),
     preset: str | None = typer.Option(
         None,
         "--preset",
@@ -667,6 +676,7 @@ def analyze(
             since=since,
             until=until,
             last_days=last_days,
+            last_hours=last_hours,
             preset=preset,
             prompt_file=prompt_file,
             model=model,
@@ -1138,7 +1148,17 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
 
 @app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_ask"))
 def ask(
-    question: str = typer.Argument(..., help="Free-form question, in any language."),
+    question: str | None = typer.Argument(
+        None, help="Free-form question, in any language. Omit to enter the wizard."
+    ),
+    ref: str | None = typer.Argument(
+        None,
+        help=(
+            "Optional chat reference: @user, t.me link (incl. topic links like "
+            "t.me/c/<id>/<topic>), fuzzy title, or numeric id. "
+            "Mutually exclusive with --chat / --folder / --global."
+        ),
+    ),
     chat: str | None = typer.Option(
         None,
         "--chat",
@@ -1157,6 +1177,15 @@ def ask(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days"),
+    last_hours: int | None = typer.Option(
+        None,
+        "--last-hours",
+        help=(
+            "Restrict to messages newer than N hours ago. Mutually "
+            "exclusive with --since/--until; if combined with "
+            "--last-days, --last-hours wins (more specific)."
+        ),
+    ),
     limit: int = typer.Option(
         200,
         "--limit",
@@ -1197,14 +1226,22 @@ def ask(
             "on media-heavy chats by feeding the flagship a smaller, better-ranked set."
         ),
     ),
-    interactive: bool = typer.Option(
+    global_scope: bool = typer.Option(
         False,
-        "--interactive",
-        "-i",
+        "--global",
+        "-g",
         help=(
-            "After the first answer, drop into a follow-up prompt. Each follow-up "
-            "re-retrieves under the same scope and includes prior turns as context "
-            "(so 'tell me more' just works). Blank line or Ctrl-D exits."
+            "Search every synced chat in the local DB (no Telegram round-trips, "
+            "no wizard). The previous default of `atg ask Q` (no scope) — now "
+            "moved here so the new default opens the wizard."
+        ),
+    ),
+    no_followup: bool = typer.Option(
+        False,
+        "--no-followup",
+        help=(
+            "Skip the post-answer 'Continue chatting?' prompt. Use in scripts / "
+            "cron / non-interactive contexts."
         ),
     ),
     semantic: bool = typer.Option(
@@ -1244,6 +1281,26 @@ def ask(
             "non-channel chat."
         ),
     ),
+    enrich: str | None = typer.Option(
+        None,
+        "--enrich",
+        help=(
+            "Comma-separated media enrichments to run BEFORE retrieval: "
+            "voice, videonote, video, image, doc, link. "
+            "Overrides config defaults for this run. "
+            "Example: --enrich=voice,image,link"
+        ),
+    ),
+    enrich_all: bool = typer.Option(
+        False,
+        "--enrich-all",
+        help="Enable every enrichment (voice/videonote/video/image/doc/link) before retrieval. Spendy.",
+    ),
+    no_enrich: bool = typer.Option(
+        False,
+        "--no-enrich",
+        help="Disable all enrichments for this run, even those that would default on.",
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -1268,31 +1325,39 @@ def ask(
             "your chat is in a different language than your interface."
         ),
     ),
+    mark_read: bool | None = typer.Option(
+        None,
+        "--mark-read/--no-mark-read",
+        help=(
+            "Advance Telegram's read marker after the answer. Only meaningful "
+            "with a single-chat scope (positional <ref> or --chat); silent "
+            "no-op for --folder / --global. Default: don't mark."
+        ),
+    ),
 ) -> None:
     """Answer a question about your synced Telegram archive.
 
-    Retrieves the top relevant messages from the local DB by keyword match
-    (no embeddings; no Telegram or OpenAI calls during retrieval), then
-    asks one LLM call to answer with citations. Scope defaults to every
-    synced chat — narrow with `--chat`, `--folder`, `--thread`, or a
-    period flag for sharper answers (and lower cost).
-
     Examples:
-      atg ask "what did Bob say about migration?"
-      atg ask "any open questions on the API?" --folder Work --last-days 7
-      atg ask "когда дедлайн по проекту?" --chat @somegroup --refresh
+      atg ask "what did Bob say about migration?" @somegroup
+      atg ask "open Qs?" https://t.me/c/3865481227/4         # incl. topic
+      atg ask "..." --folder Work --last-days 7
+      atg ask                                                 # opens wizard
+      atg ask "..." --global                                  # all synced, no wizard
     """
     from analyzetg.ask.commands import cmd_ask
 
     _run(
         cmd_ask(
             question=question,
+            ref=ref,
             chat=chat,
             thread=thread,
             folder=folder,
+            global_scope=global_scope,
             since=since,
             until=until,
             last_days=last_days,
+            last_hours=last_hours,
             limit=limit,
             model=model,
             output=output,
@@ -1300,14 +1365,18 @@ def ask(
             refresh=refresh,
             show_retrieved=show_retrieved,
             rerank=rerank,
-            interactive=interactive,
+            no_followup=no_followup,
             semantic=semantic,
             build_index=build_index,
             max_cost=max_cost,
             with_comments=with_comments,
+            enrich=enrich,
+            enrich_all=enrich_all,
+            no_enrich=no_enrich,
             yes=yes,
             language=language,
             content_language=content_language,
+            mark_read=mark_read,
         )
     )
 
@@ -1667,6 +1736,15 @@ def dump(
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
     last_days: int | None = typer.Option(None, "--last-days", help="Shortcut for --since now-N."),
+    last_hours: int | None = typer.Option(
+        None,
+        "--last-hours",
+        help=(
+            "Restrict to messages newer than N hours ago. Mutually "
+            "exclusive with --since/--until/--full-history; if combined "
+            "with --last-days, --last-hours wins (more specific)."
+        ),
+    ),
     full_history: bool = typer.Option(False, "--full-history", help="Pull the whole chat."),
     thread: int | None = typer.Option(
         None,
@@ -1808,6 +1886,7 @@ def dump(
             since=since,
             until=until,
             last_days=last_days,
+            last_hours=last_hours,
             full_history=full_history,
             thread=thread,
             from_msg=from_msg,
