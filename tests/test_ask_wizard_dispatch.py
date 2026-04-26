@@ -85,7 +85,8 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
         custom_since=None,
         custom_until=None,
         console_out=False,
-        mark_read=False,
+        # User picked "yes" in the new ask-mode mark-read step.
+        mark_read=True,
         output_path=None,
         run_on_all_unread=False,
         run_on_all_local=False,
@@ -114,6 +115,8 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
     # Wizard enrich kinds → cmd_ask --enrich CSV.
     assert kwargs["enrich"] == "voice"
     assert kwargs["no_enrich"] is False
+    # Wizard's mark-read pick threads into cmd_ask.
+    assert kwargs["mark_read"] is True
 
 
 @pytest.mark.asyncio

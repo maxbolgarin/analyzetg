@@ -574,6 +574,7 @@ async def run_interactive_ask(
     no_followup: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    mark_read: bool | None = None,
 ) -> None:
     """Default UX for `atg ask` (no <ref>, no --chat/--folder/--global).
 
@@ -605,7 +606,7 @@ async def run_interactive_ask(
         console_out=console_out,
         output=output,
         save_default=False,
-        mark_read=None,
+        mark_read=mark_read,
         question=question,
     )
     if answers is None:
@@ -626,6 +627,11 @@ async def run_interactive_ask(
     effective_refresh = refresh or chat_arg is not None
 
     enrich_kwargs = _build_enrich_kwargs(answers)
+
+    # Mark-read is only meaningful when a specific chat is picked. ALL_LOCAL
+    # has no single chat to mark, so suppress it there even if the user
+    # ticked "yes" (the wizard step is skipped for ALL_LOCAL anyway).
+    effective_mark_read: bool | None = None if answers.run_on_all_local else answers.mark_read
 
     await cmd_ask(
         question=question,
@@ -649,6 +655,7 @@ async def run_interactive_ask(
         language=language,
         content_language=content_language,
         build_index=False,
+        mark_read=effective_mark_read,
         **enrich_kwargs,
         **period_kwargs,
     )
@@ -668,10 +675,11 @@ async def _collect_answers(
     `mode` controls which steps appear:
       - "analyze" walks chat → [comments|thread] → preset → period → enrich → output → mark_read → confirm.
       - "dump" skips preset.
-      - "ask" skips preset / output / mark_read; runs chat → [comments|thread] → period → enrich → confirm.
+      - "ask" skips preset / output; runs chat → [comments|thread] → period → enrich → mark_read → confirm.
         Ask mode also offers an "ALL synced chats (local DB)" row in the
         chat picker; picking it sets `run_on_all_local=True` and jumps
-        straight to period (no thread / comments).
+        straight to period (no thread / comments). ALL_LOCAL also skips
+        the mark_read step (no single chat to mark).
 
     CLI flags pre-fill steps and skip the corresponding prompt:
       - `console_out`, `output`, or `save_default` → skip the output step.
@@ -726,11 +734,13 @@ async def _collect_answers(
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
         chosen_output_path: Path | None = output
-        # Default mark-read to True in the wizard: if the user ran analyze
-        # on unread messages they've effectively "seen" them now, so
-        # advancing Telegram's read marker matches intent. CLI
-        # `--no-mark-read` can still override.
-        chosen_mark_read: bool = bool(mark_read) if mark_read is not None else True
+        # Default mark-read to True in the wizard for analyze/dump: if the
+        # user ran analyze on unread messages they've effectively "seen"
+        # them now, so advancing Telegram's read marker matches intent.
+        # Ask mode defaults to False — answering a question is often
+        # exploratory and shouldn't silently consume the unread state.
+        # CLI `--mark-read` / `--no-mark-read` can still override.
+        chosen_mark_read = bool(mark_read) if mark_read is not None else (mode != "ask")
         # Per-period message counts for the current chat (filled once we
         # know the chat and, for forums, the thread). Used by `_pick_period`
         # to decorate choices and by the confirm step to estimate cost.
@@ -974,10 +984,14 @@ async def _collect_answers(
                     console.print(f"[dim]{i18n_t('cancelled')}[/]")
                     return None
                 enrich_kinds = list(result) if isinstance(result, list) else None
-                # Ask mode skips output/mark_read entirely — go straight to
-                # confirm. Analyze/dump fall through to output (or mark_read
-                # if the user pre-set output via CLI flags).
-                step = "confirm" if mode == "ask" else "mark_read" if output_forced else "output"
+                # Ask mode skips output but still asks about mark-read when
+                # a single chat is picked (ALL_LOCAL is a no-op since
+                # there's no single chat to mark, and CLI passing
+                # --mark-read/--no-mark-read also suppresses the step).
+                if mode == "ask":
+                    step = "confirm" if (run_on_all_local or mark_read_forced) else "mark_read"
+                else:
+                    step = "mark_read" if output_forced else "output"
 
             elif step == "output":
                 result = await _pick_output(
@@ -998,7 +1012,12 @@ async def _collect_answers(
             elif step == "mark_read":
                 result = await _pick_mark_read(default=chosen_mark_read)
                 if result is BACK:
-                    if output_forced:
+                    if mode == "ask":
+                        # Ask mode goes enrich → mark_read → confirm
+                        # (skipping output entirely). BACK from mark_read
+                        # returns to enrich.
+                        step = "enrich"
+                    elif output_forced:
                         # No output step → go back to enrich (or preset/chat
                         # for run-on-all where period+enrich are skipped).
                         step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
@@ -1053,7 +1072,11 @@ async def _collect_answers(
                         )
                     elif period == "from_msg" and custom_from_msg:
                         summary_bits.append(i18n_tf("wiz_plan_from", ref=custom_from_msg))
-                # Ask mode skips output / mark_read summary lines entirely.
+                # Ask mode skips the output line (no save step) but DOES
+                # surface the mark-read pick when applicable — single-chat
+                # ask scope is the only case it matters, and ALL_LOCAL
+                # skips the step entirely so chosen_mark_read stays at its
+                # CLI / default value (False) and isn't shown.
                 if mode != "ask":
                     summary_bits.append(
                         i18n_t("wiz_plan_console")
@@ -1066,6 +1089,9 @@ async def _collect_answers(
                     )
                     if chosen_mark_read:
                         summary_bits.append(i18n_t("wiz_plan_mark_read"))
+                elif not run_on_all_local and chosen_mark_read:
+                    # ask + single-chat scope only: report the toggle.
+                    summary_bits.append(i18n_t("wiz_plan_mark_read"))
                 # Question is supplied by the ask CLI on the side; show it
                 # here so the user sees what they're about to ask.
                 if mode == "ask" and question:
@@ -1149,12 +1175,17 @@ async def _collect_answers(
                     return None
                 if choice is BACK:
                     if mode == "ask":
-                        # Ask mode confirm backs to enrich (period →
-                        # enrich → confirm); output/mark_read steps are
-                        # skipped entirely in ask mode. Exception:
-                        # ALL_LOCAL skips enrich entirely, so back from
-                        # confirm there means back to period.
-                        step = "period" if run_on_all_local else "enrich"
+                        # Ask mode walks period → enrich → mark_read →
+                        # confirm (output step always skipped). ALL_LOCAL
+                        # skips both enrich and mark_read so it backs all
+                        # the way to period. CLI --mark-read/--no-mark-read
+                        # suppresses the mark_read step (back to enrich).
+                        if run_on_all_local:
+                            step = "period"
+                        elif mark_read_forced:
+                            step = "enrich"
+                        else:
+                            step = "mark_read"
                     elif mark_read_forced:
                         step = (
                             "output"

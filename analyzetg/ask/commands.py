@@ -185,6 +185,7 @@ async def cmd_ask(
     yes: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    mark_read: bool | None = None,
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
 
@@ -202,6 +203,11 @@ async def cmd_ask(
 
     After every answer, prompts "Continue chatting?" (default no). Use
     --no-followup to suppress (cron / scripts).
+
+    `mark_read` (tri-state): True advances Telegram's read marker once
+    the user exits the conversation; False / None skip. Only meaningful
+    when the scope resolves to a single chat — folder / global scopes
+    silently no-op since there's no single chat to mark.
     """
     _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
 
@@ -260,6 +266,7 @@ async def cmd_ask(
             no_followup=no_followup,
             language=language,
             content_language=content_language,
+            mark_read=mark_read,
         )
 
     # Scope is set; an empty question here is a user error.
@@ -490,13 +497,45 @@ async def cmd_ask(
         first_answer, prior_pool = await _answer_one(question, is_followup=False)
         history.append((question, first_answer))
 
+        async def _maybe_mark_read() -> None:
+            """Advance Telegram's read marker for the single-chat scope.
+
+            Only meaningful when `chat_ids` resolves to exactly one chat —
+            multi-chat folder scope and global scope have nothing single
+            to mark, so this is a silent no-op there. Failures log + warn
+            but never abort the answer (the report is already on screen
+            / on disk).
+            """
+            if not mark_read or not chat_ids or len(chat_ids) != 1:
+                return
+            try:
+                target_chat = chat_ids[0]
+                # Prefer the highest msg_id from the retrieved pool so we
+                # only mark what the user actually saw cited; fall back to
+                # the chat's local max if retrieval was empty / reused.
+                max_id = max((m.msg_id for m, _ in prior_pool), default=None)
+                if max_id is None:
+                    max_id = await repo.get_max_msg_id(target_chat, thread_id=thread)
+                if not max_id:
+                    return
+                from analyzetg.tg.dialogs import mark_as_read as _mark_as_read
+
+                ok = await _mark_as_read(client, target_chat, int(max_id), thread_id=thread)
+                if ok:
+                    console.print(f"[dim]{_tf('marked_read_up_to', msg_id=max_id)}[/]")
+            except Exception as e:
+                log.warning("ask.mark_read_failed", chat_id=chat_ids[0], err=str(e)[:200])
+                console.print(f"[yellow]{_tf('couldnt_mark_read', err=e)}[/]")
+
         if no_followup:
+            await _maybe_mark_read()
             return
 
         # Post-answer prompt — Enter or `y` continues, `n` or Esc exits.
         # Default = continue (the user just got an answer; the cheap path
         # is "press Enter for more").
         if not await _ask_continue():
+            await _maybe_mark_read()
             return
 
         # User opted in → drop into the multi-turn follow-up loop.
@@ -540,6 +579,11 @@ async def cmd_ask(
                     continue
                 raise
             history.append((follow, ans))
+
+        # User exited the follow-up loop (blank Enter / Esc / Ctrl-D /
+        # Ctrl-C). Mark read using the latest pool so any messages cited
+        # across follow-ups also count toward the read marker.
+        await _maybe_mark_read()
 
 
 async def _run_single_turn(

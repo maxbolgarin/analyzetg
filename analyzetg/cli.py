@@ -1325,6 +1325,15 @@ def ask(
             "your chat is in a different language than your interface."
         ),
     ),
+    mark_read: bool | None = typer.Option(
+        None,
+        "--mark-read/--no-mark-read",
+        help=(
+            "Advance Telegram's read marker after the answer. Only meaningful "
+            "with a single-chat scope (positional <ref> or --chat); silent "
+            "no-op for --folder / --global. Default: don't mark."
+        ),
+    ),
 ) -> None:
     """Answer a question about your synced Telegram archive.
 
@@ -1367,6 +1376,7 @@ def ask(
             yes=yes,
             language=language,
             content_language=content_language,
+            mark_read=mark_read,
         )
     )
 
