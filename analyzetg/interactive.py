@@ -1527,7 +1527,11 @@ async def _pick_chat(
 
     if not unread:
         console.print(f"[yellow]{i18n_t('wiz_no_unread_showing_all')}[/]")
-        return await _pick_from_all(client, subscribed_ids=sub_set)
+        return await _pick_from_all(
+            client,
+            subscribed_ids=sub_set,
+            offer_all_local=offer_all_local,
+        )
 
     # Folder index: empty dict if the user hasn't defined any folders or
     # the lookup fails (we don't want to abort the picker over a side-info
@@ -1632,11 +1636,22 @@ async def _pick_chat(
     }
 
 
-async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> dict | None:
+async def _pick_from_all(
+    client,
+    *,
+    subscribed_ids: set[int] | None = None,
+    offer_all_local: bool = False,
+) -> dict | None | object:
     """Scan every dialog and present a searchable list.
 
     `subscribed_ids` prefixes each subscribed row with a `★` so the
     `atg chats add` flow shows what's already on the subscription list.
+
+    `offer_all_local` (used by the ask wizard) prepends a "Search ALL
+    synced chats (local DB)" row that returns the `ALL_LOCAL` sentinel.
+    Honouring it here matters for the zero-unread fallback: `_pick_chat`
+    short-circuits to this helper when there are no unread dialogs, and
+    that's exactly when ask-wizard users most want the option.
     """
     from analyzetg.tg.client import _chat_kind, entity_id, entity_title, entity_username
     from analyzetg.tg.dialogs import UnreadDialog, correct_forum_unread
@@ -1700,7 +1715,18 @@ async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> d
     # iter_dialogs here without extra fetches — leave it blank.
     sub_set = subscribed_ids or set()
     header_line = f"{'unread':>{_COL_UNREAD}}  {'kind':<{_COL_KIND}}  {'folder':<{_COL_FOLDER}}    title"
-    choices: list[Any] = [questionary.Separator(header_line)]
+    choices: list[Any] = []
+    # ALL_LOCAL sits above the table so the ask-wizard's no-scope path
+    # is reachable here too — see the zero-unread fallback in _pick_chat.
+    if offer_all_local:
+        choices.append(
+            questionary.Choice(
+                title=i18n_t("wiz_ask_all_local"),
+                value=ALL_LOCAL,
+            )
+        )
+        choices.append(questionary.Separator())
+    choices.append(questionary.Separator(header_line))
     choices.extend(
         questionary.Choice(
             title=(
@@ -1726,6 +1752,13 @@ async def _pick_from_all(client, *, subscribed_ids: set[int] | None = None) -> d
         ),
         None,
     ).ask_async()
+    # ALL_LOCAL is a sentinel object — short-circuit before the dict
+    # access so the ask wizard's no-scope path is reachable from here.
+    if picked is ALL_LOCAL:
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: [bold]{i18n_t('wiz_ask_all_local')}[/]"
+        )
+        return ALL_LOCAL
     if picked is not None:
         _replace_last_line(
             f"[bold cyan]?[/] chat: [bold]{picked['title'] or picked['chat_id']}[/] "

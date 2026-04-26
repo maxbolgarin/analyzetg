@@ -282,3 +282,67 @@ async def test_pick_chat_all_local_appears_above_all_unread(monkeypatch):
     local_idx = next(i for i, v in enumerate(values) if v is interactive.ALL_LOCAL)
     unread_idx = next(i for i, v in enumerate(values) if isinstance(v, tuple) and v and v[0] == "all_unread")
     assert local_idx < unread_idx, "ALL_LOCAL row must appear above the ALL_UNREAD row"
+
+
+@pytest.mark.asyncio
+async def test_pick_chat_no_unread_with_offer_all_local_still_shows_all_local(monkeypatch):
+    """Even with zero unread dialogs, --offer_all_local presents the ALL_LOCAL row.
+
+    Regression for the zero-unread fallback: _pick_chat short-circuits to
+    _pick_from_all when there are no unread dialogs; that helper must
+    honour offer_all_local too.
+    """
+    from types import SimpleNamespace
+
+    captured: dict[str, Any] = {}
+
+    async def fake_list_unread_dialogs(_client):
+        # Force the zero-unread early-return path in _pick_chat.
+        return []
+
+    async def fake_folder_index(_client):
+        return {}
+
+    async def fake_correct_forum_unread(_client, _snapshot):
+        return None
+
+    # _pick_from_all walks `client.iter_dialogs(...)`. Stub it as an
+    # async generator yielding one user dialog so the choice list is
+    # non-empty (otherwise the helper short-circuits to None before
+    # building any choices).
+    fake_entity = SimpleNamespace(id=42, title="Some Chat", username=None)
+
+    async def fake_iter_dialogs(limit=None):
+        yield SimpleNamespace(entity=fake_entity, unread_count=0, read_inbox_max_id=0)
+
+    fake_client = SimpleNamespace(iter_dialogs=fake_iter_dialogs)
+
+    def fake_select(_msg, *, choices, **_kwargs):
+        captured["choices"] = choices
+        return _FakeAsker(return_value=None)
+
+    monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
+    monkeypatch.setattr(
+        "analyzetg.tg.folders.chat_folder_index",
+        fake_folder_index,
+    )
+    monkeypatch.setattr(
+        "analyzetg.tg.dialogs.correct_forum_unread",
+        fake_correct_forum_unread,
+    )
+    # Stub the entity helpers _pick_from_all imports lazily so it can
+    # operate on our SimpleNamespace entity.
+    monkeypatch.setattr("analyzetg.tg.client.entity_id", lambda e: e.id)
+    monkeypatch.setattr("analyzetg.tg.client.entity_title", lambda e: e.title)
+    monkeypatch.setattr("analyzetg.tg.client.entity_username", lambda e: e.username)
+    monkeypatch.setattr("analyzetg.tg.client._chat_kind", lambda _e: "user")
+    monkeypatch.setattr(interactive.questionary, "select", fake_select)
+
+    await interactive._pick_chat(client=fake_client, offer_all_local=True)
+
+    choices = captured["choices"]
+    matches = [c for c in choices if getattr(c, "value", None) is interactive.ALL_LOCAL]
+    assert len(matches) == 1, (
+        "expected exactly one ALL_LOCAL row in _pick_from_all's choices "
+        "even when _pick_chat short-circuits via the zero-unread fallback"
+    )
