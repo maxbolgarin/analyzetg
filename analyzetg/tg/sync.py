@@ -293,6 +293,12 @@ async def backfill(
         if direction == "forward":
             iter_kwargs["reverse"] = True
             iter_kwargs["min_id"] = max(from_msg_id - 1, 0)
+            # When BOTH a msg-id anchor and a date anchor are given on a
+            # forward walk, apply both — the more restrictive wins. Without
+            # this, an old `local_max` plus `--last-days 7` would still
+            # walk every message > local_max (potentially the whole chat).
+            if since_date is not None:
+                iter_kwargs["offset_date"] = since_date
         else:
             iter_kwargs["reverse"] = False
             iter_kwargs["offset_id"] = from_msg_id

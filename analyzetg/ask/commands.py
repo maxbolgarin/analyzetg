@@ -837,11 +837,16 @@ async def _refresh_chats(
                     "thread_id": thread_id,
                     "direction": "forward",
                 }
+                # Pass both bounds when available; backfill combines them
+                # (more restrictive wins). Critical when local_max is much
+                # older than since_date — without `since_date` the walk
+                # would pull every message since local_max (potentially
+                # the whole chat).
                 if local_max:
                     kwargs["from_msg_id"] = local_max
-                elif since_date is not None:
+                if since_date is not None:
                     kwargs["since_date"] = since_date
-                # else: full-history walk (no time bound asked, no local data)
+                # When neither is set: full-history walk (Telethon default).
                 fetched = await backfill(client, repo, **kwargs)
                 return chat_id, fetched, None
             except Exception as e:
