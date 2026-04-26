@@ -570,8 +570,8 @@ async def run_interactive_ask(
     if answers.chat_ref:  # non-empty ref → use it
         chat_arg = answers.chat_ref
 
-    # Task 4 will add ref/global_scope/no_followup parameters on cmd_ask.
-    # Until then, `run_interactive_ask` is unreachable from the live CLI.
+    # TODO(task-4): add ref/global_scope/no_followup parameters on cmd_ask;
+    # until then, `run_interactive_ask` is unreachable from the live CLI.
     await cmd_ask(
         question=question,
         ref=None,
