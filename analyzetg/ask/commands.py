@@ -164,10 +164,13 @@ async def cmd_ask(
     """
     _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
 
+    _no_scope = ref is None and chat is None and folder is None and not global_scope
+
     # --refresh / --build-index require an explicit chat or folder scope;
     # they're incompatible with the wizard (which can pick ALL_LOCAL) and
-    # with --global. Fail-fast here so the user doesn't waste a wizard
-    # run on a constraint that would only fail at the end.
+    # with --global (which has no chat list to backfill / index). Fail-fast
+    # so the user doesn't waste a wizard run on a constraint that would
+    # only fail at the end.
     if refresh and chat is None and folder is None and ref is None:
         raise typer.BadParameter(
             "--refresh requires <ref>, --chat, or --folder; refusing to backfill every synced dialog."
@@ -178,11 +181,9 @@ async def cmd_ask(
             "refusing to embed every synced dialog at once."
         )
 
-    # The wizard doesn't honour these flags (no question yet → no scope
-    # → wizard route). Fail-fast so the user doesn't see them silently
-    # dropped.
-    _no_scope = ref is None and chat is None and folder is None and not global_scope
-    if _no_scope and (question is None or not question.strip()):
+    # The wizard collects period / thread / with-comments interactively;
+    # accepting these flags too would silently drop or duplicate them.
+    if _no_scope:
         forbidden_with_wizard: list[str] = []
         if since is not None or until is not None or last_days is not None:
             forbidden_with_wizard.append("--since/--until/--last-days")
@@ -192,33 +193,36 @@ async def cmd_ask(
             forbidden_with_wizard.append("--with-comments")
         if forbidden_with_wizard:
             raise typer.BadParameter(
-                f"Cannot use {' / '.join(forbidden_with_wizard)} without a "
-                "question or scope; pass a question and a scope, or use "
-                "the wizard without these flags."
+                f"Cannot use {' / '.join(forbidden_with_wizard)} without a scope; "
+                "pass <ref> / --chat / --folder / --global, or drop these flags "
+                "and let the wizard collect them."
             )
 
-    # No question → drop into the wizard (which prompts inline). If user
-    # passed a scope arg without a question, error out.
+    # No scope → drop into the wizard. The wizard handles the question
+    # (prompts if empty) and the scope decision (chat picker / ALL_LOCAL),
+    # then dispatches back into cmd_ask with both populated.
+    if _no_scope:
+        from analyzetg.interactive import run_interactive_ask
+
+        return await run_interactive_ask(
+            question=question or "",
+            refresh=refresh,
+            semantic=semantic,
+            rerank=rerank,
+            limit=limit,
+            model=model,
+            output=output,
+            console_out=console_out,
+            show_retrieved=show_retrieved,
+            max_cost=max_cost,
+            yes=yes,
+            no_followup=no_followup,
+            language=language,
+            content_language=content_language,
+        )
+
+    # Scope is set; an empty question here is a user error.
     if question is None or not question.strip():
-        if ref is None and chat is None and folder is None and not global_scope:
-            from analyzetg.interactive import run_interactive_ask
-
-            return await run_interactive_ask(
-                question="",  # wizard prompts for it
-                refresh=refresh,
-                semantic=semantic,
-                rerank=rerank,
-                limit=limit,
-                model=model,
-                output=output,
-                console_out=console_out,
-                show_retrieved=show_retrieved,
-                max_cost=max_cost,
-                yes=yes,
-                no_followup=no_followup,
-                language=language,
-                content_language=content_language,
-            )
         console.print(f"[red]{_t('ask_empty_question')}[/]")
         raise typer.Exit(2)
 

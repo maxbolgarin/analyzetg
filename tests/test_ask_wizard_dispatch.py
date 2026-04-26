@@ -8,6 +8,31 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_cmd_ask_with_question_no_scope_routes_to_wizard():
+    """`atg ask "Q"` (question, no scope) → wizard, NOT global retrieval.
+
+    Spec: no scope flag set → wizard, regardless of whether the question
+    is supplied. The wizard collects scope; the question is forwarded.
+    """
+    from analyzetg.ask import commands as ask_commands
+
+    fake_wizard = AsyncMock()
+    # `run_interactive_ask` is imported lazily inside cmd_ask, so patch it
+    # at the source module — the lazy import resolves at call time.
+    with patch("analyzetg.interactive.run_interactive_ask", new=fake_wizard):
+        await ask_commands.cmd_ask(
+            question="как дела?",
+            ref=None,
+            chat=None,
+            folder=None,
+            global_scope=False,
+        )
+
+    fake_wizard.assert_awaited_once()
+    assert fake_wizard.call_args.kwargs["question"] == "как дела?"
+
+
+@pytest.mark.asyncio
 async def test_run_interactive_ask_calls_cmd_ask_with_global_when_all_local_picked():
     from analyzetg.interactive import InteractiveAnswers, run_interactive_ask
 
