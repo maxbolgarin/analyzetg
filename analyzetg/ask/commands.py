@@ -325,7 +325,7 @@ async def cmd_ask(
         # else: chat_ids stays None → search all synced chats.
 
         if refresh and chat_ids:
-            await _refresh_chats(client, repo, chat_ids, thread_id=thread)
+            await _refresh_chats(client, repo, chat_ids, thread_id=thread, since_date=since_dt)
 
         # Run media enrichment over the scoped chats + period BEFORE
         # retrieval, so transcripts / image descriptions / link summaries
@@ -799,13 +799,27 @@ async def _refresh_chats(
     chat_ids: list[int],
     *,
     thread_id: int | None = None,
+    since_date: datetime | None = None,
 ) -> None:
-    """Forward-direction backfill from each chat's local high-water mark.
+    """Forward-direction backfill bounded by the user's time window.
 
-    Walks `[max(local msg_id), now]` per chat in parallel (capped at 3
-    concurrent backfills to stay friendly to Telegram). Per-chat failures
-    log a warning but don't abort the rest of the refresh — `ask` can
-    still answer over whatever's already synced.
+    Walks per chat in parallel (capped at 3 concurrent backfills to stay
+    friendly to Telegram). Per-chat failures log a warning but don't
+    abort the rest of the refresh — `ask` can still answer over
+    whatever's already synced.
+
+    Bounding rules:
+      - `since_date` set + chat has local data: forward-walk from
+        `local_max` (only NEW messages since the last sync are fetched —
+        cheap incremental).
+      - `since_date` set + chat is empty locally: forward-walk from
+        `since_date` (bounded to the user's window — avoids pulling the
+        entire chat history on first --refresh).
+      - `since_date` not set + chat has local data: forward-walk from
+        `local_max` (existing incremental behavior).
+      - `since_date` not set + chat is empty locally: full history
+        (Telethon default, used when the user explicitly asked for no
+        time filter).
     """
     import asyncio as _asyncio
 
@@ -818,19 +832,17 @@ async def _refresh_chats(
         async with sem:
             try:
                 local_max = await repo.get_max_msg_id(chat_id, thread_id=thread_id)
-                # `from_msg_id=None` with direction=forward would walk from
-                # the chat's start; instead pull from local_max forward so
-                # we only fetch what's new. If the DB has nothing yet, we
-                # still pull recent history (sync.backfill defaults via
-                # determine_start when from_msg_id is None).
-                fetched = await backfill(
-                    client,
-                    repo,
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    from_msg_id=local_max,
-                    direction="forward",
-                )
+                kwargs: dict = {
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "direction": "forward",
+                }
+                if local_max:
+                    kwargs["from_msg_id"] = local_max
+                elif since_date is not None:
+                    kwargs["since_date"] = since_date
+                # else: full-history walk (no time bound asked, no local data)
+                fetched = await backfill(client, repo, **kwargs)
                 return chat_id, fetched, None
             except Exception as e:
                 log.warning("ask.refresh_failed", chat_id=chat_id, err=str(e)[:200])
