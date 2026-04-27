@@ -8,9 +8,9 @@ does NOT affect any LLM input, so toggling it must NOT bust the cache
 
 from __future__ import annotations
 
-from atg.analyzer.pipeline import AnalysisOptions
-from atg.analyzer.prompts import get_presets
-from atg.config import get_settings, reset_settings
+from unread.analyzer.pipeline import AnalysisOptions
+from unread.analyzer.prompts import get_presets
+from unread.config import get_settings, reset_settings
 
 
 def _payload_for(lang: str, clang: str | None = None) -> dict:

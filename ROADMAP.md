@@ -28,10 +28,10 @@ chunks span chats, not just chunks within a chat.
 
 Daily morning digests are the main use case. Two paths:
 
-- `atg schedule add --daily 09:00 analyze --folder Work --digest` — writes
+- `unread schedule add --daily 09:00 analyze --folder Work --digest` — writes
   a launchd plist (mac) / systemd timer (linux) / cron line. State stored
-  in `~/.atg/schedules.json`.
-- `atg watch --interval 1h analyze --folder Work` — foreground loop, fires
+  in `~/.unread/schedules.json`.
+- `unread watch --interval 1h analyze --folder Work` — foreground loop, fires
   the analyze command on a fixed cadence, prints to stdout. Simpler, no
   OS integration; user runs it under `tmux` / `nohup`.
 
@@ -65,7 +65,7 @@ default_preset = "action_items"
 ```
 
 Looked up by `username` first, then by `title` (case-insensitive
-substring). When the user runs `atg analyze @somegroup` with no
+substring). When the user runs `unread analyze @somegroup` with no
 `--preset`, we read this map and apply.
 
 Saves typing for users who run the same flag combo on the same chats
@@ -82,7 +82,7 @@ stream into `text` and surface partials via a callback.
 
 ### Cost-by-chat dashboard  S
 
-`atg stats --by chat` already exists but bare. Add a `--top N` mode
+`unread stats --by chat` already exists but bare. Add a `--top N` mode
 showing biggest spenders, biggest cache savers, most unread, most active
 senders. Two extra SQL queries; render as a Rich Table.
 
@@ -145,7 +145,7 @@ default for `audio_language` unless the user overrides.
 ### Mark-read undo  S
 
 Store the previous `read_inbox_max_id` on the `chats` row before
-advancing. `atg unread <chat>` rolls it back via Telethon's
+advancing. `unread unread <chat>` rolls it back via Telethon's
 `ReadHistoryRequest` with the old `max_id`.
 
 ### Backfill progress bar  S
@@ -154,7 +154,7 @@ advancing. `atg unread <chat>` rolls it back via Telethon's
 fetching. Use it to show `[━━━━━──────] 4321/12000` during sync.
 Just a Rich Progress around the existing iter loop.
 
-### `atg open <chat>` deep-link  S
+### `unread open <chat>` deep-link  S
 
 `open tg://resolve?domain=somegroup` (mac) / `xdg-open …` (linux)
 opens the chat in the Telegram app. Handy after a report says
@@ -170,7 +170,7 @@ exposes the data; this turns it into a real filter.
 
 ### Run-history command  S
 
-`atg history <chat>` lists previous analysis runs (date, preset,
+`unread history <chat>` lists previous analysis runs (date, preset,
 msg_count, cost) from the `analysis_runs` table. Data is already
 written but never displayed. Useful for "what preset did I use last
 time".
@@ -232,9 +232,9 @@ provider's labels. Build a `ChatProvider` Protocol; implement
 The items below are implemented; this section becomes the changelog
 when we cut a release.
 
-- `atg ask "question"` — Q&A across synced corpus
+- `unread ask "question"` — Q&A across synced corpus
 - `--max-cost N` budget guard on `analyze` / `dump`
 - Wizard reorder: period → enrich, with period-scoped media counts
-- `atg doctor` — preflight / health check
-- `atg backup` / `atg restore` for `data.sqlite`
+- `unread doctor` — preflight / health check
+- `unread backup` / `unread restore` for `data.sqlite`
 - `--post-saved` — push analysis result to Telegram Saved Messages

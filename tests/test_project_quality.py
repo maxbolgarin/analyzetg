@@ -7,7 +7,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from atg.cli import app
+from unread.cli import app
 
 ROOT = Path(__file__).resolve().parents[1]
 

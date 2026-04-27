@@ -1,4 +1,4 @@
-"""Filename-picking for `atg download-media`.
+"""Filename-picking for `unread download-media`.
 
 The command itself is a Telegram round-trip; here we pin the pure
 filename-derivation helper so changes in the naming convention (how PDFs
@@ -11,12 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from atg.media.commands import (
+from unread.media.commands import (
     _existing_for_msg,
     _safe_filename_component,
     media_filename,
 )
-from atg.models import Message
+from unread.models import Message
 
 
 def _msg(msg_id: int, media_type: str) -> Message:

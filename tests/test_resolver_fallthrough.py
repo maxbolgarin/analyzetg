@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from atg.db.repo import Repo
-from atg.tg import resolver as resolver_mod
-from atg.tg.resolver import resolve
+from unread.db.repo import Repo
+from unread.tg import resolver as resolver_mod
+from unread.tg.resolver import resolve
 
 
 @pytest.fixture

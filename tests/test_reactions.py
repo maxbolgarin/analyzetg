@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from atg.analyzer.formatter import format_messages
-from atg.db.repo import Repo
-from atg.models import Message
-from atg.tg.sync import detect_reactions
+from unread.analyzer.formatter import format_messages
+from unread.db.repo import Repo
+from unread.models import Message
+from unread.tg.sync import detect_reactions
 
 
 @pytest.fixture

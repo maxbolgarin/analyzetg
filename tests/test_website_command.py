@@ -10,15 +10,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from atg.analyzer.pipeline import AnalysisOptions
-from atg.analyzer.prompts import get_presets
-from atg.website.commands import (
+from unread.analyzer.pipeline import AnalysisOptions
+from unread.analyzer.prompts import get_presets
+from unread.website.commands import (
     _build_synthetic_messages,
     _meta_header,
     _restore_page_from_row,
 )
-from atg.website.metadata import WebsiteMetadata
-from atg.website.paths import website_report_path
+from unread.website.metadata import WebsiteMetadata
+from unread.website.paths import website_report_path
 
 
 def _meta(**overrides) -> WebsiteMetadata:

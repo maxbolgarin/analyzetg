@@ -1,6 +1,6 @@
-# atg
+# unread
 
-[![CI](https://github.com/maxbolgarin/atg/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/atg/actions/workflows/ci.yml)
+[![CI](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -11,12 +11,12 @@ message type flows through the analyzer: **text, voice, video notes,
 videos, photos, PDFs / docs, and external links** — each gets
 transformed into text before the LLM sees it. Voice/video notes are
 transcribed by default; images, docs, video audio, and link summaries
-are opt-in per run (they cost extra). By default `atg` starts from
+are opt-in per run (they cost extra). By default `unread` starts from
 Telegram's **unread marker** — the spot where you stopped reading — and
 writes a Markdown report to `reports/` with clickable links back to
 every cited message.
 
-`atg analyze` also accepts **YouTube URLs** (captions or Whisper
+`unread analyze` also accepts **YouTube URLs** (captions or Whisper
 transcript → time-stamped citations) and **arbitrary web pages**
 (article-body extraction → paragraph-indexed citations). Same pipeline,
 same caches, same report layout — see [YouTube videos](#youtube-videos)
@@ -28,38 +28,38 @@ enrichment is enabled — the URLs shared in your chats.
 
 ```bash
 # First time
-atg init                      # log in to Telegram, verify OpenAI key
+unread init                      # log in to Telegram, verify OpenAI key
 
 # Most common: interactive wizard — pick a chat, pick a preset, done
-atg analyze                   # pick chat → preset → period → enrich → run
+unread analyze                   # pick chat → preset → period → enrich → run
 
 # Direct, when you know which chat
-atg analyze @somegroup                  # summary of unread (voice/videonote auto-transcribed)
-atg analyze @somegroup --console        # render in terminal instead of a file
-atg analyze @somegroup --last-days 7 --preset digest
+unread analyze @somegroup                  # summary of unread (voice/videonote auto-transcribed)
+unread analyze @somegroup --console        # render in terminal instead of a file
+unread analyze @somegroup --last-days 7 --preset digest
 
 # Other content sources — same command, different URL shape
-atg analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"   # YouTube video
-atg analyze "https://www.paulgraham.com/greatwork.html"     # any web page (article)
+unread analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"   # YouTube video
+unread analyze "https://www.paulgraham.com/greatwork.html"     # any web page (article)
 
 # Q&A across your synced archive (no Telegram round-trip)
-atg ask                                              # opens the wizard
-atg ask "what did Bob say about migration?" @somegroup
-atg ask "open questions on the API" --folder Work
-atg ask "..." --global                               # all synced chats, no wizard
+unread ask                                              # opens the wizard
+unread ask "what did Bob say about migration?" @somegroup
+unread ask "open questions on the API" --folder Work
+unread ask "..." --global                               # all synced chats, no wizard
 
 # Cost-guarded run with citation audit blocks + Telegram Saved Messages delivery
-atg analyze @somegroup --max-cost 0.10 --cite-context 3 --post-saved
+unread analyze @somegroup --max-cost 0.10 --cite-context 3 --post-saved
 
 # Dump history to a file, no OpenAI
-atg dump @somegroup -o history.md --last-days 30
+unread dump @somegroup -o history.md --last-days 30
 ```
 
 ---
 
 ## Installation
 
-Five steps, in order. Don't skip — `atg` won't run without the credentials
+Five steps, in order. Don't skip — `unread` won't run without the credentials
 from step 3.
 
 ### 1. Install the prerequisites
@@ -76,8 +76,8 @@ from step 3.
 ### 2. Clone the repo
 
 ```bash
-git clone https://github.com/maxbolgarin/atg.git
-cd atg
+git clone https://github.com/maxbolgarin/unread.git
+cd unread
 ```
 
 All the commands below assume you're in this directory.
@@ -120,11 +120,11 @@ mkdir -p storage && chmod 700 storage   # SQLite isn't encrypted; rely on FS per
 uv tool install --editable .
 ```
 
-That puts the **`atg`** command on your PATH.
+That puts the **`unread`** command on your PATH.
 
 > **Prefer not to install globally?** Skip `uv tool install` entirely,
 > run `uv sync --extra dev` once, and prefix every command with
-> `uv run` — e.g. `uv run atg analyze @somegroup`.
+> `uv run` — e.g. `uv run unread analyze @somegroup`.
 
 ### 6. Upgrading
 
@@ -137,13 +137,13 @@ uv tool install --editable . --reinstall
 Python dependencies (`beautifulsoup4`, `pypdf`, `python-docx`,
 `trafilatura`, `yt-dlp` — used by the link / PDF / docx enrichments,
 website analysis, and YouTube analysis) only land in the tool's venv
-when you pass `--reinstall`. Run `atg doctor` after a pull to verify
+when you pass `--reinstall`. Run `unread doctor` after a pull to verify
 your environment is clean.
 
 ### 7. First-time login
 
 ```bash
-atg init
+unread init
 ```
 
 Interactive wizard: sends a code to your Telegram, creates the local
@@ -152,23 +152,23 @@ confirm your key. Only needed once.
 
 ---
 
-## Where does `atg` read config and write data?
+## Where does `unread` read config and write data?
 
 **Everything is resolved relative to the current working directory.**
-Run `atg` from the repo directory (the one containing your `.env` and
+Run `unread` from the repo directory (the one containing your `.env` and
 `config.toml`) and you'll get:
 
 ```
 ./.env                          ← credentials (step 4)
 ./config.toml                   ← models, pricing, tuning (step 4)
-./storage/session.sqlite        ← Telegram session (created by atg init)
+./storage/session.sqlite        ← Telegram session (created by unread init)
 ./storage/data.sqlite           ← chats, messages, analysis cache, embeddings
-./storage/backups/              ← snapshots from `atg backup`
+./storage/backups/              ← snapshots from `unread backup`
 ./reports/{chat}[/{topic}]/analyze/{preset}-{stamp}.md   ← default report path
 ./reports/{chat}/dump/dump-{stamp}.md                    ← default dump path
 ```
 
-If you `cd` somewhere else and run `atg`, it will look for `.env` and
+If you `cd` somewhere else and run `unread`, it will look for `.env` and
 `config.toml` **in that directory** — and won't find them, so the
 command will fail with missing credentials. Two ways to avoid that:
 
@@ -177,57 +177,57 @@ command will fail with missing credentials. Two ways to avoid that:
 
   **zsh** (`~/.zshrc`):
   ```zsh
-  _atg_run() { (cd ~/path/to/atg && command atg "$@"); }
-  alias atg='nocorrect _atg_run'
+  _unread_run() { (cd ~/path/to/unread && command unread "$@"); }
+  alias unread='nocorrect _unread_run'
   ```
-  `nocorrect` disables zsh's spell-correction for `atg` arguments — without it, typing `atg stats` can trigger `zsh: correct 'stats' to 'stat'?` and end with a parse error.
+  `nocorrect` disables zsh's spell-correction for `unread` arguments — without it, typing `unread stats` can trigger `zsh: correct 'stats' to 'stat'?` and end with a parse error.
 
   **bash** (`~/.bashrc`):
   ```bash
-  atg() { (cd ~/path/to/atg && command atg "$@"); }
+  unread() { (cd ~/path/to/unread && command unread "$@"); }
   ```
 
 ---
 
 ## Command reference
 
-`atg --help` shows three panels.
+`unread --help` shows three panels.
 
 ### Main (everyday)
 
 | Command | Purpose |
 |---|---|
-| `atg init` | Interactive first-time setup. |
-| `atg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
-| `atg analyze [<ref>] [flags]` | Analyze a chat. Default window = unread. |
-| `atg ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
-| `atg dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
+| `unread init` | Interactive first-time setup. |
+| `unread describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
+| `unread analyze [<ref>] [flags]` | Analyze a chat. Default window = unread. |
+| `unread ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
+| `unread dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
 
 ### Sync & subscriptions
 
 | Command | Purpose |
 |---|---|
-| `atg sync` | Pull new messages for every active subscription. |
-| `atg chats add/list/enable/disable/remove` | Manage subscriptions. Optional — one-off `analyze` already fetches. |
+| `unread sync` | Pull new messages for every active subscription. |
+| `unread chats add/list/enable/disable/remove` | Manage subscriptions. Optional — one-off `analyze` already fetches. |
 
 ### Maintenance
 
 | Command | Purpose |
 |---|---|
-| `atg folders` | List your Telegram folders (use with `--folder NAME`). |
-| `atg stats [--by …]` | Token spend / cache hit rate — by chat, preset, model, day, kind. |
-| `atg cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
-| `atg cache stats / ls / show / purge / export` | Analysis-cache maintenance. |
-| `atg cache effectiveness` | Per-(chat, preset) OpenAI prompt-cache hit rate. |
-| `atg doctor` | Preflight check — Telegram session, OpenAI key, ffmpeg, DB integrity, pricing. |
-| `atg backup [out]` | Snapshot `storage/data.sqlite` via `VACUUM INTO`. |
-| `atg restore <file>` | Replace `data.sqlite` with a backup (current DB moved aside). |
-| `atg reports prune --older-than 30d` | Move stale report files to `reports/.trash/`. |
-| `atg watch --interval 1h <inner cmd>` | Run an inner `atg` command on a fixed cadence. |
+| `unread folders` | List your Telegram folders (use with `--folder NAME`). |
+| `unread stats [--by …]` | Token spend / cache hit rate — by chat, preset, model, day, kind. |
+| `unread cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
+| `unread cache stats / ls / show / purge / export` | Analysis-cache maintenance. |
+| `unread cache effectiveness` | Per-(chat, preset) OpenAI prompt-cache hit rate. |
+| `unread doctor` | Preflight check — Telegram session, OpenAI key, ffmpeg, DB integrity, pricing. |
+| `unread backup [out]` | Snapshot `storage/data.sqlite` via `VACUUM INTO`. |
+| `unread restore <file>` | Replace `data.sqlite` with a backup (current DB moved aside). |
+| `unread reports prune --older-than 30d` | Move stale report files to `reports/.trash/`. |
+| `unread watch --interval 1h <inner cmd>` | Run an inner `unread` command on a fixed cadence. |
 
 ### Hidden (still callable, not in `--help`)
 
-`atg download-media [<ref>]` — kept for back-compat. Use `atg dump --save-media` instead.
+`unread download-media [<ref>]` — kept for back-compat. Use `unread dump --save-media` instead.
 
 ---
 
@@ -253,7 +253,7 @@ Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
 
 ### YouTube videos
 
-`atg analyze <youtube-url>` analyzes a single video end-to-end. Flow:
+`unread analyze <youtube-url>` analyzes a single video end-to-end. Flow:
 
 1. yt-dlp fetches metadata (title, channel, duration, captions index).
 2. A summary panel shows up + an interactive picker asks for the
@@ -270,16 +270,16 @@ Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
 
 ```bash
 # Interactive default: shows metadata + asks for source.
-atg analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"
+unread analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"
 
 # Scripted (skip prompts, auto-pick captions / Whisper as needed):
-atg analyze "https://youtu.be/dQw4w9WgXcQ" --yes
+unread analyze "https://youtu.be/dQw4w9WgXcQ" --yes
 
 # Force Whisper (slower; ~$0.003/min):
-atg analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio
+unread analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio
 
-# Different preset; see `atg analyze --help` for the full list.
-atg analyze "https://www.youtube.com/watch?v=..." --preset summary --console
+# Different preset; see `unread analyze --help` for the full list.
+unread analyze "https://www.youtube.com/watch?v=..." --preset summary --console
 ```
 
 Reports land under `reports/youtube/<channel-slug>/<video-slug>-<preset>-<ts>.md`.
@@ -301,11 +301,11 @@ Telegram-only flags (`--folder`, `--thread`, `--all-flat`, `--all-per-topic`,
 `--msg`, `--repeat-last`, `--mark-read`) are rejected for YouTube refs with
 a clear error.
 
-`atg doctor` warns if `yt-dlp` isn't installed.
+`unread doctor` warns if `yt-dlp` isn't installed.
 
 ### Web pages
 
-`atg analyze <url>` analyzes any HTTP/HTTPS web page (article, blog
+`unread analyze <url>` analyzes any HTTP/HTTPS web page (article, blog
 post, documentation, essay) end-to-end. Auto-detected from the URL
 shape: anything that isn't a YouTube link or a Telegram link
 (`t.me/...`) routes here. No flag needed.
@@ -338,22 +338,22 @@ Flow:
 
 ```bash
 # Default — fetch, extract, run the website preset, save under reports/website/...
-atg analyze "https://www.paulgraham.com/greatwork.html"
+unread analyze "https://www.paulgraham.com/greatwork.html"
 
 # Estimate-and-exit (no LLM call):
-atg analyze "https://example.com/blog/post" --dry-run
+unread analyze "https://example.com/blog/post" --dry-run
 
 # Render to terminal instead of saving a file:
-atg analyze "https://example.com/blog/post" --console
+unread analyze "https://example.com/blog/post" --console
 
 # Different preset — `summary`, `digest`, `highlights`, etc. all work:
-atg analyze "https://example.com/blog/post" --preset summary
+unread analyze "https://example.com/blog/post" --preset summary
 
 # Cost-bounded run + post the analysis to your Saved Messages:
-atg analyze "https://example.com/blog/post" --max-cost 0.05 --post-saved
+unread analyze "https://example.com/blog/post" --max-cost 0.05 --post-saved
 
 # Run a custom prompt against a page:
-atg analyze "https://example.com/paper.html" --preset custom --prompt-file my-prompt.md
+unread analyze "https://example.com/paper.html" --preset custom --prompt-file my-prompt.md
 ```
 
 Reports land under `reports/website/<domain-slug>/<title-slug>-<preset>-<ts>.md`.
@@ -367,7 +367,7 @@ Telegram-only flags are rejected for website URLs with a clear error
 (same list as YouTube, plus `--cite-context` since web pages have no
 surrounding-context store to expand into).
 
-**Limitation: JS-rendered SPAs**. atg fetches raw HTML only — no
+**Limitation: JS-rendered SPAs**. unread fetches raw HTML only — no
 headless browser, no JS engine. Single-page apps (React / Angular /
 Vue / Svelte sites that paint content client-side) typically serve
 ~1–5 KB of bootstrapping markup with no readable text. Those URLs
@@ -388,10 +388,10 @@ Configuration knobs (under `[website]` in `config.toml`):
 
 ---
 
-## `atg analyze` — flags
+## `unread analyze` — flags
 
 ```bash
-atg analyze [<ref>] [period] [output] [enrichment] [budget] [audit] [delivery]
+unread analyze [<ref>] [period] [output] [enrichment] [budget] [audit] [delivery]
 ```
 
 ### Period (start point of the analysis window)
@@ -477,11 +477,11 @@ by default. Every cited claim is a clickable link back to the source:
 
 ---
 
-## `atg ask` — Q&A across your synced archive
+## `unread ask` — Q&A across your synced archive
 
 ```bash
-atg ask "what did we decide about the migration?" @somegroup
-atg ask                                                 # opens the wizard
+unread ask "what did we decide about the migration?" @somegroup
+unread ask                                                 # opens the wizard
 ```
 
 Reads only your **local DB** — no Telegram round-trip during retrieval.
@@ -489,7 +489,7 @@ The corpus is everything `analyze` / `dump` / `sync` has already pulled
 (transcripts, image descriptions, doc extracts, link summaries
 included).
 
-**Synopsis**: `atg ask "QUESTION" [<ref>] [flags]`. The positional
+**Synopsis**: `unread ask "QUESTION" [<ref>] [flags]`. The positional
 `<ref>` accepts any chat reference (`@user`, `t.me` link, topic URL,
 fuzzy title, numeric id). A topic URL like
 `https://t.me/c/1234567890/4` auto-fills `--thread`. Without
@@ -539,29 +539,29 @@ sees prior turns as message history); press Enter to exit. Pass
 
 ```bash
 # No args — opens the wizard (asks for the question, then chat → period → confirm):
-atg ask
+unread ask
 
 # Positional ref — username:
-atg ask "what did Bob say about migration?" @somegroup
+unread ask "what did Bob say about migration?" @somegroup
 
 # Positional ref — topic URL (thread auto-filled):
-atg ask "open questions on the API" https://t.me/c/1234567890/4
+unread ask "open questions on the API" https://t.me/c/1234567890/4
 
 # Across every synced chat (no wizard):
-atg ask "когда дедлайн по проекту?" --global --last-days 7
+unread ask "когда дедлайн по проекту?" --global --last-days 7
 
 # Folder scope, semantic retrieval (build index first):
-atg ask "..." --folder Work --build-index
-atg ask "open questions on the API" --folder Work --semantic --rerank --last-days 14
+unread ask "..." --folder Work --build-index
+unread ask "open questions on the API" --folder Work --semantic --rerank --last-days 14
 
 # Cheap and small:
-atg ask "..." --limit 50 --model gpt-5.4-nano
+unread ask "..." --limit 50 --model gpt-5.4-nano
 
 # Debug retrieval before paying for the answer:
-atg ask "..." @somegroup --show-retrieved --max-cost 0.05
+unread ask "..." @somegroup --show-retrieved --max-cost 0.05
 
 # Single answer, no follow-up prompt (script-friendly):
-atg ask "..." @somegroup --no-followup
+unread ask "..." @somegroup --no-followup
 ```
 
 ### Cost feel
@@ -570,20 +570,20 @@ atg ask "..." @somegroup --no-followup
 - **Rerank** (default on): ~10 cheap-model calls × ~1k tokens each ≈ $0.005 per question.
 - **Answer**: scales with `--limit`. With rerank+keep=50 and `gpt-5.4-mini`, typical cost is **~$0.01–0.05 per question**.
 
-Cost is logged under `phase=ask` in `usage_log` — see `atg stats --by kind`.
+Cost is logged under `phase=ask` in `usage_log` — see `unread stats --by kind`.
 
 ---
 
-## `atg dump` — chat history to a file
+## `unread dump` — chat history to a file
 
 No OpenAI call by default. Same backfill + filter pipeline as `analyze`,
 just writes raw messages instead of an analysis.
 
 ```bash
-atg dump @somegroup -o history.md --last-days 30
-atg dump @somegroup --format jsonl --with-transcribe -o dump.jsonl
-atg dump @somegroup --save-media           # also save raw media files alongside
-atg dump --folder Work                     # batch-dump every unread chat in folder
+unread dump @somegroup -o history.md --last-days 30
+unread dump @somegroup --format jsonl --with-transcribe -o dump.jsonl
+unread dump @somegroup --save-media           # also save raw media files alongside
+unread dump --folder Work                     # batch-dump every unread chat in folder
 ```
 
 | Flag | Meaning |
@@ -600,10 +600,10 @@ atg dump --folder Work                     # batch-dump every unread chat in fol
 ## Wizard (no `<ref>`)
 
 ```bash
-atg analyze            # → pick chat → thread (forum) → preset → period → enrich → run
-atg ask                # → pick chat → period → enrich → ask
-atg dump               # → pick chat → period → enrich → run
-atg describe           # → pick chat → show details / topics
+unread analyze            # → pick chat → thread (forum) → preset → period → enrich → run
+unread ask                # → pick chat → period → enrich → ask
+unread dump               # → pick chat → period → enrich → run
+unread describe           # → pick chat → show details / topics
 ```
 
 Navigation: **↑/↓** move, **type to filter** (works for Cyrillic /
@@ -636,14 +636,14 @@ Forums are chats with topics, each with its own unread marker. Three
 modes for both `analyze` and `dump`:
 
 ```bash
-atg analyze @forumchat --thread 42                       # one specific topic
-atg analyze @forumchat --all-flat --last-days 3          # whole forum, one report
-atg analyze @forumchat --all-per-topic                   # one report per topic
+unread analyze @forumchat --thread 42                       # one specific topic
+unread analyze @forumchat --all-flat --last-days 3          # whole forum, one report
+unread analyze @forumchat --all-per-topic                   # one report per topic
 ```
 
-Without any of these, `atg analyze @forumchat` opens a topic picker.
+Without any of these, `unread analyze @forumchat` opens a topic picker.
 
-`atg describe @forumchat` prints the topic list with unread counts and
+`unread describe @forumchat` prints the topic list with unread counts and
 local-DB counts; both `describe` and the wizard fix Telegram's stale /
 capped dialog-level forum counts by summing per-topic counts via
 `GetForumTopicsRequest`.
@@ -652,7 +652,7 @@ capped dialog-level forum counts by summing per-topic counts via
 
 ## Media enrichment
 
-Telegram chats carry more than text. `atg` turns each non-text message
+Telegram chats carry more than text. `unread` turns each non-text message
 into something the LLM can read:
 
 | Kind | What happens | Default |
@@ -668,9 +668,9 @@ into something the LLM can read:
 Three ways to control:
 
 ```bash
-atg analyze @somegroup --enrich=voice,image,link    # explicit set
-atg analyze @somegroup --enrich-all                 # everything
-atg analyze @somegroup --no-enrich                  # nothing, even defaults
+unread analyze @somegroup --enrich=voice,image,link    # explicit set
+unread analyze @somegroup --enrich-all                 # everything
+unread analyze @somegroup --no-enrich                  # nothing, even defaults
 ```
 
 **Precedence** (first wins): `--no-enrich` → `--enrich-all` →
@@ -695,7 +695,7 @@ once enrichments are cached.
 
 The orchestrator logs a one-line summary, plus per-call lines tagged
 with `phase=enrich_<kind>` and the originating `chat_id` / `msg_id` /
-`msg_date` so the cost in `atg stats` is traceable to actual messages.
+`msg_date` so the cost in `unread stats` is traceable to actual messages.
 
 ---
 
@@ -766,35 +766,35 @@ Per-run override:
 
 ```bash
 # English UI, Russian prompts → English headings, Russian analysis body
-atg analyze @somechat --language en --content-language ru
-atg ask "что обсуждали?" --language en --content-language ru
+unread analyze @somechat --language en --content-language ru
+unread ask "что обсуждали?" --language en --content-language ru
 ```
 
 Whisper transcription has its own knob (`[openai] audio_language`) —
 empty means autodetect, decoupled from both UI and content language.
 
-### Persisting preferences with `atg settings`
+### Persisting preferences with `unread settings`
 
 Edit your locale prefs without touching `config.toml`:
 
 ```bash
-atg settings                              # interactive editor
-atg settings show                         # current effective values + DB overrides
-atg settings set locale.language en
-atg settings set locale.content_language ru
-atg settings unset locale.content_language  # drop a single override
-atg settings reset                         # drop all DB overrides
+unread settings                              # interactive editor
+unread settings show                         # current effective values + DB overrides
+unread settings set locale.language en
+unread settings set locale.content_language ru
+unread settings unset locale.content_language  # drop a single override
+unread settings reset                         # drop all DB overrides
 ```
 
 Saved to `storage/data.sqlite` in the `app_settings` table. Applied on
-every `atg` invocation; explicit `--language` / `--content-language`
+every `unread` invocation; explicit `--language` / `--content-language`
 flags still win.
 
 ### Migration note
 
 When you upgrade from a pre-locale build, your existing config has no
 `[locale]` block and defaults to English. To restore Russian as before:
-either run `atg settings set locale.language ru` (one-time), or add
+either run `unread settings set locale.language ru` (one-time), or add
 `[locale] language = "ru"` to your `config.toml`.
 
 ---
@@ -832,12 +832,12 @@ stored in SQLite. Re-run the same query → zero-cost hit. Toggling
 the relevant rows.
 
 ```bash
-atg cache stats               # rows, disk size, saved $, breakdown
-atg cache ls --limit 20       # latest entries
-atg cache show <hash-prefix>  # print a stored result
-atg cache export -o old.jsonl --older-than 30d
-atg cache purge --older-than 30d --vacuum
-atg cache effectiveness       # per-(chat, preset) prompt-cache hit rate from usage_log
+unread cache stats               # rows, disk size, saved $, breakdown
+unread cache ls --limit 20       # latest entries
+unread cache show <hash-prefix>  # print a stored result
+unread cache export -o old.jsonl --older-than 30d
+unread cache purge --older-than 30d --vacuum
+unread cache effectiveness       # per-(chat, preset) prompt-cache hit rate from usage_log
 ```
 
 **Truncated results are never cached.** A partial summary would
@@ -847,7 +847,7 @@ silently poison every future run.
 
 When prompt prefix ≥ 1024 tokens and identical bytes arrive within
 ~5–10 minutes, OpenAI discounts repeated tokens.
-`atg cache effectiveness` shows your hit rate per (chat, preset).
+`unread cache effectiveness` shows your hit rate per (chat, preset).
 `config.toml` enforces `temperature=0.2` and a fixed
 `system → static_context → dynamic` message order to maximize hits.
 
@@ -864,9 +864,9 @@ Forwarded 10× = fetched once.
 ### Up-front cost guard
 
 ```bash
-atg analyze @somegroup --max-cost 0.50    # confirm if estimate exceeds
-atg analyze @somegroup --max-cost 0.50 --yes   # silently abort if over
-atg analyze @somegroup --dry-run          # estimate-and-exit, no LLM call
+unread analyze @somegroup --max-cost 0.50    # confirm if estimate exceeds
+unread analyze @somegroup --max-cost 0.50 --yes   # silently abort if over
+unread analyze @somegroup --dry-run          # estimate-and-exit, no LLM call
 ```
 
 Estimate covers the analysis (map + reduce); enrichment cost is **not**
@@ -875,16 +875,16 @@ included.
 ### Spending visibility
 
 ```bash
-atg stats                     # totals by preset
-atg stats --by chat           # biggest spenders by chat
-atg stats --by day            # spend over time
-atg stats --by kind           # chat vs audio vs ask
-atg cache effectiveness       # OpenAI prompt-cache hit rate per (chat, preset)
+unread stats                     # totals by preset
+unread stats --by chat           # biggest spenders by chat
+unread stats --by day            # spend over time
+unread stats --by kind           # chat vs audio vs ask
+unread cache effectiveness       # OpenAI prompt-cache hit rate per (chat, preset)
 ```
 
 If a row says `(N unpriced)` next to its call count, those rows used a
 model not in your `[pricing.chat]` / `[pricing.audio]` table — add the
-entry so cost stops under-reporting. `atg doctor` flags missing
+entry so cost stops under-reporting. `unread doctor` flags missing
 pricing entries.
 
 ---
@@ -893,27 +893,27 @@ pricing entries.
 
 ```bash
 # Health check — Telegram session, OpenAI key, ffmpeg, DB integrity, presets, disk, pricing
-atg doctor
+unread doctor
 
 # Backup the data DB (VACUUM INTO — atomic, compact)
-atg backup                                  # → storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite
-atg backup mybackup.sqlite --overwrite
+unread backup                                  # → storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite
+unread backup mybackup.sqlite --overwrite
 
 # Restore a backup (current DB moved aside as data-replaced-…sqlite)
-atg restore storage/backups/data-2026-04-25_…sqlite --yes
+unread restore storage/backups/data-2026-04-25_…sqlite --yes
 
 # Null out old message texts (privacy / disk reclaim)
-atg cleanup --retention 90d                # preview + confirmation
-atg cleanup --retention 90d --yes
-atg cleanup --retention 30d --chat 1234567890
+unread cleanup --retention 90d                # preview + confirmation
+unread cleanup --retention 90d --yes
+unread cleanup --retention 30d --chat 1234567890
 
 # Prune old report files to reports/.trash/<ts>/
-atg reports prune --older-than 30d --dry-run    # see what would move
-atg reports prune --older-than 30d
-atg reports prune --older-than 90d --purge       # hard delete (asks first)
+unread reports prune --older-than 30d --dry-run    # see what would move
+unread reports prune --older-than 30d
+unread reports prune --older-than 90d --purge       # hard delete (asks first)
 
 # Cache hygiene
-atg cache purge --older-than 30d --vacuum
+unread cache purge --older-than 30d --vacuum
 ```
 
 `cleanup` preserves row metadata (ids, dates, authors, transcripts) —
@@ -921,15 +921,15 @@ it only NULLs the raw `text` column.
 
 ---
 
-## `atg watch` — scheduled runs
+## `unread watch` — scheduled runs
 
-Foreground loop that runs an inner `atg` command on a fixed cadence.
+Foreground loop that runs an inner `unread` command on a fixed cadence.
 No daemon — run under `tmux` / `nohup` for persistence.
 
 ```bash
-atg watch --interval 1h analyze --folder Work --post-saved
-atg watch --interval 30m ask "anything urgent?" --folder Work
-atg watch --interval 24h --max-runs 7 analyze --folder Work --digest
+unread watch --interval 1h analyze --folder Work --post-saved
+unread watch --interval 30m ask "anything urgent?" --folder Work
+unread watch --interval 24h --max-runs 7 analyze --folder Work --digest
 ```
 
 | Flag | Meaning |
@@ -942,20 +942,20 @@ streams live; each iteration is preceded by `── Run K  YYYY-MM-DDThh:mm:ss`.
 
 ---
 
-## `atg folders` — Telegram folder integration
+## `unread folders` — Telegram folder integration
 
 Telegram "folders" (dialog filters) become a first-class scope:
 
 ```bash
-atg folders                                  # list every folder + chat counts
-atg analyze --folder Work                    # batch every unread chat in folder
-atg dump --folder Work                       # same for dump
-atg ask "..." --folder Work                  # Q&A scoped to folder
+unread folders                                  # list every folder + chat counts
+unread analyze --folder Work                    # batch every unread chat in folder
+unread dump --folder Work                       # same for dump
+unread ask "..." --folder Work                  # Q&A scoped to folder
 ```
 
 Folder column shows up in:
-- `atg describe` (no ref) — the dialogs table.
-- `atg describe @chat` — folder line under the username row.
+- `unread describe` (no ref) — the dialogs table.
+- `unread describe @chat` — folder line under the username row.
 - The wizard's chat picker — `unread | kind | last msg | folder | title`.
 
 Only **explicitly listed** chats are expanded — rule-based folders
@@ -966,18 +966,18 @@ walked.
 
 ## Subscriptions (optional)
 
-You don't need these for one-off analysis — `atg analyze @chat` already
+You don't need these for one-off analysis — `unread analyze @chat` already
 resolves the chat and fetches what's missing. Subscriptions are for
 **long-term tracking**: a fixed set of chats you keep in your local DB,
 sync on a cron, and analyze by date ranges across many runs.
 
 ```bash
-atg chats add @somegroup
-atg chats list
-atg sync
-atg chats remove <chat_id>
-atg chats add @forum --all-topics
-atg chats add @channel --with-comments
+unread chats add @somegroup
+unread chats list
+unread sync
+unread chats remove <chat_id>
+unread chats add @forum --all-topics
+unread chats add @channel --with-comments
 ```
 
 ---
@@ -986,38 +986,38 @@ atg chats add @channel --with-comments
 
 ```bash
 # Daily morning digest of your work folder, into Saved Messages, on a 24h cron
-atg watch --interval 24h analyze --folder Work --preset digest --post-saved
+unread watch --interval 24h analyze --folder Work --preset digest --post-saved
 
 # Audit a high-stakes report — citations get expanded, claims verified
-atg analyze @somegroup --preset action_items --cite-context 5 --self-check
+unread analyze @somegroup --preset action_items --cite-context 5 --self-check
 
 # What did Bob say last week? In one chat, with rerank + post-answer follow-ups (default)
-atg ask "what did Bob propose?" @somegroup --last-days 7
+unread ask "what did Bob propose?" @somegroup --last-days 7
 
 # Filter analysis to one sender (with a citable result)
-atg analyze @somegroup --by Bob --preset highlights
+unread analyze @somegroup --by Bob --preset highlights
 
 # Cost-bounded run, with a budget alarm
-atg analyze @somegroup --enrich-all --max-cost 0.50 --post-to me
+unread analyze @somegroup --enrich-all --max-cost 0.50 --post-to me
 
 # Re-run with the same flags as last time, but force a fresh cache
-atg analyze @somegroup --repeat-last --no-cache
+unread analyze @somegroup --repeat-last --no-cache
 
 # Build a semantic index over a folder, then query it
-atg ask --build-index --folder Work
-atg ask "open architecture questions" --folder Work --semantic
+unread ask --build-index --folder Work
+unread ask "open architecture questions" --folder Work --semantic
 
 # Forum: per-topic reports for the entire forum
-atg analyze @forumchat --all-per-topic
+unread analyze @forumchat --all-per-topic
 
 # Dump and save every photo / voice / video / doc alongside the text
-atg dump @somegroup --save-media --save-media-types photo,voice
+unread dump @somegroup --save-media --save-media-types photo,voice
 
 # Analyze a long-form article — paragraph-indexed citations link back to the page
-atg analyze "https://www.paulgraham.com/greatwork.html" --preset website
+unread analyze "https://www.paulgraham.com/greatwork.html" --preset website
 
 # Analyze a YouTube video, force Whisper instead of captions
-atg analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio --post-saved
+unread analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio --post-saved
 ```
 
 ---
@@ -1058,9 +1058,9 @@ rerank_keep = 50                         # what survives rerank → flagship
 
 `[pricing.chat.<model>]` / `[pricing.audio]` populate the cost table.
 Models that aren't priced still work — they just show as "unpriced
-calls" in `atg stats` and `atg doctor` warns about it.
+calls" in `unread stats` and `unread doctor` warns about it.
 
-`ANALYZETG_CONFIG_PATH=/abs/path/config.toml` overrides the cwd-relative
+`UNREAD_CONFIG_PATH=/abs/path/config.toml` overrides the cwd-relative
 discovery.
 
 ---
@@ -1093,7 +1093,7 @@ Three SQLite tables under `storage/data.sqlite` matter most:
 Plus newer:
 
 - `chat_last_run_args` — backs `--repeat-last`.
-- `message_embeddings` — vector store for `atg ask --semantic`.
+- `message_embeddings` — vector store for `unread ask --semantic`.
 - `usage_log` — every OpenAI call, with `phase=` tag for cost attribution.
 
 Reports land in `reports/` (gitignored). Each cited claim is a
@@ -1107,7 +1107,7 @@ Analyses larger than one context window are automatically map-reduced:
 map call is cached independently — adding one new message at the tail
 re-costs only one chunk.
 
-`atg ask` is its own pipeline: keyword retrieval (or embedding cosine)
+`unread ask` is its own pipeline: keyword retrieval (or embedding cosine)
 → optional rerank → format → single LLM call with citations. No
 map-reduce; the candidate pool is bounded by `--limit`.
 
@@ -1133,7 +1133,7 @@ before changing the pipeline, DB layer, or preset prompts.
 Design notes and roadmap live under [`docs/`](docs/) and
 [`ROADMAP.md`](ROADMAP.md).
 
-Run `atg doctor` after any pull or env change — it surfaces the
+Run `unread doctor` after any pull or env change — it surfaces the
 common breakage points (missing ffmpeg, broken Telegram session,
 missing pricing entries, schema drift).
 

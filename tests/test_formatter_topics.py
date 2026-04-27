@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from atg.analyzer.formatter import chat_header_preamble, format_messages
-from atg.models import Message
+from unread.analyzer.formatter import chat_header_preamble, format_messages
+from unread.models import Message
 
 
 def _msg(msg_id: int, thread_id: int | None, text: str, minute: int) -> Message:

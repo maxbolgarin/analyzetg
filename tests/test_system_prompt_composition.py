@@ -13,7 +13,7 @@ single-source-of-truth contract:
 
 from __future__ import annotations
 
-from atg.analyzer.prompts import (
+from unread.analyzer.prompts import (
     BASE_VERSION,
     _load_base_system,
     compose_system_prompt,

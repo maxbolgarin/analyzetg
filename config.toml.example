@@ -1,4 +1,4 @@
-# atg — configuration
+# unread — configuration
 #
 # Convention: only settings you override are uncommented. Every other knob
 # is listed commented-out, showing its default, so it's discoverable. Flip
@@ -33,7 +33,7 @@ filter_model_default = "gpt-5.4-nano"
 # ask labels, image/link descriptions, and analysis output language.
 # Presets live under presets/<language>/ — the loader reads from the active
 # language's directory only (no fallback). RU users opt in by setting
-# language = "ru"; the experience matches what atg shipped before
+# language = "ru"; the experience matches what unread shipped before
 # English support landed.
 
 # [locale]
@@ -97,7 +97,7 @@ vision_model = "gpt-4o-mini"
 
 # ==================================================================== Pricing
 #
-# $ per 1M tokens (chat) / $ per minute (audio). `atg stats` uses these to
+# $ per 1M tokens (chat) / $ per minute (audio). `unread stats` uses these to
 # attribute spend. A model missing from this table shows up as
 # "⚠ N call(s) had no pricing entry" in the stats output.
 # Keep entries for every model you actually use.

@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 import typer
 
-from atg.ask.commands import _validate_scope_args, cmd_ask
+from unread.ask.commands import _validate_scope_args, cmd_ask
 
 
 def test_ref_and_chat_both_set_raises():
@@ -46,7 +46,7 @@ def test_only_ref_is_ok():
 
 @pytest.mark.asyncio
 async def test_refresh_without_scope_raises_before_wizard():
-    """`atg ask --refresh` (bare) used to drop into the wizard, then fail at
+    """`unread ask --refresh` (bare) used to drop into the wizard, then fail at
     the end if the user picked ALL_LOCAL. Fail-fast keeps that wasted run
     from happening."""
     with pytest.raises(typer.BadParameter, match=r"--refresh requires"):

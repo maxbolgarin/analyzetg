@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from atg.db.repo import Repo
-from atg.models import Message
+from unread.db.repo import Repo
+from unread.models import Message
 
 
 @pytest.fixture

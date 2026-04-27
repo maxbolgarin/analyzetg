@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from atg.analyzer.commands import (
+from unread.analyzer.commands import (
     _fmt_cost_precise,
     _fmt_period_header,
     _render_report_header,
 )
-from atg.analyzer.pipeline import AnalysisResult
+from unread.analyzer.pipeline import AnalysisResult
 
 
 def _result(**overrides) -> AnalysisResult:

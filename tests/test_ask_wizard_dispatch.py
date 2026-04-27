@@ -9,17 +9,17 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_cmd_ask_with_question_no_scope_routes_to_wizard():
-    """`atg ask "Q"` (question, no scope) → wizard, NOT global retrieval.
+    """`unread ask "Q"` (question, no scope) → wizard, NOT global retrieval.
 
     Spec: no scope flag set → wizard, regardless of whether the question
     is supplied. The wizard collects scope; the question is forwarded.
     """
-    from atg.ask import commands as ask_commands
+    from unread.ask import commands as ask_commands
 
     fake_wizard = AsyncMock()
     # `run_interactive_ask` is imported lazily inside cmd_ask, so patch it
     # at the source module — the lazy import resolves at call time.
-    with patch("atg.interactive.run_interactive_ask", new=fake_wizard):
+    with patch("unread.interactive.run_interactive_ask", new=fake_wizard):
         await ask_commands.cmd_ask(
             question="как дела?",
             ref=None,
@@ -34,7 +34,7 @@ async def test_cmd_ask_with_question_no_scope_routes_to_wizard():
 
 @pytest.mark.asyncio
 async def test_run_interactive_ask_calls_cmd_ask_with_global_when_all_local_picked():
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="",
@@ -57,8 +57,8 @@ async def test_run_interactive_ask_calls_cmd_ask_with_global_when_all_local_pick
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="что нового?")
 
@@ -72,7 +72,7 @@ async def test_run_interactive_ask_calls_cmd_ask_with_global_when_all_local_pick
 
 @pytest.mark.asyncio
 async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="-1001234567890",
@@ -98,8 +98,8 @@ async def test_run_interactive_ask_passes_chat_id_and_thread_when_chat_picked():
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="open Qs?")
 
@@ -126,7 +126,7 @@ async def test_run_interactive_ask_passes_last_hours_for_last24h():
     Regression guard that the new hour-granular options are wired to the
     new --last-hours flag (not silently dropped or coerced into days).
     """
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="-1001234567890",
@@ -149,8 +149,8 @@ async def test_run_interactive_ask_passes_last_hours_for_last24h():
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="recent news?")
 
@@ -162,7 +162,7 @@ async def test_run_interactive_ask_passes_last_hours_for_last24h():
 @pytest.mark.asyncio
 async def test_run_interactive_ask_does_not_force_refresh_for_all_local():
     """ALL_LOCAL is an explicit local-only path — no Telegram backfill."""
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="",
@@ -185,8 +185,8 @@ async def test_run_interactive_ask_does_not_force_refresh_for_all_local():
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="что нового?")
 
