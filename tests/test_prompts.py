@@ -4,7 +4,7 @@ Covers regressions in:
 - `output_budget_tokens` / `map_output_tokens` parsing (both are used by
   the pipeline to cap LLM responses; wrong parse → truncation).
 - `---USER---` marker splitting system prompt from user template.
-- Custom-preset loader (`atg analyze --preset custom --prompt-file ...`).
+- Custom-preset loader (`unread analyze --preset custom --prompt-file ...`).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from atg.analyzer.prompts import (
+from unread.analyzer.prompts import (
     DEFAULT_USER_TAIL,
     PRESETS,
     PRESETS_DIR,

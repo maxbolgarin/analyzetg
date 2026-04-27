@@ -2,7 +2,7 @@
 
 Three layers covered:
 
-1. **Inline flags** (`atg ask "Q" @chat --enrich voice,image`) reach
+1. **Inline flags** (`unread ask "Q" @chat --enrich voice,image`) reach
    `cmd_ask` and trigger `enrich_messages` BEFORE retrieval — same
    helper analyze uses (`build_enrich_opts` + `enrich_messages`),
    not a re-implementation. Order matters: enrichment first so
@@ -26,20 +26,20 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_ask_inline_enrich_runs_before_retrieval():
-    """`atg ask "Q" @chat --enrich voice` runs enrichment before retrieval.
+    """`unread ask "Q" @chat --enrich voice` runs enrichment before retrieval.
 
     Spec: enrichment must occur after scope resolution but before the
     retrieval step, so voice transcripts (and image descriptions, etc.)
     become searchable mid-run.
     """
-    from atg.ask import commands as ask_commands
+    from unread.ask import commands as ask_commands
 
     order: list[str] = []
 
     async def fake_enrich(*args, **kwargs):
         order.append("enrich")
         # Mirror the real enrich_messages return shape.
-        from atg.enrich.base import EnrichStats
+        from unread.enrich.base import EnrichStats
 
         return EnrichStats()
 
@@ -78,7 +78,7 @@ async def test_ask_inline_enrich_runs_before_retrieval():
         patch.object(ask_commands, "get_settings", return_value=fake_settings),
         patch.object(ask_commands, "resolve_ref", new=fake_resolve),
         patch.object(ask_commands, "_run_single_turn", new=fake_run_single_turn),
-        patch("atg.enrich.pipeline.enrich_messages", new=fake_enrich),
+        patch("unread.enrich.pipeline.enrich_messages", new=fake_enrich),
         # Skip the post-answer "Continue chatting?" prompt.
     ):
         await ask_commands.cmd_ask(
@@ -103,14 +103,14 @@ async def test_ask_inline_enrich_runs_before_retrieval():
 
 @pytest.mark.asyncio
 async def test_ask_no_enrich_skips_enrichment():
-    """`atg ask --no-enrich` does NOT call enrich_messages."""
-    from atg.ask import commands as ask_commands
+    """`unread ask --no-enrich` does NOT call enrich_messages."""
+    from unread.ask import commands as ask_commands
 
     enrich_called = {"n": 0}
 
     async def fake_enrich(*args, **kwargs):
         enrich_called["n"] += 1
-        from atg.enrich.base import EnrichStats
+        from unread.enrich.base import EnrichStats
 
         return EnrichStats()
 
@@ -146,7 +146,7 @@ async def test_ask_no_enrich_skips_enrichment():
         patch.object(ask_commands, "get_settings", return_value=fake_settings),
         patch.object(ask_commands, "resolve_ref", new=fake_resolve),
         patch.object(ask_commands, "_run_single_turn", new=fake_run_single_turn),
-        patch("atg.enrich.pipeline.enrich_messages", new=fake_enrich),
+        patch("unread.enrich.pipeline.enrich_messages", new=fake_enrich),
     ):
         await ask_commands.cmd_ask(
             question="hello",
@@ -166,7 +166,7 @@ async def test_ask_no_enrich_skips_enrichment():
 @pytest.mark.asyncio
 async def test_run_interactive_ask_forwards_enrich_kinds_to_cmd_ask():
     """Wizard `enrich_kinds=['voice']` becomes `enrich='voice'` on cmd_ask."""
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="-1001234567890",
@@ -189,8 +189,8 @@ async def test_run_interactive_ask_forwards_enrich_kinds_to_cmd_ask():
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="open Qs?")
 
@@ -203,7 +203,7 @@ async def test_run_interactive_ask_forwards_enrich_kinds_to_cmd_ask():
 @pytest.mark.asyncio
 async def test_run_interactive_ask_empty_enrich_kinds_sends_no_enrich():
     """Wizard `enrich_kinds=[]` (user disabled all) → `no_enrich=True`."""
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="-1001234567890",
@@ -226,8 +226,8 @@ async def test_run_interactive_ask_empty_enrich_kinds_sends_no_enrich():
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="open Qs?")
 
@@ -239,7 +239,7 @@ async def test_run_interactive_ask_empty_enrich_kinds_sends_no_enrich():
 @pytest.mark.asyncio
 async def test_run_interactive_ask_none_enrich_kinds_uses_defaults():
     """Wizard `enrich_kinds=None` → no override, cmd_ask uses config defaults."""
-    from atg.interactive import InteractiveAnswers, run_interactive_ask
+    from unread.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="",
@@ -262,8 +262,8 @@ async def test_run_interactive_ask_none_enrich_kinds_uses_defaults():
     )
 
     with (
-        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("unread.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("unread.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="что нового?")
 

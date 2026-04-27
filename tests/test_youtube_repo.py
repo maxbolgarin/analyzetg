@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from atg.db.repo import Repo
+from unread.db.repo import Repo
 
 
 @pytest.fixture

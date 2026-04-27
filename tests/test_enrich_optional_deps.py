@@ -12,9 +12,9 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 
-from atg.enrich import document as doc_mod
-from atg.enrich import link as link_mod
-from atg.models import Message
+from unread.enrich import document as doc_mod
+from unread.enrich import link as link_mod
+from unread.models import Message
 
 
 class _StubRepo:
@@ -120,7 +120,7 @@ def test_default_doc_size_cap_accepts_typical_pdfs():
     PDF in a real run. 25 MB is the right ceiling — small enough to block
     pathological uploads, large enough for everyday documents.
     """
-    from atg.config import EnrichCfg
+    from unread.config import EnrichCfg
 
     cfg = EnrichCfg()
     assert cfg.max_doc_bytes >= 25_000_000, (
@@ -154,7 +154,7 @@ async def test_text_doc_works_without_pdf_or_docx_libs(monkeypatch, tmp_path):
 
     # Redirect tmp_dir so the stubbed file's name matches what enrich_document
     # expects to unlink on teardown (not strictly required, but tidier).
-    from atg.config import get_settings
+    from unread.config import get_settings
 
     settings = get_settings()
     settings.media.tmp_dir = tmp_path

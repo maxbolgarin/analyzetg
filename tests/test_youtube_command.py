@@ -13,17 +13,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from atg.analyzer.pipeline import AnalysisOptions
-from atg.analyzer.prompts import get_presets
-from atg.youtube.commands import (
+from unread.analyzer.pipeline import AnalysisOptions
+from unread.analyzer.prompts import get_presets
+from unread.youtube.commands import (
     _build_synthetic_messages,
     _meta_header,
     _parse_upload_date,
     _restore_metadata_from_row,
     _segment_transcript,
 )
-from atg.youtube.metadata import YoutubeMetadata
-from atg.youtube.paths import youtube_report_path
+from unread.youtube.metadata import YoutubeMetadata
+from unread.youtube.paths import youtube_report_path
 
 
 def _meta(**overrides) -> YoutubeMetadata:
@@ -334,8 +334,8 @@ def test_chunker_respects_max_chunk_input_tokens() -> None:
     """A long transcript with the cap forces multi-chunk, even on a 400k-context model."""
     from datetime import UTC, datetime
 
-    from atg.analyzer.chunker import build_chunks
-    from atg.models import Message
+    from unread.analyzer.chunker import build_chunks
+    from unread.models import Message
 
     base = datetime(2024, 1, 1, tzinfo=UTC)
     # 400 messages * ~150 words each => roughly 60k+ tokens — well under
@@ -393,7 +393,7 @@ def test_options_payload_is_telegram_back_compat() -> None:
 
 
 def test_vtt_parser_strips_timing_and_dedupes() -> None:
-    from atg.youtube.transcript import _parse_vtt_timed
+    from unread.youtube.transcript import _parse_vtt_timed
 
     # The rolling-overlap pattern: same payload in adjacent cues. We
     # dedup AT THE CUE LEVEL — a cue whose joined-line body matches a
@@ -426,7 +426,7 @@ General Kenobi.
 
 
 def test_vtt_parser_strips_inline_tags() -> None:
-    from atg.youtube.transcript import _parse_vtt
+    from unread.youtube.transcript import _parse_vtt
 
     vtt = """WEBVTT
 
@@ -440,7 +440,7 @@ def test_vtt_parser_strips_inline_tags() -> None:
 
 def test_vtt_parser_returns_timed_cues_with_offsets() -> None:
     """Hour-mark cues are parsed correctly: 1h12m34s → 4354 sec."""
-    from atg.youtube.transcript import _parse_vtt_timed
+    from unread.youtube.transcript import _parse_vtt_timed
 
     vtt = """WEBVTT
 
@@ -455,7 +455,7 @@ Cue at the 1-hour-12-minute mark.
 
 def test_segment_timed_cues_groups_under_max_chars() -> None:
     """_segment_timed_cues packs cues until max_chars is reached."""
-    from atg.youtube.commands import _segment_timed_cues
+    from unread.youtube.commands import _segment_timed_cues
 
     cues = [
         (0, "first " * 50),
@@ -478,7 +478,7 @@ def test_youtube_url_precedence_in_cmd_analyze() -> None:
     surfaces the regression — otherwise YouTube URLs would be sent into
     Telegram's fuzzy-title matcher first, which is silly.
     """
-    from atg.youtube.urls import is_youtube_url
+    from unread.youtube.urls import is_youtube_url
 
     assert is_youtube_url("https://www.youtube.com/watch?v=abc")
     assert not is_youtube_url("@somechan")
@@ -491,7 +491,7 @@ def test_youtube_url_precedence_in_cmd_analyze() -> None:
 @pytest.mark.parametrize("source", ["auto", "captions", "audio"])
 def test_valid_youtube_sources(source: str) -> None:
     """Triple-checks the literal alphabet our handler accepts."""
-    from atg.youtube.transcript import TranscriptSource
+    from unread.youtube.transcript import TranscriptSource
 
     # Type-only; runtime check at the cmd_analyze branch.
     assert source in ("auto", "captions", "audio")

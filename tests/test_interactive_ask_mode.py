@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from atg.interactive import ALL_LOCAL, BACK, _collect_answers
+from unread.interactive import ALL_LOCAL, BACK, _collect_answers
 
 
 def _stub_bind_escape_run():
@@ -62,18 +62,18 @@ async def test_ask_mode_picks_all_local_skips_thread_and_preset():
         return ("unread", None, None, None)
 
     with (
-        patch("atg.interactive._pick_chat", new=fake_pick_chat),
-        patch("atg.interactive._pick_period", new=fake_pick_period),
+        patch("unread.interactive._pick_chat", new=fake_pick_chat),
+        patch("unread.interactive._pick_period", new=fake_pick_period),
         patch(
-            "atg.interactive._fetch_period_counts",
+            "unread.interactive._fetch_period_counts",
             new=AsyncMock(return_value={}),
         ),
         # `_pick_enrich` returns the list of enabled kinds; `[]` means
         # "user explicitly disabled all enrichment" (sets enrich_kinds=[]).
-        patch("atg.interactive._pick_enrich", new=AsyncMock(return_value=[])),
-        patch("atg.interactive._bind_escape", new=_stub_bind_escape_run()),
-        patch("atg.interactive.tg_client") as fake_tg,
-        patch("atg.interactive.open_repo") as fake_repo,
+        patch("unread.interactive._pick_enrich", new=AsyncMock(return_value=[])),
+        patch("unread.interactive._bind_escape", new=_stub_bind_escape_run()),
+        patch("unread.interactive.tg_client") as fake_tg,
+        patch("unread.interactive.open_repo") as fake_repo,
     ):
         fake_tg.return_value.__aenter__ = AsyncMock(return_value=object())
         fake_tg.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -123,18 +123,18 @@ async def test_ask_mode_picks_specific_chat_skips_preset_and_enrich():
     fake_repo_obj.media_breakdown = AsyncMock(return_value={})
 
     with (
-        patch("atg.interactive._pick_chat", new=fake_pick_chat),
-        patch("atg.interactive._pick_period", new=fake_pick_period),
+        patch("unread.interactive._pick_chat", new=fake_pick_chat),
+        patch("unread.interactive._pick_period", new=fake_pick_period),
         patch(
-            "atg.interactive._fetch_period_counts",
+            "unread.interactive._fetch_period_counts",
             new=AsyncMock(return_value={"last7": 10}),
         ),
         # `_pick_enrich` returns the list of enabled kinds; `[]` means
         # "user explicitly disabled all enrichment" (sets enrich_kinds=[]).
-        patch("atg.interactive._pick_enrich", new=AsyncMock(return_value=[])),
-        patch("atg.interactive._bind_escape", new=_stub_bind_escape_run()),
-        patch("atg.interactive.tg_client") as fake_tg,
-        patch("atg.interactive.open_repo") as fake_repo,
+        patch("unread.interactive._pick_enrich", new=AsyncMock(return_value=[])),
+        patch("unread.interactive._bind_escape", new=_stub_bind_escape_run()),
+        patch("unread.interactive.tg_client") as fake_tg,
+        patch("unread.interactive.open_repo") as fake_repo,
     ):
         fake_tg.return_value.__aenter__ = AsyncMock(return_value=object())
         fake_tg.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -203,18 +203,18 @@ async def test_ask_mode_back_from_period_after_all_local_resets_flag():
     fake_repo_obj.media_breakdown = AsyncMock(return_value={})
 
     with (
-        patch("atg.interactive._pick_chat", new=fake_pick_chat),
-        patch("atg.interactive._pick_period", new=fake_pick_period),
+        patch("unread.interactive._pick_chat", new=fake_pick_chat),
+        patch("unread.interactive._pick_period", new=fake_pick_period),
         patch(
-            "atg.interactive._fetch_period_counts",
+            "unread.interactive._fetch_period_counts",
             new=AsyncMock(return_value={}),
         ),
         # `_pick_enrich` returns the list of enabled kinds; `[]` means
         # "user explicitly disabled all enrichment" (sets enrich_kinds=[]).
-        patch("atg.interactive._pick_enrich", new=AsyncMock(return_value=[])),
-        patch("atg.interactive._bind_escape", new=_stub_bind_escape_run()),
-        patch("atg.interactive.tg_client") as fake_tg,
-        patch("atg.interactive.open_repo") as fake_repo,
+        patch("unread.interactive._pick_enrich", new=AsyncMock(return_value=[])),
+        patch("unread.interactive._bind_escape", new=_stub_bind_escape_run()),
+        patch("unread.interactive.tg_client") as fake_tg,
+        patch("unread.interactive.open_repo") as fake_repo,
     ):
         fake_tg.return_value.__aenter__ = AsyncMock(return_value=object())
         fake_tg.return_value.__aexit__ = AsyncMock(return_value=False)

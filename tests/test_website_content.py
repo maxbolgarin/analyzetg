@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from atg.website.content import _extract_with_bs4, _segment_paragraphs
+from unread.website.content import _extract_with_bs4, _segment_paragraphs
 
 
 def test_segment_short_text_one_segment() -> None:
@@ -132,7 +132,7 @@ def test_extract_with_bs4_whole_body_fallback() -> None:
 
 
 def test_explain_empty_extraction_detects_spa() -> None:
-    from atg.website.content import _explain_empty_extraction
+    from unread.website.content import _explain_empty_extraction
 
     html = "<html><head></head><body><md-root></md-root><noscript></noscript></body></html>"
     msg = _explain_empty_extraction("https://spa.example.com/", html, raw_size=1200)
@@ -140,7 +140,7 @@ def test_explain_empty_extraction_detects_spa() -> None:
 
 
 def test_explain_empty_extraction_short_non_spa() -> None:
-    from atg.website.content import _explain_empty_extraction
+    from unread.website.content import _explain_empty_extraction
 
     html = "<html><body></body></html>"  # tiny but no SPA markers
     msg = _explain_empty_extraction("https://example.com/", html, raw_size=100)
@@ -148,7 +148,7 @@ def test_explain_empty_extraction_short_non_spa() -> None:
 
 
 def test_explain_empty_extraction_large_no_text() -> None:
-    from atg.website.content import _explain_empty_extraction
+    from unread.website.content import _explain_empty_extraction
 
     html = "<html><body>" + "<svg></svg>" * 5000 + "</body></html>"  # large but empty
     msg = _explain_empty_extraction("https://example.com/", html, raw_size=200_000)

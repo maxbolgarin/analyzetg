@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from atg.analyzer.filters import FilterOpts, effective_text, filter_messages
-from atg.analyzer.formatter import format_messages
-from atg.models import Message
+from unread.analyzer.filters import FilterOpts, effective_text, filter_messages
+from unread.analyzer.formatter import format_messages
+from unread.models import Message
 
 
 def _msg(**kw) -> Message:

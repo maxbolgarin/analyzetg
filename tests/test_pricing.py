@@ -1,6 +1,6 @@
-"""Regression tests for `atg.util.pricing`: chat_cost / audio_cost math.
+"""Regression tests for `unread.util.pricing`: chat_cost / audio_cost math.
 
-These cost numbers drive `atg stats` and the usage_log audit trail, so an
+These cost numbers drive `unread stats` and the usage_log audit trail, so an
 off-by-one-million here is expensive to miss. We build a `Settings` object
 by hand to avoid depending on the repo's config.toml.
 """
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from atg.config import ChatPricing, PricingCfg, Settings
-from atg.util.pricing import audio_cost, chat_cost
+from unread.config import ChatPricing, PricingCfg, Settings
+from unread.util.pricing import audio_cost, chat_cost
 
 
 @pytest.fixture

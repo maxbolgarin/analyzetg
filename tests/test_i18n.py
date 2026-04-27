@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from atg import i18n
-from atg.config import get_settings, reset_settings
+from unread import i18n
+from unread.config import get_settings, reset_settings
 
 
 def test_t_returns_explicit_lang():

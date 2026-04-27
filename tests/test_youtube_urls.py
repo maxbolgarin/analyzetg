@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from atg.youtube.urls import extract_video_id, is_youtube_url, video_url
+from unread.youtube.urls import extract_video_id, is_youtube_url, video_url
 
 
 class TestIsYoutubeUrl:

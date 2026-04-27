@@ -1,5 +1,5 @@
 [project]
-name = "atg"
+name = "unread"
 version = "0.1.0"
 description = "Local CLI for pulling Telegram chats and channels, transcribing voice/video via OpenAI, and analyzing with Chat Completions."
 readme = "README.md"
@@ -36,17 +36,17 @@ dev = [
 ]
 
 [project.scripts]
-atg = "atg.cli:main"
+unread = "unread.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["atg"]
+packages = ["unread"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"atg/db/schema.sql" = "atg/db/schema.sql"
+"unread/db/schema.sql" = "unread/db/schema.sql"
 "presets" = "presets"
 
 [tool.ruff]

@@ -43,66 +43,6 @@ wheels = [
 ]
 
 [[package]]
-name = "atg"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiosqlite" },
-    { name = "beautifulsoup4" },
-    { name = "httpx" },
-    { name = "openai" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pypdf" },
-    { name = "python-dateutil" },
-    { name = "python-docx" },
-    { name = "questionary" },
-    { name = "rapidfuzz" },
-    { name = "rich" },
-    { name = "structlog" },
-    { name = "telethon" },
-    { name = "tenacity" },
-    { name = "tiktoken" },
-    { name = "trafilatura" },
-    { name = "typer" },
-    { name = "yt-dlp" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "beautifulsoup4", specifier = ">=4.12" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "openai", specifier = ">=1.50" },
-    { name = "pydantic", specifier = ">=2.7" },
-    { name = "pydantic-settings", specifier = ">=2.3" },
-    { name = "pypdf", specifier = ">=4.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "python-dateutil", specifier = ">=2.9" },
-    { name = "python-docx", specifier = ">=1.1" },
-    { name = "questionary", specifier = ">=2.0" },
-    { name = "rapidfuzz", specifier = ">=3.9" },
-    { name = "rich", specifier = ">=13.7" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
-    { name = "structlog", specifier = ">=24.1" },
-    { name = "telethon", specifier = ">=1.36" },
-    { name = "tenacity", specifier = ">=8.5" },
-    { name = "tiktoken", specifier = ">=0.7" },
-    { name = "trafilatura", specifier = ">=1.12" },
-    { name = "typer", specifier = ">=0.12" },
-    { name = "yt-dlp", specifier = ">=2024.7" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "babel"
 version = "2.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1355,6 +1295,66 @@ sdist = { url = "https://files.pythonhosted.org/packages/8b/2e/c14812d3d4d9cd177
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/14/e2a54fabd4f08cd7af1c07030603c3356b74da07f7cc056e600436edfa17/tzlocal-5.3.1-py3-none-any.whl", hash = "sha256:eb1a66c3ef5847adf7a834f1be0800581b683b5608e74f86ecbcef8ab91bb85d", size = 18026, upload-time = "2025-03-05T21:17:39.857Z" },
 ]
+
+[[package]]
+name = "unread"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "beautifulsoup4" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pypdf" },
+    { name = "python-dateutil" },
+    { name = "python-docx" },
+    { name = "questionary" },
+    { name = "rapidfuzz" },
+    { name = "rich" },
+    { name = "structlog" },
+    { name = "telethon" },
+    { name = "tenacity" },
+    { name = "tiktoken" },
+    { name = "trafilatura" },
+    { name = "typer" },
+    { name = "yt-dlp" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "openai", specifier = ">=1.50" },
+    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pydantic-settings", specifier = ">=2.3" },
+    { name = "pypdf", specifier = ">=4.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "python-dateutil", specifier = ">=2.9" },
+    { name = "python-docx", specifier = ">=1.1" },
+    { name = "questionary", specifier = ">=2.0" },
+    { name = "rapidfuzz", specifier = ">=3.9" },
+    { name = "rich", specifier = ">=13.7" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+    { name = "structlog", specifier = ">=24.1" },
+    { name = "telethon", specifier = ">=1.36" },
+    { name = "tenacity", specifier = ">=8.5" },
+    { name = "tiktoken", specifier = ">=0.7" },
+    { name = "trafilatura", specifier = ">=1.12" },
+    { name = "typer", specifier = ">=0.12" },
+    { name = "yt-dlp", specifier = ">=2024.7" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "urllib3"

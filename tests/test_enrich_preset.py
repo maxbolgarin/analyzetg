@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from atg.analyzer.prompts import _load_preset_file
+from unread.analyzer.prompts import _load_preset_file
 
 
 def test_preset_parses_enrich_list(tmp_path: Path):

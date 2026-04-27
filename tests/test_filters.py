@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from atg.analyzer.filters import FilterOpts, dedupe, filter_messages
-from atg.models import Message
+from unread.analyzer.filters import FilterOpts, dedupe, filter_messages
+from unread.models import Message
 
 
 def _m(

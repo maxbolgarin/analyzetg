@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from atg.analyzer.chunker import build_chunks, model_context_window
-from atg.models import Message
+from unread.analyzer.chunker import build_chunks, model_context_window
+from unread.models import Message
 
 
 def _msg(i: int, text: str, date: datetime) -> Message:

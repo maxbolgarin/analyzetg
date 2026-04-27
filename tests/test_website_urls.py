@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from atg.website.urls import (
+from unread.website.urls import (
     domain_of,
     is_telegram_url,
     is_website_url,

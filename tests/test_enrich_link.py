@@ -5,7 +5,7 @@ cover the pure helpers so we can change the regex / skip rules with
 confidence.
 """
 
-from atg.enrich.link import _normalize_url, _url_hash, extract_urls
+from unread.enrich.link import _normalize_url, _url_hash, extract_urls
 
 
 def test_extract_urls_basic():

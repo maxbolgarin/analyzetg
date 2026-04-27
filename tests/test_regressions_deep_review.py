@@ -25,13 +25,13 @@ from pathlib import Path
 
 import pytest
 
-from atg.analyzer import prompts
-from atg.analyzer.chunker import build_chunks
-from atg.analyzer.commands import cmd_analyze
-from atg.config import _load_dotenv, _read_toml, load_settings
-from atg.core.paths import compute_window, parse_ymd
-from atg.db.repo import Repo
-from atg.export.commands import cmd_dump
+from unread.analyzer import prompts
+from unread.analyzer.chunker import build_chunks
+from unread.analyzer.commands import cmd_analyze
+from unread.config import _load_dotenv, _read_toml, load_settings
+from unread.core.paths import compute_window, parse_ymd
+from unread.db.repo import Repo
+from unread.export.commands import cmd_dump
 
 # --- Schema idempotency -------------------------------------------------
 
@@ -124,12 +124,12 @@ async def test_schema_apply_upgrades_legacy_tables(tmp_path: Path) -> None:
 def test_load_dotenv_strips_utf8_bom(tmp_path: Path, monkeypatch) -> None:
     """Editors on Windows save .env with a BOM; the key must still parse."""
     env_path = tmp_path / ".env"
-    env_path.write_bytes(b"\xef\xbb\xbfANALYZETG_REGRESSION_KEY=ok\n")
-    monkeypatch.delenv("ANALYZETG_REGRESSION_KEY", raising=False)
+    env_path.write_bytes(b"\xef\xbb\xbfUNREAD_REGRESSION_KEY=ok\n")
+    monkeypatch.delenv("UNREAD_REGRESSION_KEY", raising=False)
     _load_dotenv(env_path)
     import os
 
-    assert os.environ.get("ANALYZETG_REGRESSION_KEY") == "ok"
+    assert os.environ.get("UNREAD_REGRESSION_KEY") == "ok"
 
 
 def test_read_toml_wraps_parse_error(tmp_path: Path) -> None:
@@ -270,7 +270,7 @@ def test_chunker_refuses_tiny_budget() -> None:
     # context. Building any chunk should raise instead of silently clamping.
     from datetime import datetime
 
-    from atg.models import Message
+    from unread.models import Message
 
     m = Message(chat_id=1, msg_id=1, date=datetime.now(UTC), text="x")
     with pytest.raises(ValueError, match="Chunk token budget too small"):
@@ -293,6 +293,7 @@ def test_settings_reject_unknown_keys(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.toml").write_text("[analyze]\nmin_msg_chars = 5\nbogus_key = 123\n")
     # Clear any leaked config-path env var so the relative path wins.
+    monkeypatch.delenv("UNREAD_CONFIG_PATH", raising=False)
     monkeypatch.delenv("ATG_CONFIG_PATH", raising=False)
     monkeypatch.delenv("ANALYZETG_CONFIG_PATH", raising=False)
     with pytest.raises(Exception) as ei:
@@ -305,7 +306,7 @@ def test_settings_reject_unknown_keys(tmp_path: Path, monkeypatch) -> None:
 
 
 async def test_folder_rejects_period_flags() -> None:
-    """`atg analyze --folder X --full-history` must fail fast, not silently
+    """`unread analyze --folder X --full-history` must fail fast, not silently
     analyze only unread messages."""
     import typer as _typer
 
@@ -351,7 +352,7 @@ async def test_all_flat_unread_default_reaches_run_path(monkeypatch) -> None:
     back in, this test fails because BadParameter would fire before the
     stubbed client.
     """
-    from atg.analyzer import commands as analyzer_commands
+    from unread.analyzer import commands as analyzer_commands
 
     monkeypatch.setattr(analyzer_commands, "tg_client", _fake_tg_client_factory())
 
@@ -374,8 +375,8 @@ async def test_all_flat_unread_default_reaches_run_path(monkeypatch) -> None:
 
 
 async def test_dump_all_flat_unread_default_reaches_run_path(monkeypatch) -> None:
-    """`atg dump --all-flat` mirrors analyze: unread default no longer rejected."""
-    from atg.export import commands as export_commands
+    """`unread dump --all-flat` mirrors analyze: unread default no longer rejected."""
+    from unread.export import commands as export_commands
 
     monkeypatch.setattr(export_commands, "tg_client", _fake_tg_client_factory())
 
@@ -401,7 +402,7 @@ async def test_media_breakdown_groups_by_kind(tmp_path: Path) -> None:
     """The wizard's enrich picker reads this to show per-kind counts."""
     from datetime import datetime as _dt
 
-    from atg.models import Message
+    from unread.models import Message
 
     repo = await Repo.open(tmp_path / "t.sqlite")
     try:
@@ -440,7 +441,7 @@ async def test_media_breakdown_groups_by_kind(tmp_path: Path) -> None:
 
 
 def test_tokenize_question_drops_stop_words_and_short_tokens() -> None:
-    from atg.ask.retrieval import tokenize_question
+    from unread.ask.retrieval import tokenize_question
 
     tokens = tokenize_question("What did Bob say about migration?")
     assert "bob" in tokens
@@ -460,8 +461,8 @@ async def test_cite_context_expands_citations(tmp_path: Path) -> None:
     """`--cite-context` should append a sources section with surrounding messages."""
     from datetime import datetime as _dt
 
-    from atg.analyzer.commands import _expand_citations
-    from atg.models import Message
+    from unread.analyzer.commands import _expand_citations
+    from unread.models import Message
 
     repo = await Repo.open(tmp_path / "t.sqlite")
     try:
@@ -500,7 +501,7 @@ async def test_message_embeddings_round_trip_and_missing(tmp_path: Path) -> None
     import array
     from datetime import datetime as _dt
 
-    from atg.models import Message
+    from unread.models import Message
 
     repo = await Repo.open(tmp_path / "t.sqlite")
     try:
@@ -545,7 +546,7 @@ def test_citation_regex_matches_telegram_urls() -> None:
     """The citation regex covers every Telegram link shape the formatter
     emits: public usernames, private channel internal-ids, with and
     without forum thread segments."""
-    from atg.analyzer.commands import _CITATION_RE
+    from unread.analyzer.commands import _CITATION_RE
 
     # Public username.
     body = "see [#42](https://t.me/somegroup/42) yes"
@@ -576,8 +577,8 @@ def test_rerank_total_failure_returns_keyword_sorted_pool() -> None:
     import asyncio
     from datetime import datetime as _dt
 
-    from atg.ask import rerank as _rk
-    from atg.models import Message
+    from unread.ask import rerank as _rk
+    from unread.models import Message
 
     # Build a pool with shuffled keyword scores.
     now = _dt.now(UTC)
@@ -593,7 +594,7 @@ def test_rerank_total_failure_returns_keyword_sorted_pool() -> None:
     async def _bad_chat_complete(*a, **kw):
         raise RuntimeError("simulated API outage")
 
-    import atg.ask.rerank as rerank_mod
+    import unread.ask.rerank as rerank_mod
 
     orig = rerank_mod.chat_complete
     rerank_mod.chat_complete = _bad_chat_complete  # type: ignore[assignment]
@@ -614,7 +615,7 @@ def test_rerank_parses_clean_json_and_fenced_responses() -> None:
     chatty batch would silently lose its rerank scores and the rest of
     the rerank pool falls back to the keyword order.
     """
-    from atg.ask.rerank import _parse_ratings
+    from unread.ask.rerank import _parse_ratings
 
     # Clean JSON.
     out = _parse_ratings('[{"msg_id": 1, "score": 5}, {"msg_id": 2, "score": 3}]')
@@ -641,8 +642,8 @@ def test_rerank_parses_clean_json_and_fenced_responses() -> None:
 async def test_ask_retrieval_scores_by_token_hits(tmp_path: Path) -> None:
     from datetime import datetime as _dt
 
-    from atg.ask.retrieval import retrieve_messages
-    from atg.models import Message
+    from unread.ask.retrieval import retrieve_messages
+    from unread.models import Message
 
     repo = await Repo.open(tmp_path / "t.sqlite")
     try:

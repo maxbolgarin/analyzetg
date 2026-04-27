@@ -1,4 +1,4 @@
-"""Tests for per-subscription `atg run` settings and the runner's
+"""Tests for per-subscription `unread run` settings and the runner's
 resolve helpers.
 
 Covers:
@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from atg.db.repo import Repo
-from atg.models import Subscription
-from atg.runner import _resolve_enrich, _resolve_period
+from unread.db.repo import Repo
+from unread.models import Subscription
+from unread.runner import _resolve_enrich, _resolve_period
 
 
 @pytest.fixture
