@@ -1,4 +1,4 @@
-"""Tests for `analyzetg.analyzer.openai_client`.
+"""Tests for `atg.analyzer.openai_client`.
 
 Covers regressions in:
 - `build_messages` ordering (prompt-caching hygiene: system → static → dynamic)
@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from analyzetg.analyzer import openai_client
-from analyzetg.analyzer.openai_client import build_messages, chat_complete
+from atg.analyzer import openai_client
+from atg.analyzer.openai_client import build_messages, chat_complete
 
 # --- build_messages -----------------------------------------------------
 

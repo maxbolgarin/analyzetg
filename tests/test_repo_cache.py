@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from analyzetg.db.repo import Repo
-from analyzetg.models import Message
+from atg.db.repo import Repo
+from atg.models import Message
 
 
 @pytest.fixture

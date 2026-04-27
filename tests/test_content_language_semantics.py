@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-from analyzetg.analyzer import prompts
-from analyzetg.analyzer.commands import _expand_citations
-from analyzetg.analyzer.pipeline import AnalysisOptions, _load_preset
-from analyzetg.db.repo import Repo
+from atg.analyzer import prompts
+from atg.analyzer.commands import _expand_citations
+from atg.analyzer.pipeline import AnalysisOptions, _load_preset
+from atg.db.repo import Repo
 
 
 def test_load_preset_reads_from_content_language_directory():
@@ -47,7 +47,7 @@ async def test_sources_heading_uses_language_not_content_language(tmp_path) -> N
     try:
         from datetime import UTC, datetime
 
-        from analyzetg.models import Message
+        from atg.models import Message
 
         now = datetime.now(UTC)
         msgs = [Message(chat_id=1, msg_id=i, date=now, text=f"m{i}", sender_name="x") for i in range(1, 6)]
@@ -67,7 +67,7 @@ def test_options_payload_distinguishes_language_and_content_language():
     so flipping it busts the cache — different content_language means a
     different prompts tree and different LLM output. UI `language` is
     intentionally NOT in the payload (it doesn't reach the LLM)."""
-    from analyzetg.config import get_settings, reset_settings
+    from atg.config import get_settings, reset_settings
 
     reset_settings()
     s = get_settings()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from analyzetg.analyzer import prompts
+from atg.analyzer import prompts
 
 
 def test_get_presets_reads_each_language_directory():

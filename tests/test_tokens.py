@@ -1,10 +1,10 @@
-"""Regression tests for `analyzetg.util.tokens` — the chunker depends on
+"""Regression tests for `atg.util.tokens` — the chunker depends on
 accurate token counts, so silent regressions here directly translate into
 wrong chunk sizes and truncations at runtime."""
 
 from __future__ import annotations
 
-from analyzetg.util.tokens import count_message_tokens, count_tokens
+from atg.util.tokens import count_message_tokens, count_tokens
 
 
 def test_count_tokens_empty_string_is_zero() -> None:

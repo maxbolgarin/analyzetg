@@ -1,4 +1,4 @@
-# analyzetg — configuration
+# atg — configuration
 #
 # Convention: only settings you override are uncommented. Every other knob
 # is listed commented-out, showing its default, so it's discoverable. Flip
@@ -33,7 +33,7 @@ filter_model_default = "gpt-5.4-nano"
 # ask labels, image/link descriptions, and analysis output language.
 # Presets live under presets/<language>/ — the loader reads from the active
 # language's directory only (no fallback). RU users opt in by setting
-# language = "ru"; the experience matches what analyzetg shipped before
+# language = "ru"; the experience matches what atg shipped before
 # English support landed.
 
 # [locale]

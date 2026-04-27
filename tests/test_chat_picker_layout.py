@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from analyzetg import interactive
-from analyzetg.interactive import (
+from atg import interactive
+from atg.interactive import (
     _COL_DATE,
     _COL_KIND,
     _COL_UNREAD,
@@ -24,7 +24,7 @@ from analyzetg.interactive import (
     _fmt_date,
     _short_kind,
 )
-from analyzetg.tg.dialogs import UnreadDialog
+from atg.tg.dialogs import UnreadDialog
 
 
 def test_short_kind_folds_supergroup_to_group():
@@ -206,7 +206,7 @@ async def test_pick_chat_offers_all_local_when_flag_set(monkeypatch):
 
     monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
     monkeypatch.setattr(
-        "analyzetg.tg.folders.chat_folder_index",
+        "atg.tg.folders.chat_folder_index",
         fake_folder_index,
     )
     monkeypatch.setattr(interactive.questionary, "select", fake_select)
@@ -239,7 +239,7 @@ async def test_pick_chat_no_all_local_by_default(monkeypatch):
 
     monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
     monkeypatch.setattr(
-        "analyzetg.tg.folders.chat_folder_index",
+        "atg.tg.folders.chat_folder_index",
         fake_folder_index,
     )
     monkeypatch.setattr(interactive.questionary, "select", fake_select)
@@ -270,7 +270,7 @@ async def test_pick_chat_all_local_appears_above_all_unread(monkeypatch):
 
     monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
     monkeypatch.setattr(
-        "analyzetg.tg.folders.chat_folder_index",
+        "atg.tg.folders.chat_folder_index",
         fake_folder_index,
     )
     monkeypatch.setattr(interactive.questionary, "select", fake_select)
@@ -323,19 +323,19 @@ async def test_pick_chat_no_unread_with_offer_all_local_still_shows_all_local(mo
 
     monkeypatch.setattr(interactive, "list_unread_dialogs", fake_list_unread_dialogs)
     monkeypatch.setattr(
-        "analyzetg.tg.folders.chat_folder_index",
+        "atg.tg.folders.chat_folder_index",
         fake_folder_index,
     )
     monkeypatch.setattr(
-        "analyzetg.tg.dialogs.correct_forum_unread",
+        "atg.tg.dialogs.correct_forum_unread",
         fake_correct_forum_unread,
     )
     # Stub the entity helpers _pick_from_all imports lazily so it can
     # operate on our SimpleNamespace entity.
-    monkeypatch.setattr("analyzetg.tg.client.entity_id", lambda e: e.id)
-    monkeypatch.setattr("analyzetg.tg.client.entity_title", lambda e: e.title)
-    monkeypatch.setattr("analyzetg.tg.client.entity_username", lambda e: e.username)
-    monkeypatch.setattr("analyzetg.tg.client._chat_kind", lambda _e: "user")
+    monkeypatch.setattr("atg.tg.client.entity_id", lambda e: e.id)
+    monkeypatch.setattr("atg.tg.client.entity_title", lambda e: e.title)
+    monkeypatch.setattr("atg.tg.client.entity_username", lambda e: e.username)
+    monkeypatch.setattr("atg.tg.client._chat_kind", lambda _e: "user")
     monkeypatch.setattr(interactive.questionary, "select", fake_select)
 
     await interactive._pick_chat(client=fake_client, offer_all_local=True)

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from analyzetg.analyzer.commands import (
+from atg.analyzer.commands import (
     _chat_slug,
     _default_output_path,
     _slugify,

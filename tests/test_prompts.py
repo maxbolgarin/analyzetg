@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from analyzetg.analyzer.prompts import (
+from atg.analyzer.prompts import (
     DEFAULT_USER_TAIL,
     PRESETS,
     PRESETS_DIR,

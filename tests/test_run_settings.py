@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from analyzetg.db.repo import Repo
-from analyzetg.models import Subscription
-from analyzetg.runner import _resolve_enrich, _resolve_period
+from atg.db.repo import Repo
+from atg.models import Subscription
+from atg.runner import _resolve_enrich, _resolve_period
 
 
 @pytest.fixture

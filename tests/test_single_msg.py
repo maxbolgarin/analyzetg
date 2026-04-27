@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from analyzetg.cli import app
-from analyzetg.db.repo import Repo
-from analyzetg.models import Message
+from atg.cli import app
+from atg.db.repo import Repo
+from atg.models import Message
 
 
 @pytest.fixture
@@ -73,7 +73,7 @@ async def test_iter_messages_thread_none_skips_filter(repo: Repo) -> None:
 
 def test_msg_flag_forwarded_to_cmd_analyze() -> None:
     runner = CliRunner()
-    with patch("analyzetg.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
+    with patch("atg.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
         result = runner.invoke(app, ["analyze", "@foo", "--msg", "12345"])
     assert result.exit_code == 0, result.output
     mock.assert_called_once()
@@ -84,7 +84,7 @@ def test_msg_flag_forwarded_to_cmd_analyze() -> None:
 
 def test_msg_flag_accepts_link() -> None:
     runner = CliRunner()
-    with patch("analyzetg.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
+    with patch("atg.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
         link = "https://t.me/somechat/9876"
         result = runner.invoke(app, ["analyze", "@foo", "--msg", link])
     assert result.exit_code == 0, result.output
@@ -96,7 +96,7 @@ def test_bare_msg_link_becomes_single_msg_mode() -> None:
     single-msg mode — matches the natural paste-a-link-to-one-voice flow."""
     runner = CliRunner()
     link = "https://t.me/c/3865481227/11/792"
-    with patch("analyzetg.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
+    with patch("atg.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
         result = runner.invoke(app, ["analyze", link])
     assert result.exit_code == 0, result.output
     kwargs = mock.call_args.kwargs

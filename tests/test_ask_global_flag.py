@@ -11,7 +11,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_global_flag_calls_retrieve_with_no_chat_filter(monkeypatch):
     """`--global` skips the wizard and runs retrieve_messages with chat_ids=None."""
-    from analyzetg.ask.commands import cmd_ask
+    from atg.ask.commands import cmd_ask
 
     captured = {"called": False}
 
@@ -21,10 +21,10 @@ async def test_global_flag_calls_retrieve_with_no_chat_filter(monkeypatch):
         return []
 
     with (
-        patch("analyzetg.ask.commands.retrieve_messages", new=fake_retrieve),
-        patch("analyzetg.ask.commands.tg_client") as fake_tg,
-        patch("analyzetg.ask.commands.open_repo") as fake_repo,
-        patch("analyzetg.ask.commands._refresh_chats", new=AsyncMock()),
+        patch("atg.ask.commands.retrieve_messages", new=fake_retrieve),
+        patch("atg.ask.commands.tg_client") as fake_tg,
+        patch("atg.ask.commands.open_repo") as fake_repo,
+        patch("atg.ask.commands._refresh_chats", new=AsyncMock()),
     ):
         fake_tg.return_value.__aenter__ = AsyncMock(return_value=object())
         fake_tg.return_value.__aexit__ = AsyncMock(return_value=False)

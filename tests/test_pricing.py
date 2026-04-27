@@ -1,4 +1,4 @@
-"""Regression tests for `analyzetg.util.pricing`: chat_cost / audio_cost math.
+"""Regression tests for `atg.util.pricing`: chat_cost / audio_cost math.
 
 These cost numbers drive `atg stats` and the usage_log audit trail, so an
 off-by-one-million here is expensive to miss. We build a `Settings` object
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from analyzetg.config import ChatPricing, PricingCfg, Settings
-from analyzetg.util.pricing import audio_cost, chat_cost
+from atg.config import ChatPricing, PricingCfg, Settings
+from atg.util.pricing import audio_cost, chat_cost
 
 
 @pytest.fixture

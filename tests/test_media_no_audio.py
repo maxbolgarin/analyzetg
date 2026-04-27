@@ -5,7 +5,7 @@ Screen recordings and GIF-uploaded-as-video have no audio track, so
 and exits non-zero. That's not a bug — just skip the file.
 """
 
-from analyzetg.media.download import NoAudioStream, _ffmpeg_fail, _is_no_audio_stream
+from atg.media.download import NoAudioStream, _ffmpeg_fail, _is_no_audio_stream
 
 
 def test_detects_no_audio_stream_needle():

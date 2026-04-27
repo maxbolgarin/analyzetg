@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from analyzetg import interactive
-from analyzetg.interactive import InteractiveAnswers, build_analyze_args, build_dump_args
+from atg import interactive
+from atg.interactive import InteractiveAnswers, build_analyze_args, build_dump_args
 
 
 def _answers(**overrides) -> InteractiveAnswers:
@@ -179,7 +179,7 @@ async def test_analyze_wizard_forwards_immutable_cli_flags(monkeypatch) -> None:
         captured.update(kwargs)
 
     monkeypatch.setattr(interactive, "_collect_answers", fake_collect_answers)
-    monkeypatch.setattr("analyzetg.analyzer.commands.cmd_analyze", fake_cmd_analyze)
+    monkeypatch.setattr("atg.analyzer.commands.cmd_analyze", fake_cmd_analyze)
 
     await interactive.run_interactive_analyze(
         post_saved=True,
@@ -212,7 +212,7 @@ async def test_dump_all_unread_wizard_skips_second_confirm_and_forwards_enrich(m
         captured.update(kwargs)
 
     monkeypatch.setattr(interactive, "_collect_answers", fake_collect_answers)
-    monkeypatch.setattr("analyzetg.export.commands.run_all_unread_dump", fake_run_all_unread_dump)
+    monkeypatch.setattr("atg.export.commands.run_all_unread_dump", fake_run_all_unread_dump)
 
     await interactive.run_interactive_dump(fmt="md", with_transcribe=False, include_transcripts=True)
 
@@ -274,7 +274,7 @@ def test_dump_period_flags_passthrough_for_new_options() -> None:
 def test_period_to_cli_kwargs_for_ask_new_options() -> None:
     from datetime import UTC, datetime
 
-    from analyzetg.interactive import _period_to_cli_kwargs
+    from atg.interactive import _period_to_cli_kwargs
 
     assert _period_to_cli_kwargs(_answers(period="last24h")) == {"last_hours": 24}
     assert _period_to_cli_kwargs(_answers(period="last96h")) == {"last_hours": 96}
@@ -286,7 +286,7 @@ def test_period_to_cli_kwargs_for_ask_new_options() -> None:
 def test_period_to_db_filters_for_new_options() -> None:
     from datetime import UTC, datetime, timedelta
 
-    from analyzetg.interactive import _period_to_db_filters
+    from atg.interactive import _period_to_db_filters
 
     base = {"custom_since": None, "custom_until": None, "custom_from_msg": None, "chat": None}
     now = datetime.now(UTC)

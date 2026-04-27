@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 import typer
 
-from analyzetg.ask.commands import _validate_scope_args, cmd_ask
+from atg.ask.commands import _validate_scope_args, cmd_ask
 
 
 def test_ref_and_chat_both_set_raises():

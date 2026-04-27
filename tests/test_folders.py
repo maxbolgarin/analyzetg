@@ -1,4 +1,4 @@
-"""Tests for `analyzetg.tg.folders` — matching logic + MTProto parsing.
+"""Tests for `atg.tg.folders` — matching logic + MTProto parsing.
 
 No real Telegram traffic. We feed `_folder_from_filter` fake objects that
 duck-type the Telethon DialogFilter / DialogFilterChatlist / DialogFilterDefault
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from analyzetg.tg.folders import (
+from atg.tg.folders import (
     Folder,
     _folder_from_filter,
     _peer_id,

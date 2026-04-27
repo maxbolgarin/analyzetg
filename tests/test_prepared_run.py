@@ -1,4 +1,4 @@
-"""Tests for analyzetg.core.run.PreparedRun.
+"""Tests for atg.core.run.PreparedRun.
 
 These pin the dataclass's shape so a consumer (analyze / dump /
 download-media) never wakes up to find a field it depended on removed.
@@ -13,11 +13,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from analyzetg.config import get_settings, reset_settings
-from analyzetg.core.run import PreparedRun
-from analyzetg.db.repo import Repo
-from analyzetg.enrich.base import EnrichOpts
-from analyzetg.models import Message
+from atg.config import get_settings, reset_settings
+from atg.core.run import PreparedRun
+from atg.db.repo import Repo
+from atg.enrich.base import EnrichOpts
+from atg.models import Message
 
 
 def test_prepared_run_carries_all_consumer_contracts():
@@ -101,7 +101,7 @@ async def test_prepare_chat_run_returns_full_shape(repo, monkeypatch):
     prepare_chat_run returns a PreparedRun with every field populated
     as expected. Catches regressions where a consumer-required field
     stops being set during prep."""
-    from analyzetg.core.pipeline import prepare_chat_run
+    from atg.core.pipeline import prepare_chat_run
 
     await repo.upsert_messages(
         [
@@ -131,7 +131,7 @@ async def test_prepare_chat_run_returns_full_shape(repo, monkeypatch):
         backfill_calls.append(kwargs)
         return 0
 
-    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+    monkeypatch.setattr("atg.tg.sync.backfill", _no_backfill)
 
     client = MagicMock()
     client.get_messages = AsyncMock()
@@ -172,7 +172,7 @@ async def test_prepare_chat_run_skip_filter_preserves_media_only_messages(repo, 
     leaving save_raw_media with zero candidates — which is exactly what
     download-media would hit before the skip_filter knob existed.
     """
-    from analyzetg.core.pipeline import prepare_chat_run
+    from atg.core.pipeline import prepare_chat_run
 
     await repo.upsert_messages(
         [
@@ -203,7 +203,7 @@ async def test_prepare_chat_run_skip_filter_preserves_media_only_messages(repo, 
     async def _no_backfill(*args, **kwargs):
         return 0
 
-    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+    monkeypatch.setattr("atg.tg.sync.backfill", _no_backfill)
 
     client = MagicMock()
     client.get_messages = AsyncMock()
@@ -247,9 +247,9 @@ async def test_prepare_chat_run_skip_filter_preserves_media_only_messages(repo, 
 
 
 async def test_prepare_all_unread_forum_uses_per_topic_markers(repo, monkeypatch):
-    from analyzetg.core.pipeline import prepare_all_unread_runs
-    from analyzetg.tg.dialogs import UnreadDialog
-    from analyzetg.tg.topics import ForumTopic
+    from atg.core.pipeline import prepare_all_unread_runs
+    from atg.tg.dialogs import UnreadDialog
+    from atg.tg.topics import ForumTopic
 
     await repo.upsert_messages(
         [
@@ -284,9 +284,9 @@ async def test_prepare_all_unread_forum_uses_per_topic_markers(repo, monkeypatch
         backfill_calls.append(kwargs)
         return 0
 
-    monkeypatch.setattr("analyzetg.tg.dialogs.list_unread_dialogs", fake_unread)
-    monkeypatch.setattr("analyzetg.tg.topics.list_forum_topics", fake_topics)
-    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+    monkeypatch.setattr("atg.tg.dialogs.list_unread_dialogs", fake_unread)
+    monkeypatch.setattr("atg.tg.topics.list_forum_topics", fake_topics)
+    monkeypatch.setattr("atg.tg.sync.backfill", _no_backfill)
 
     runs = [
         prepared
@@ -317,8 +317,8 @@ async def test_prepare_all_unread_clamps_stale_read_marker(repo, monkeypatch):
     (latest - marker) is >10× unread_count, trust the badge and start
     at `latest - unread_count - 50`.
     """
-    from analyzetg.core.pipeline import prepare_all_unread_runs
-    from analyzetg.tg.dialogs import UnreadDialog
+    from atg.core.pipeline import prepare_all_unread_runs
+    from atg.tg.dialogs import UnreadDialog
 
     async def fake_unread(_client):
         return [
@@ -338,8 +338,8 @@ async def test_prepare_all_unread_clamps_stale_read_marker(repo, monkeypatch):
         backfill_calls.append(kwargs)
         return 0
 
-    monkeypatch.setattr("analyzetg.tg.dialogs.list_unread_dialogs", fake_unread)
-    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+    monkeypatch.setattr("atg.tg.dialogs.list_unread_dialogs", fake_unread)
+    monkeypatch.setattr("atg.tg.sync.backfill", _no_backfill)
 
     client = MagicMock()
     # Latest message in the channel is msg_id=313988. Gap from marker
@@ -369,8 +369,8 @@ async def test_prepare_all_unread_clamps_stale_read_marker(repo, monkeypatch):
 
 async def test_prepare_all_unread_keeps_marker_when_consistent(repo, monkeypatch):
     """Normal case: read marker matches unread_count → no clamp."""
-    from analyzetg.core.pipeline import prepare_all_unread_runs
-    from analyzetg.tg.dialogs import UnreadDialog
+    from atg.core.pipeline import prepare_all_unread_runs
+    from atg.tg.dialogs import UnreadDialog
 
     async def fake_unread(_client):
         return [
@@ -390,8 +390,8 @@ async def test_prepare_all_unread_keeps_marker_when_consistent(repo, monkeypatch
         backfill_calls.append(kwargs)
         return 0
 
-    monkeypatch.setattr("analyzetg.tg.dialogs.list_unread_dialogs", fake_unread)
-    monkeypatch.setattr("analyzetg.tg.sync.backfill", _no_backfill)
+    monkeypatch.setattr("atg.tg.dialogs.list_unread_dialogs", fake_unread)
+    monkeypatch.setattr("atg.tg.sync.backfill", _no_backfill)
 
     client = MagicMock()
     fake_latest = MagicMock()

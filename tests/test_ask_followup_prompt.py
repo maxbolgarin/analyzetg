@@ -10,7 +10,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_followup_prompt_user_says_no_does_not_invoke_loop():
     """`_ask_continue` returns False → no follow-up loop entered."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_run_single = AsyncMock(return_value=("ok", []))
     fake_continue = AsyncMock(return_value=False)
@@ -42,7 +42,7 @@ async def test_followup_prompt_user_says_no_does_not_invoke_loop():
 @pytest.mark.asyncio
 async def test_no_followup_flag_suppresses_prompt_entirely():
     """--no-followup → _ask_continue is never called."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_run_single = AsyncMock(return_value=("ok", []))
     fake_continue = AsyncMock(return_value=False)

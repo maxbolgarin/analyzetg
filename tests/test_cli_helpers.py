@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from analyzetg.cli import _fmt_bytes, _parse_duration_days
+from atg.cli import _fmt_bytes, _parse_duration_days
 
 # --- _parse_duration_days -----------------------------------------------
 

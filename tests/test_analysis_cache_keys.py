@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from analyzetg.analyzer import pipeline
-from analyzetg.analyzer.openai_client import ChatResult
-from analyzetg.analyzer.pipeline import AnalysisOptions, run_analysis
-from analyzetg.db.repo import Repo
-from analyzetg.models import Message
+from atg.analyzer import pipeline
+from atg.analyzer.openai_client import ChatResult
+from atg.analyzer.pipeline import AnalysisOptions, run_analysis
+from atg.db.repo import Repo
+from atg.models import Message
 
 
 @pytest.fixture

@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from analyzetg.analyzer import pipeline as pipeline_mod
-from analyzetg.analyzer.pipeline import _avg_tokens_per_msg, estimate_cost
-from analyzetg.analyzer.prompts import get_presets
-from analyzetg.config import get_settings, reset_settings
+from atg.analyzer import pipeline as pipeline_mod
+from atg.analyzer.pipeline import _avg_tokens_per_msg, estimate_cost
+from atg.analyzer.prompts import get_presets
+from atg.config import get_settings, reset_settings
 
 
 def test_avg_tokens_per_msg_is_language_keyed():

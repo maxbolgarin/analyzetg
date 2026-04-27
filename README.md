@@ -1,6 +1,6 @@
-# analyzetg
+# atg
 
-[![CI](https://github.com/maxbolgarin/analyzetg/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/analyzetg/actions/workflows/ci.yml)
+[![CI](https://github.com/maxbolgarin/atg/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/atg/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -15,6 +15,12 @@ are opt-in per run (they cost extra). By default `atg` starts from
 Telegram's **unread marker** — the spot where you stopped reading — and
 writes a Markdown report to `reports/` with clickable links back to
 every cited message.
+
+`atg analyze` also accepts **YouTube URLs** (captions or Whisper
+transcript → time-stamped citations) and **arbitrary web pages**
+(article-body extraction → paragraph-indexed citations). Same pipeline,
+same caches, same report layout — see [YouTube videos](#youtube-videos)
+and [Web pages](#web-pages) below.
 
 Everything is local. The only network calls are to Telegram (via
 [Telethon](https://docs.telethon.dev)), OpenAI, and — when link
@@ -31,6 +37,10 @@ atg analyze                   # pick chat → preset → period → enrich → r
 atg analyze @somegroup                  # summary of unread (voice/videonote auto-transcribed)
 atg analyze @somegroup --console        # render in terminal instead of a file
 atg analyze @somegroup --last-days 7 --preset digest
+
+# Other content sources — same command, different URL shape
+atg analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"   # YouTube video
+atg analyze "https://www.paulgraham.com/greatwork.html"     # any web page (article)
 
 # Q&A across your synced archive (no Telegram round-trip)
 atg ask                                              # opens the wizard
@@ -66,8 +76,8 @@ from step 3.
 ### 2. Clone the repo
 
 ```bash
-git clone https://github.com/maxbolgarin/analyzetg.git
-cd analyzetg
+git clone https://github.com/maxbolgarin/atg.git
+cd atg
 ```
 
 All the commands below assume you're in this directory.
@@ -110,8 +120,7 @@ mkdir -p storage && chmod 700 storage   # SQLite isn't encrypted; rely on FS per
 uv tool install --editable .
 ```
 
-That puts two commands on your PATH: **`atg`** (short) and `analyzetg`
-(long). They're identical — use whichever you prefer.
+That puts the **`atg`** command on your PATH.
 
 > **Prefer not to install globally?** Skip `uv tool install` entirely,
 > run `uv sync --extra dev` once, and prefix every command with
@@ -125,10 +134,11 @@ uv tool install --editable . --reinstall
 ```
 
 `--editable` picks up source changes automatically, but newly added
-Python dependencies (`beautifulsoup4`, `pypdf`, `python-docx` — used by
-the opt-in enrichments for links, PDFs, and docx) only land in the
-tool's venv when you pass `--reinstall`. Run `atg doctor` after a pull
-to verify your environment is clean.
+Python dependencies (`beautifulsoup4`, `pypdf`, `python-docx`,
+`trafilatura`, `yt-dlp` — used by the link / PDF / docx enrichments,
+website analysis, and YouTube analysis) only land in the tool's venv
+when you pass `--reinstall`. Run `atg doctor` after a pull to verify
+your environment is clean.
 
 ### 7. First-time login
 
@@ -167,14 +177,14 @@ command will fail with missing credentials. Two ways to avoid that:
 
   **zsh** (`~/.zshrc`):
   ```zsh
-  _atg_run() { (cd ~/path/to/analyzetg && command atg "$@"); }
+  _atg_run() { (cd ~/path/to/atg && command atg "$@"); }
   alias atg='nocorrect _atg_run'
   ```
   `nocorrect` disables zsh's spell-correction for `atg` arguments — without it, typing `atg stats` can trigger `zsh: correct 'stats' to 'stat'?` and end with a parse error.
 
   **bash** (`~/.bashrc`):
   ```bash
-  atg() { (cd ~/path/to/analyzetg && command atg "$@"); }
+  atg() { (cd ~/path/to/atg && command atg "$@"); }
   ```
 
 ---
@@ -234,7 +244,8 @@ command will fail with missing credentials. Two ways to avoid that:
 | Invite link | `https://t.me/+AbCdEf...` (add `--join` to join it) |
 | Numeric `chat_id` | `-1001234567890` or `1001234567890` |
 | Fuzzy title | `"Bull Trading"` — substring match across your dialogs |
-| YouTube URL | `https://www.youtube.com/watch?v=...` (see below) |
+| YouTube URL | `https://www.youtube.com/watch?v=...` (see [YouTube videos](#youtube-videos)) |
+| Website URL | `https://example.com/article` (see [Web pages](#web-pages)) |
 
 The wizard's chat picker accepts non-Latin type-to-filter (Cyrillic,
 Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
@@ -291,6 +302,89 @@ Telegram-only flags (`--folder`, `--thread`, `--all-flat`, `--all-per-topic`,
 a clear error.
 
 `atg doctor` warns if `yt-dlp` isn't installed.
+
+### Web pages
+
+`atg analyze <url>` analyzes any HTTP/HTTPS web page (article, blog
+post, documentation, essay) end-to-end. Auto-detected from the URL
+shape: anything that isn't a YouTube link or a Telegram link
+(`t.me/...`) routes here. No flag needed.
+
+Flow:
+
+1. **HTTP fetch** — `httpx` GET with a browser-shaped User-Agent and a
+   30-second timeout. 4xx/5xx, non-HTML responses, and oversize pages
+   (>5 MB raw HTML, configurable) error out with a clean message.
+2. **Article extraction** — primary extractor is
+   [`trafilatura`](https://github.com/adbar/trafilatura) (best-in-class
+   article-body detection: drops nav / sidebar / footer / cookie
+   banners, preserves headings + lists). Falls back to a BeautifulSoup
+   pipeline (semantic-tag pass, then whole-body `get_text` if the page
+   has only `<div>`/`<span>`).
+3. **Segmentation** — extracted text is split into paragraph-shaped
+   chunks (≤3500 chars each, preferring blank-line boundaries). The
+   metadata block (title, site, author, publish date, word count, URL)
+   becomes synthetic message `#0`; paragraphs are `#1..#N`.
+4. **Analysis** — the bundled `website` preset (system prompt tuned for
+   single-author article body, not a chat conversation) runs over the
+   synthetic messages. Citations land as `[#7](https://example.com/article)`
+   — clicking a citation opens the page itself (paragraph anchors aren't
+   exposed because most sites don't generate stable ones).
+5. **Cache** — re-runs on the same URL hit the `website_pages` cache
+   (metadata + paragraphs + content hash). The analysis cache key
+   includes the **content hash**, so re-running after a page edit
+   produces a cache miss while an unchanged re-fetch reuses the
+   previous run.
+
+```bash
+# Default — fetch, extract, run the website preset, save under reports/website/...
+atg analyze "https://www.paulgraham.com/greatwork.html"
+
+# Estimate-and-exit (no LLM call):
+atg analyze "https://example.com/blog/post" --dry-run
+
+# Render to terminal instead of saving a file:
+atg analyze "https://example.com/blog/post" --console
+
+# Different preset — `summary`, `digest`, `highlights`, etc. all work:
+atg analyze "https://example.com/blog/post" --preset summary
+
+# Cost-bounded run + post the analysis to your Saved Messages:
+atg analyze "https://example.com/blog/post" --max-cost 0.05 --post-saved
+
+# Run a custom prompt against a page:
+atg analyze "https://example.com/paper.html" --preset custom --prompt-file my-prompt.md
+```
+
+Reports land under `reports/website/<domain-slug>/<title-slug>-<preset>-<ts>.md`.
+Default preset is `website` (Russian translation in `presets/ru/website.md`).
+
+URL normalization for cache keying strips fragments + common tracking
+params (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `ref`, …) so the same
+article shared with different referrer tags hits the same cache row.
+
+Telegram-only flags are rejected for website URLs with a clear error
+(same list as YouTube, plus `--cite-context` since web pages have no
+surrounding-context store to expand into).
+
+**Limitation: JS-rendered SPAs**. atg fetches raw HTML only — no
+headless browser, no JS engine. Single-page apps (React / Angular /
+Vue / Svelte sites that paint content client-side) typically serve
+~1–5 KB of bootstrapping markup with no readable text. Those URLs
+fail with a clear "appears to be a JavaScript-rendered single-page
+app" error, suggesting you try a static article URL or paste the
+content elsewhere. Most blogs, news sites, docs, and Markdown-rendered
+pages work fine — it's specifically the SPA case that doesn't.
+
+Configuration knobs (under `[website]` in `config.toml`):
+
+```toml
+[website]
+# fetch_timeout_sec = 30
+# max_html_bytes = 5_000_000              # 5 MB hard cap on raw HTML
+# max_paragraphs = 400                    # post-split cap; rejects pathological pages
+# user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/..."
+```
 
 ---
 
@@ -918,6 +1012,12 @@ atg analyze @forumchat --all-per-topic
 
 # Dump and save every photo / voice / video / doc alongside the text
 atg dump @somegroup --save-media --save-media-types photo,voice
+
+# Analyze a long-form article — paragraph-indexed citations link back to the page
+atg analyze "https://www.paulgraham.com/greatwork.html" --preset website
+
+# Analyze a YouTube video, force Whisper instead of captions
+atg analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio --post-saved
 ```
 
 ---
