@@ -5,7 +5,7 @@ which told users "this is free" when it wasn't. The new formatter
 scales precision to magnitude.
 """
 
-from analyzetg.interactive import _extra_enrich_kinds, _fmt_cost, _fmt_cost_range
+from atg.interactive import _extra_enrich_kinds, _fmt_cost, _fmt_cost_range
 
 
 def test_fmt_cost_none():

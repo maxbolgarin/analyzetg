@@ -7,7 +7,7 @@ languages.
 
 from __future__ import annotations
 
-from analyzetg.settings.commands import (
+from atg.settings.commands import (
     _supported_audio_languages,
     _supported_locale_languages,
 )
@@ -29,8 +29,8 @@ def test_supported_locale_languages_puts_english_first():
 def test_supported_locale_languages_skips_languages_without_presets(tmp_path, monkeypatch):
     """A language with i18n entries but no `presets/<code>/` tree must NOT
     appear in the picker — `compose_system_prompt` would explode."""
-    from analyzetg import i18n as i18n_mod
-    from analyzetg.analyzer import prompts as prompts_mod
+    from atg import i18n as i18n_mod
+    from atg.analyzer import prompts as prompts_mod
 
     # Pretend "xx" has an i18n entry but no preset tree.
     original = dict(i18n_mod._STRINGS)
@@ -54,7 +54,7 @@ def test_supported_locale_languages_skips_languages_without_presets(tmp_path, mo
 def test_supported_locale_languages_skips_languages_without_i18n(tmp_path, monkeypatch):
     """Inverse: a directory without i18n entries doesn't qualify either —
     the picker would offer a language whose UI labels are silently English."""
-    from analyzetg.analyzer import prompts as prompts_mod
+    from atg.analyzer import prompts as prompts_mod
 
     (tmp_path / "en").mkdir()
     (tmp_path / "en" / "_base.md").write_text("base")

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from analyzetg.models import Message, ResolvedRef
+from atg.models import Message, ResolvedRef
 
 
 def _msg(chat_id: int, msg_id: int) -> Message:
@@ -34,7 +34,7 @@ def _msg(chat_id: int, msg_id: int) -> Message:
 async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
     """`atg ask "Q" --chat=@x --mark-read` calls send_read_acknowledge with
     the resolved chat_id and the highest msg_id from the retrieved pool."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_client = MagicMock()
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
@@ -82,7 +82,7 @@ async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
 @pytest.mark.asyncio
 async def test_no_mark_read_does_not_call_send_read_acknowledge():
     """`mark_read=False` → never call send_read_acknowledge."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_client = MagicMock()
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
@@ -123,7 +123,7 @@ async def test_no_mark_read_does_not_call_send_read_acknowledge():
 @pytest.mark.asyncio
 async def test_mark_read_default_none_does_not_call():
     """When `mark_read=None` (default — flag not passed), do not mark read."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_client = MagicMock()
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
@@ -164,7 +164,7 @@ async def test_mark_read_default_none_does_not_call():
 @pytest.mark.asyncio
 async def test_mark_read_is_noop_with_global_scope():
     """`--mark-read --global` is a silent no-op (no single chat to mark)."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_client = MagicMock()
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
@@ -204,7 +204,7 @@ async def test_mark_read_falls_back_to_max_msg_id_when_pool_empty():
     """When the LLM saw a non-empty pool but the prior_pool fallback to
     `repo.get_max_msg_id` is exercised — i.e. the pool is empty after the
     final follow-up turn — we still mark read using the chat's local max."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_client = MagicMock()
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
@@ -252,7 +252,7 @@ async def test_mark_read_falls_back_to_max_msg_id_when_pool_empty():
 async def test_mark_read_failure_does_not_abort():
     """If `send_read_acknowledge` raises, ask still returns cleanly —
     the answer is on screen and a mark-read failure must not surface."""
-    from analyzetg.ask import commands as ask_commands
+    from atg.ask import commands as ask_commands
 
     fake_client = MagicMock()
     fake_client.send_read_acknowledge = AsyncMock(side_effect=RuntimeError("boom"))
@@ -293,7 +293,7 @@ async def test_mark_read_failure_does_not_abort():
 async def test_wizard_forwards_mark_read_to_cmd_ask():
     """`run_interactive_ask` honours InteractiveAnswers.mark_read and
     threads it into cmd_ask when a single chat is picked."""
-    from analyzetg.interactive import InteractiveAnswers, run_interactive_ask
+    from atg.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="-1001234567890",
@@ -316,8 +316,8 @@ async def test_wizard_forwards_mark_read_to_cmd_ask():
     )
 
     with (
-        patch("analyzetg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("analyzetg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="open Qs?")
 
@@ -330,7 +330,7 @@ async def test_wizard_does_not_forward_mark_read_for_all_local():
     """ALL_LOCAL has no single chat → mark_read forced to None even if
     answers.mark_read leaks True. (Defensive guard against the wizard
     skipping the step but leaving the field at its default.)"""
-    from analyzetg.interactive import InteractiveAnswers, run_interactive_ask
+    from atg.interactive import InteractiveAnswers, run_interactive_ask
 
     answers = InteractiveAnswers(
         chat_ref="",
@@ -353,8 +353,8 @@ async def test_wizard_does_not_forward_mark_read_for_all_local():
     )
 
     with (
-        patch("analyzetg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
-        patch("analyzetg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
+        patch("atg.interactive._collect_answers", new=AsyncMock(return_value=answers)),
+        patch("atg.ask.commands.cmd_ask", new=AsyncMock()) as fake_cmd,
     ):
         await run_interactive_ask(question="что нового?")
 

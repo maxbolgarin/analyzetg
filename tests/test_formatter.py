@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from analyzetg.analyzer.formatter import (
+from atg.analyzer.formatter import (
     build_link_template,
     chat_header_preamble,
     format_messages,
 )
-from analyzetg.models import Message
+from atg.models import Message
 
 
 def _m(msg_id: int, date: datetime, **kw) -> Message:

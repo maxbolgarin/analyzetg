@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from analyzetg.analyzer.commands import build_enrich_opts
-from analyzetg.analyzer.prompts import Preset
-from analyzetg.config import get_settings, reset_settings
-from analyzetg.enrich.base import EnrichOpts
+from atg.analyzer.commands import build_enrich_opts
+from atg.analyzer.prompts import Preset
+from atg.config import get_settings, reset_settings
+from atg.enrich.base import EnrichOpts
 
 
 @pytest.fixture(autouse=True)

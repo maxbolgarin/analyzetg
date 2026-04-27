@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from analyzetg.config import get_settings, reset_settings
-from analyzetg.db.repo import Repo, open_repo
+from atg.config import get_settings, reset_settings
+from atg.db.repo import Repo, open_repo
 
 
 @pytest.fixture

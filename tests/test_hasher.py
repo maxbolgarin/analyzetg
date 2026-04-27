@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from analyzetg.analyzer.hasher import batch_hash, options_hash, reduce_hash
+from atg.analyzer.hasher import batch_hash, options_hash, reduce_hash
 
 
 def test_batch_hash_stable_ordering() -> None:

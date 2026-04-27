@@ -8,8 +8,8 @@ they got a complete analysis.
 
 from __future__ import annotations
 
-from analyzetg.analyzer.commands import _with_truncation_banner
-from analyzetg.analyzer.pipeline import AnalysisResult
+from atg.analyzer.commands import _with_truncation_banner
+from atg.analyzer.pipeline import AnalysisResult
 
 
 def _mk_result(text: str, truncated: bool, preset: str = "summary") -> AnalysisResult:

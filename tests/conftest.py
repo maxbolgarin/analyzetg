@@ -1,6 +1,6 @@
 """Test-suite fixtures.
 
-Single concern today: keep `analyzetg.cli`'s startup overlay
+Single concern today: keep `atg.cli`'s startup overlay
 (`apply_db_overrides_sync`) from polluting tests with whatever's saved
 in the developer's local `storage/data.sqlite`. Without this, a
 contributor who runs `atg settings set locale.language ru` in their
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from analyzetg.config import reset_settings
+from atg.config import reset_settings
 
 
 @pytest.fixture(autouse=True)

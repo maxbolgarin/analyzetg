@@ -11,12 +11,12 @@ leave flags in place.
 
 from __future__ import annotations
 
-from analyzetg.cli import _preprocess_argv
+from atg.cli import _preprocess_argv
 
 
 def test_no_negative_number_unchanged() -> None:
-    assert _preprocess_argv(["analyzetg", "analyze", "@foo"]) == [
-        "analyzetg",
+    assert _preprocess_argv(["atg", "analyze", "@foo"]) == [
+        "atg",
         "analyze",
         "@foo",
     ]
@@ -24,8 +24,8 @@ def test_no_negative_number_unchanged() -> None:
 
 def test_bare_negative_number_moves_to_end() -> None:
     # Simplest case: user typed just the chat id, no other flags.
-    assert _preprocess_argv(["analyzetg", "analyze", "-1003865481227"]) == [
-        "analyzetg",
+    assert _preprocess_argv(["atg", "analyze", "-1003865481227"]) == [
+        "atg",
         "analyze",
         "--",
         "-1003865481227",
@@ -38,8 +38,8 @@ def test_negative_number_then_flag_regression() -> None:
     # sees `--all-flat` after `--` as a second positional and errors
     # "unexpected extra argument (--all-flat)". New behavior keeps flags
     # in place and tucks the negative id behind a trailing `--`.
-    assert _preprocess_argv(["analyzetg", "analyze", "-1003865481227", "--all-flat"]) == [
-        "analyzetg",
+    assert _preprocess_argv(["atg", "analyze", "-1003865481227", "--all-flat"]) == [
+        "atg",
         "analyze",
         "--all-flat",
         "--",
@@ -58,9 +58,9 @@ def test_flag_before_negative_number() -> None:
     # This test pins current behavior: we intentionally don't try to
     # infer which flags take values (no Click-schema introspection in
     # a preprocessor) and accept the slight UX limitation.
-    result = _preprocess_argv(["analyzetg", "analyze", "--all-flat", "-1003865481227"])
+    result = _preprocess_argv(["atg", "analyze", "--all-flat", "-1003865481227"])
     # The negative number was NOT moved (prev was `--all-flat`).
-    assert result == ["analyzetg", "analyze", "--all-flat", "-1003865481227"]
+    assert result == ["atg", "analyze", "--all-flat", "-1003865481227"]
 
 
 def test_option_value_pattern_not_rewritten() -> None:
@@ -80,8 +80,8 @@ def test_option_value_pattern_not_rewritten() -> None:
 def test_existing_double_dash_untouched() -> None:
     # User who already types `--` is explicit — respect their choice,
     # don't rewrite.
-    assert _preprocess_argv(["analyzetg", "analyze", "--", "-1003865481227"]) == [
-        "analyzetg",
+    assert _preprocess_argv(["atg", "analyze", "--", "-1003865481227"]) == [
+        "atg",
         "analyze",
         "--",
         "-1003865481227",
@@ -107,8 +107,8 @@ def test_multiple_flags_before_and_after_id() -> None:
 def test_short_flag_not_confused_with_negative_number() -> None:
     # `-c` is the short form of `--console`; only `-<digits>` triggers
     # the rewrite.
-    assert _preprocess_argv(["analyzetg", "analyze", "@foo", "-c"]) == [
-        "analyzetg",
+    assert _preprocess_argv(["atg", "analyze", "@foo", "-c"]) == [
+        "atg",
         "analyze",
         "@foo",
         "-c",

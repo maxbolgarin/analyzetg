@@ -30,7 +30,7 @@ Daily morning digests are the main use case. Two paths:
 
 - `atg schedule add --daily 09:00 analyze --folder Work --digest` — writes
   a launchd plist (mac) / systemd timer (linux) / cron line. State stored
-  in `~/.analyzetg/schedules.json`.
+  in `~/.atg/schedules.json`.
 - `atg watch --interval 1h analyze --folder Work` — foreground loop, fires
   the analyze command on a fixed cadence, prints to stdout. Simpler, no
   OS integration; user runs it under `tmux` / `nohup`.

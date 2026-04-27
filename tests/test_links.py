@@ -1,10 +1,10 @@
-"""Tests for analyzetg.tg.links — spec §6.1 table coverage."""
+"""Tests for atg.tg.links — spec §6.1 table coverage."""
 
 from __future__ import annotations
 
 import pytest
 
-from analyzetg.tg.links import parse
+from atg.tg.links import parse
 
 
 def test_username_bare() -> None:

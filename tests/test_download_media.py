@@ -11,12 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from analyzetg.media.commands import (
+from atg.media.commands import (
     _existing_for_msg,
     _safe_filename_component,
     media_filename,
 )
-from analyzetg.models import Message
+from atg.models import Message
 
 
 def _msg(msg_id: int, media_type: str) -> Message:

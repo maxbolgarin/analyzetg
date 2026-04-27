@@ -18,11 +18,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from analyzetg.analyzer.pipeline import AnalysisOptions
-from analyzetg.analyzer.prompts import PRESETS
-from analyzetg.core.pipeline import _pull_linked_comments
-from analyzetg.db.repo import Repo
-from analyzetg.models import Message
+from atg.analyzer.pipeline import AnalysisOptions
+from atg.analyzer.prompts import PRESETS
+from atg.core.pipeline import _pull_linked_comments
+from atg.db.repo import Repo
+from atg.models import Message
 
 
 @pytest.fixture
@@ -92,7 +92,7 @@ async def test_pull_comments_returns_linked_msgs_using_primary_date_span(repo: R
     # Mock the Telethon client. We do NOT want to hit the network; the
     # function calls `backfill(since_date=...)` which delegates to
     # client.iter_messages — patch backfill directly to be a no-op.
-    import analyzetg.core.pipeline as _pipeline
+    import atg.core.pipeline as _pipeline
 
     fake_client = AsyncMock()
     # `get_entity` is only called when a title is missing on the linked row,
@@ -105,7 +105,7 @@ async def test_pull_comments_returns_linked_msgs_using_primary_date_span(repo: R
 
     # `_pull_linked_comments` imports `backfill` lazily — patch where it's
     # referenced inside the function via the parent module.
-    import analyzetg.tg.sync as _sync_mod
+    import atg.tg.sync as _sync_mod
 
     real_backfill = _sync_mod.backfill
     _sync_mod.backfill = _no_backfill  # type: ignore[assignment]

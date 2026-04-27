@@ -1,8 +1,8 @@
-"""Tests for analyzetg.tg.resolver.rank_candidates (pure helper)."""
+"""Tests for atg.tg.resolver.rank_candidates (pure helper)."""
 
 from __future__ import annotations
 
-from analyzetg.tg.resolver import rank_candidates
+from atg.tg.resolver import rank_candidates
 
 
 def test_ranker_prefers_exact_title() -> None:

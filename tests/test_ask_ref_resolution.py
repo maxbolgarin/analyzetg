@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from analyzetg.ask.commands import _resolve_ask_ref
-from analyzetg.models import ResolvedRef
+from atg.ask.commands import _resolve_ask_ref
+from atg.models import ResolvedRef
 
 
 @pytest.mark.asyncio

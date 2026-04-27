@@ -7,7 +7,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from analyzetg.cli import app
+from atg.cli import app
 
 ROOT = Path(__file__).resolve().parents[1]
 
