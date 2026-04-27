@@ -17,7 +17,7 @@ def setup_logging(verbose: bool = False) -> None:
     """Configure structlog + stdlib logging. Idempotent."""
     level = (
         logging.DEBUG
-        if verbose or os.environ.get("UNREAD_DEBUG") or os.environ.get("ANALYZETG_DEBUG")
+        if verbose or os.environ.get("UNREAD_DEBUG")
         else logging.INFO
     )
 

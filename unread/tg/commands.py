@@ -134,8 +134,6 @@ async def cmd_doctor() -> None:
     env_path = cwd / ".env"
     cfg_path = _Path(
         os.environ.get("UNREAD_CONFIG_PATH")
-        or os.environ.get("ATG_CONFIG_PATH")
-        or os.environ.get("ANALYZETG_CONFIG_PATH")
         or "config.toml"
     )
     if env_path.exists():

@@ -267,14 +267,10 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
     """
     _load_dotenv(Path(".env"))
 
-    # `UNREAD_CONFIG_PATH` is the canonical name; `ATG_CONFIG_PATH` and
-    # `ANALYZETG_CONFIG_PATH` are honored as back-compat aliases for users
-    # who set them before the two package renames.
+    # `UNREAD_CONFIG_PATH` is the canonical name.
     cfg_path = Path(
         config_path
         or os.environ.get("UNREAD_CONFIG_PATH")
-        or os.environ.get("ATG_CONFIG_PATH")
-        or os.environ.get("ANALYZETG_CONFIG_PATH")
         or "config.toml"
     )
     raw = _read_toml(cfg_path)

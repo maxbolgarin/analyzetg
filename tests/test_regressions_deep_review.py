@@ -294,8 +294,6 @@ def test_settings_reject_unknown_keys(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "config.toml").write_text("[analyze]\nmin_msg_chars = 5\nbogus_key = 123\n")
     # Clear any leaked config-path env var so the relative path wins.
     monkeypatch.delenv("UNREAD_CONFIG_PATH", raising=False)
-    monkeypatch.delenv("ATG_CONFIG_PATH", raising=False)
-    monkeypatch.delenv("ANALYZETG_CONFIG_PATH", raising=False)
     with pytest.raises(Exception) as ei:
         load_settings()
     msg = str(ei.value)
