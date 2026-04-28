@@ -18,6 +18,7 @@ from unread.config import get_settings
 from unread.core.paths import compute_window as _compute_window
 from unread.core.paths import has_explicit_period as _has_explicit_period
 from unread.core.paths import parse_ymd as _parse_ymd
+from unread.core.paths import reports_dir as _reports_dir
 from unread.core.paths import slugify as _slugify
 from unread.db.repo import Repo, open_repo
 from unread.export.markdown import export_csv, export_jsonl, export_md
@@ -495,7 +496,7 @@ async def _dump_forum_per_topic(
             console.print(f"[red]{_tf('output_is_file_need_dir', path=output)}[/]")
             raise typer.Exit(2)
         else:
-            base_dir = output or Path("reports")
+            base_dir = output or _reports_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -744,9 +745,9 @@ async def _dump_no_ref(
     if console_out:
         out_dir = None
     else:
-        out_dir = _resolve_output_dir(output, 2) if output is not None else Path("reports")
+        out_dir = _resolve_output_dir(output, 2) if output is not None else _reports_dir()
         if out_dir is None:
-            out_dir = Path("reports")
+            out_dir = _reports_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     settings = get_settings()
@@ -871,8 +872,8 @@ def _default_output_path(title: str | None, fmt: str) -> Path:
     slug = _slugify(title or "") or "chat"
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
-    # reports/{chat-slug}/dump/dump-{stamp}.{ext}
-    return Path("reports") / slug / "dump" / f"dump-{stamp}.{ext}"
+    # {reports_dir}/{chat-slug}/dump/dump-{stamp}.{ext}
+    return _reports_dir() / slug / "dump" / f"dump-{stamp}.{ext}"
 
 
 def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: int) -> None:

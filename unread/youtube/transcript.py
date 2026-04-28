@@ -245,7 +245,17 @@ async def _transcribe_audio(
     settings: Settings,
     repo: Repo,
 ) -> tuple[str, str, float, int]:
-    """Whisper path: download audio → segment → transcribe → return text+model+cost+seconds."""
+    """Whisper path: download audio → segment → transcribe → return text+model+cost+seconds.
+
+    Whisper is OpenAI-only; if the user picked a different chat
+    provider and didn't add an OpenAI key, raise a focused error
+    instead of letting the SDK throw a 401 mid-download.
+    """
+    if not settings.openai.api_key:
+        raise RuntimeError(
+            "YouTube Whisper transcription needs an OpenAI key (chat provider can stay non-OpenAI). "
+            "Run `unread tg init` to add one, or pick `--youtube-source captions` to use the video's captions only."
+        )
     audio_model = settings.openai.audio_model_default
     cfg_lang = settings.openai.audio_language or None
     duration = int(metadata.duration_sec or 0)

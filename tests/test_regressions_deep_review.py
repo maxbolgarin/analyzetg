@@ -288,12 +288,13 @@ def test_chunker_refuses_tiny_budget() -> None:
 
 
 def test_settings_reject_unknown_keys(tmp_path: Path, monkeypatch) -> None:
-    # Drop into an isolated cwd so load_settings doesn't pick up the real
-    # config.toml from the repo root.
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.toml").write_text("[analyze]\nmin_msg_chars = 5\nbogus_key = 123\n")
-    # Clear any leaked config-path env var so the relative path wins.
-    monkeypatch.delenv("UNREAD_CONFIG_PATH", raising=False)
+    # Point UNREAD_CONFIG_PATH at our crafted config — the loader no
+    # longer falls back to a cwd-relative `./config.toml` (which used to
+    # be a developer-only convenience but masked typos in
+    # `~/.unread/config.toml` after the install-dir switch).
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[analyze]\nmin_msg_chars = 5\nbogus_key = 123\n")
+    monkeypatch.setenv("UNREAD_CONFIG_PATH", str(cfg))
     with pytest.raises(Exception) as ei:
         load_settings()
     msg = str(ei.value)

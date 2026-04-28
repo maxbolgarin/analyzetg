@@ -13,10 +13,11 @@ transformed into text before the LLM sees it. Voice/video notes are
 transcribed by default; images, docs, video audio, and link summaries
 are opt-in per run (they cost extra). By default `unread` starts from
 Telegram's **unread marker** — the spot where you stopped reading — and
-writes a Markdown report to `reports/` with clickable links back to
-every cited message.
+both **renders the Markdown report in the terminal** and saves a copy
+under `~/.unread/reports/...` with clickable links back to every cited
+message.
 
-`unread analyze` also accepts **YouTube URLs** (captions or Whisper
+`unread <ref>` also accepts **YouTube URLs** (captions or Whisper
 transcript → time-stamped citations) and **arbitrary web pages**
 (article-body extraction → paragraph-indexed citations). Same pipeline,
 same caches, same report layout — see [YouTube videos](#youtube-videos)
@@ -27,20 +28,29 @@ Everything is local. The only network calls are to Telegram (via
 enrichment is enabled — the URLs shared in your chats.
 
 ```bash
-# First time
-unread init                      # log in to Telegram, verify OpenAI key
+# First time — initializes ~/.unread/ and logs in to Telegram.
+unread tg init
 
 # Most common: interactive wizard — pick a chat, pick a preset, done
-unread analyze                   # pick chat → preset → period → enrich → run
+unread                            # pick chat → preset → period → enrich → run
 
-# Direct, when you know which chat
-unread analyze @somegroup                  # summary of unread (voice/videonote auto-transcribed)
-unread analyze @somegroup --console        # render in terminal instead of a file
-unread analyze @somegroup --last-days 7 --preset digest
+# Direct, when you know which chat — the bare ref is the analyze entry
+unread @somegroup                              # console-rendered + auto-saved
+unread @somegroup --no-save                    # render only, don't write a file
+unread @somegroup --last-days 7 --preset digest
 
-# Other content sources — same command, different URL shape
-unread analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"   # YouTube video
-unread analyze "https://www.paulgraham.com/greatwork.html"     # any web page (article)
+# `tg` / `telegram` aliases — same as above but auto-init on first use
+unread tg @somegroup
+unread telegram @somegroup
+
+# Other content sources — same command, different shape
+unread "https://www.youtube.com/watch?v=jmzoJCn8evU"   # YouTube video
+unread "https://www.paulgraham.com/greatwork.html"     # any web page (article)
+unread ./report.pdf                                    # local file
+unread ./meeting.mp3                                   # audio (Whisper)
+unread ./screenshot.png                                # image (vision)
+cat notes.txt | unread                                 # stdin (pipe)
+unread -                                               # stdin (explicit)
 
 # Q&A across your synced archive (no Telegram round-trip)
 unread ask                                              # opens the wizard
@@ -49,18 +59,23 @@ unread ask "open questions on the API" --folder Work
 unread ask "..." --global                               # all synced chats, no wizard
 
 # Cost-guarded run with citation audit blocks + Telegram Saved Messages delivery
-unread analyze @somegroup --max-cost 0.10 --cite-context 3 --post-saved
+unread @somegroup --max-cost 0.10 --cite-context 3 --post-saved
 
 # Dump history to a file, no OpenAI
 unread dump @somegroup -o history.md --last-days 30
+
+# Help — `--help` and `help` both work; `help <cmd>` walks subcommands.
+unread help
+unread help describe
+unread help tg init
 ```
 
 ---
 
 ## Installation
 
-Five steps, in order. Don't skip — `unread` won't run without the credentials
-from step 3.
+Three steps. `unread` lives entirely under `~/.unread/` and works from
+any working directory.
 
 ### 1. Install the prerequisites
 
@@ -73,29 +88,71 @@ from step 3.
   are handled by `pypdf` / `python-docx` / `httpx` / `beautifulsoup4`,
   all installed automatically.
 
-### 2. Clone the repo
+### 2. Install the CLI
 
 ```bash
 git clone https://github.com/maxbolgarin/unread.git
 cd unread
+uv tool install --editable .
 ```
 
-All the commands below assume you're in this directory.
+That puts the **`unread`** command on your PATH. `--editable` picks up
+source changes automatically; pass `--reinstall` after a `git pull` if
+you want freshly added Python dependencies to land too.
 
-### 3. Get your API credentials
+> **Prefer not to install globally?** Skip `uv tool install`, run
+> `uv sync --extra dev` once, and prefix every command with
+> `uv run` (e.g. `uv run unread @somegroup`).
 
-- **Telegram** `api_id` / `api_hash` — log in at
-  <https://my.telegram.org> → *API development tools* → create an app.
-- **OpenAI** API key — <https://platform.openai.com/api-keys>.
-
-### 4. Configure (required before installing)
+### 3. First-time setup
 
 ```bash
-cp .env.example .env
-cp config.toml.example config.toml
+unread tg init
 ```
 
-Open **`.env`** and paste the credentials from step 3:
+On a fresh install this is a four-step interactive wizard:
+
+1. **Pick where data lives.** Choose between `~/.unread/` (default), the
+   current directory, or a custom path. The choice is recorded at
+   `~/.unread/install.toml` and survives across runs.
+2. **AI provider + key.** Pick which provider drives `analyze` / `ask`:
+   - **openai** — vanilla OpenAI Chat Completions. Default. Also backs
+     Whisper transcription, embeddings, and vision (used by
+     `--enrich=voice`/`videonote`/`video`/`image` and `ask --semantic`).
+   - **openrouter** — single key, many models, via
+     <https://openrouter.ai>.
+   - **anthropic** — Claude (Sonnet / Haiku) directly.
+   - **google** — Gemini (2.5 Flash / Flash Lite).
+   - **local** — self-hosted OpenAI-compatible server (Ollama, LM Studio,
+     vLLM). No API key required.
+
+   Then paste the corresponding key — or press Enter to skip.
+   Skipping leaves the install usable for `dump`, `describe`, `sync`,
+   `folders`, `chats *`, `backup`/`restore`, etc.; only `analyze` /
+   `ask` need a key.
+
+   > **Capability gaps.** Whisper / embeddings / vision are OpenAI-only.
+   > If you pick Anthropic / Google / OpenRouter / Local as your chat
+   > provider but also want media transcription or `--semantic`
+   > retrieval, run `unread tg init` again and add an OpenAI key
+   > alongside — the chat provider stays unchanged. Without one, those
+   > features skip with a one-line warning.
+3. **Telegram login** (optional). Answer `y` to set up `api_id` /
+   `api_hash` from <https://my.telegram.org> → *API development tools*,
+   then complete Telethon's phone+code prompt. Answer `n` to skip —
+   you can still use `unread "<youtube-url>"` or
+   `unread "<website-url>"` with just the OpenAI key.
+4. **Done.** Credentials are persisted in
+   `<install>/storage/data.sqlite::secrets` so you can blow away `.env`
+   and the CLI keeps working.
+
+Re-run `unread tg init` to fill in any step you skipped — only the
+unsatisfied steps prompt. `unread tg init --force` re-runs Telethon
+auth (useful when switching accounts) without re-prompting for folder
+or keys; to re-pick the install folder, delete
+`~/.unread/install.toml` first.
+
+**Non-interactive setup** (CI, scripts): pre-populate `~/.unread/.env`:
 
 ```
 TELEGRAM_API_ID=1234567
@@ -103,89 +160,35 @@ TELEGRAM_API_HASH=abcdef0123456789abcdef0123456789
 OPENAI_API_KEY=sk-...
 ```
 
-`config.toml` has sane defaults — model choices, pricing table, chunk
-sizes. The shipped file uses the convention "only overrides are
-uncommented; every other knob is listed as a comment showing its
-default", so you can scan it once and only flip what you want to
-change. Strict-mode parsing catches typos.
+Then `unread tg init` skips the wizard prompts and goes straight to
+Telethon auth. The `.env` values continue to win over anything
+persisted in the secrets DB, so rotating a key only needs an `.env`
+edit.
 
-```bash
-mkdir -p storage && chmod 700 storage   # SQLite isn't encrypted; rely on FS perms
-```
-
-### 5. Install the CLI
-
-```bash
-# Install globally (editable — your source edits take effect immediately)
-uv tool install --editable .
-```
-
-That puts the **`unread`** command on your PATH.
-
-> **Prefer not to install globally?** Skip `uv tool install` entirely,
-> run `uv sync --extra dev` once, and prefix every command with
-> `uv run` — e.g. `uv run unread analyze @somegroup`.
-
-### 6. Upgrading
-
-```bash
-git pull
-uv tool install --editable . --reinstall
-```
-
-`--editable` picks up source changes automatically, but newly added
-Python dependencies (`beautifulsoup4`, `pypdf`, `python-docx`,
-`trafilatura`, `yt-dlp` — used by the link / PDF / docx enrichments,
-website analysis, and YouTube analysis) only land in the tool's venv
-when you pass `--reinstall`. Run `unread doctor` after a pull to verify
-your environment is clean.
-
-### 7. First-time login
-
-```bash
-unread init
-```
-
-Interactive wizard: sends a code to your Telegram, creates the local
-session at `storage/session.sqlite`, and does a 1-token OpenAI ping to
-confirm your key. Only needed once.
+> Already running with a cwd-relative install from a previous version?
+> Run `unread migrate` from your old install directory to copy
+> `./.env`, `./config.toml`, `./storage/`, and `./reports/` into
+> `~/.unread/`. Pass `--move` to remove the originals after.
 
 ---
 
 ## Where does `unread` read config and write data?
 
-**Everything is resolved relative to the current working directory.**
-Run `unread` from the repo directory (the one containing your `.env` and
-`config.toml`) and you'll get:
+Everything lives under `~/.unread/`:
 
 ```
-./.env                          ← credentials (step 4)
-./config.toml                   ← models, pricing, tuning (step 4)
-./storage/session.sqlite        ← Telegram session (created by unread init)
-./storage/data.sqlite           ← chats, messages, analysis cache, embeddings
-./storage/backups/              ← snapshots from `unread backup`
-./reports/{chat}[/{topic}]/analyze/{preset}-{stamp}.md   ← default report path
-./reports/{chat}/dump/dump-{stamp}.md                    ← default dump path
+~/.unread/.env                          ← credentials (filled in by you)
+~/.unread/config.toml                   ← models, pricing, tuning
+~/.unread/storage/session.sqlite        ← Telegram session
+~/.unread/storage/data.sqlite           ← chats, messages, cache, embeddings
+~/.unread/storage/backups/              ← snapshots from `unread backup`
+~/.unread/reports/{chat}[/{topic}]/analyze/{preset}-{stamp}.md   ← default report path
+~/.unread/reports/{chat}/dump/dump-{stamp}.md                    ← default dump path
 ```
 
-If you `cd` somewhere else and run `unread`, it will look for `.env` and
-`config.toml` **in that directory** — and won't find them, so the
-command will fail with missing credentials. Two ways to avoid that:
-
-- **Always `cd` into the repo first** (simplest).
-- **Add a shell function + alias** that pins the directory (works from anywhere):
-
-  **zsh** (`~/.zshrc`):
-  ```zsh
-  _unread_run() { (cd ~/path/to/unread && command unread "$@"); }
-  alias unread='nocorrect _unread_run'
-  ```
-  `nocorrect` disables zsh's spell-correction for `unread` arguments — without it, typing `unread stats` can trigger `zsh: correct 'stats' to 'stat'?` and end with a parse error.
-
-  **bash** (`~/.bashrc`):
-  ```bash
-  unread() { (cd ~/path/to/unread && command unread "$@"); }
-  ```
+You can run `unread` from any directory — paths don't depend on cwd.
+Override the install root for tests / multi-profile setups via the
+`UNREAD_HOME` env var (e.g. `UNREAD_HOME=/srv/unread-shared`).
 
 ---
 
@@ -197,11 +200,20 @@ command will fail with missing credentials. Two ways to avoid that:
 
 | Command | Purpose |
 |---|---|
-| `unread init` | Interactive first-time setup. |
+| `unread [<ref>] [flags]` | Analyze a chat (default action). No args → interactive wizard. |
+| `unread tg [<ref>] [flags]` / `unread telegram [<ref>] [flags]` | Same as the bare form, but auto-runs `tg init` if no Telegram session exists. |
+| `unread tg init [--force]` | First-time setup: log in to Telegram, OpenAI ping, seed `~/.unread/`. `--force` wipes the saved session before logging in. |
+| `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help describe`, `unread help tg init`. |
 | `unread describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
-| `unread analyze [<ref>] [flags]` | Analyze a chat. Default window = unread. |
 | `unread ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
 | `unread dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
+| `unread migrate [--move] [--dry-run]` | Move legacy cwd-relative `./storage` and `./reports` into `~/.unread/`. |
+
+> **Subcommand-name collisions.** `unread <ref>` will route to a
+> subcommand if `<ref>` matches one (e.g. `unread describe` opens the
+> describe command, not a chat literally titled "describe"). Use
+> `unread tg "describe"` or `unread -- describe` for the rare case of
+> a chat that shares a subcommand name.
 
 ### Sync & subscriptions
 
@@ -246,6 +258,8 @@ command will fail with missing credentials. Two ways to avoid that:
 | Fuzzy title | `"Bull Trading"` — substring match across your dialogs |
 | YouTube URL | `https://www.youtube.com/watch?v=...` (see [YouTube videos](#youtube-videos)) |
 | Website URL | `https://example.com/article` (see [Web pages](#web-pages)) |
+| Local file path | `./report.pdf`, `~/notes.md`, `/tmp/recording.mp3` (see [Local files](#local-files)) |
+| `-` | Read from stdin: `cat notes.txt \| unread` or `unread - < notes.txt` |
 
 The wizard's chat picker accepts non-Latin type-to-filter (Cyrillic,
 Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
@@ -385,6 +399,47 @@ Configuration knobs (under `[website]` in `config.toml`):
 # max_paragraphs = 400                    # post-split cap; rejects pathological pages
 # user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/..."
 ```
+
+### Local files
+
+`unread <path>` analyzes any local file. Auto-detected from the ref shape
+— anything that starts with `./`, `../`, `/`, `~/`, or `file://`, plus
+bare filenames that match an existing file in the current directory,
+routes to the file analyzer instead of being interpreted as a chat
+title.
+
+```bash
+unread ./report.pdf                  # PDF (text-extracted via pypdf)
+unread ./contract.docx               # DOCX (python-docx)
+unread ./meeting-notes.md            # Markdown / plain text / source code
+unread ./recording.mp3               # Audio (Whisper transcription)
+unread ./standup.mp4                 # Video (ffmpeg → audio → Whisper)
+unread ./diagram.png                 # Image (vision description, then summary)
+cat notes.txt | unread                # Stdin (auto-detect when piped)
+unread - < notes.txt                  # Stdin (explicit `-` form)
+unread ./README.md --no-save          # Console-only, don't write a report file
+```
+
+Supported types:
+
+| Kind | Extensions | What happens |
+|---|---|---|
+| Text / code | `.txt`, `.md`, `.csv`, `.json`, `.py`, `.js`, `.ts`, `.go`, `.rs`, `.html`, `.xml`, `.yaml`, `.toml`, `.sh`, `.sql`, `.tex`, … | Read as UTF-8 (with CP1251 / Latin-1 fallbacks) and analyzed as a document. |
+| PDF | `.pdf` | `pypdf` extracts text page-by-page (200k-char cap). Scanned/image-only PDFs error out with an OCR hint. |
+| DOCX | `.docx` | `python-docx` extracts paragraphs. |
+| Audio | `.mp3`, `.m4a`, `.wav`, `.flac`, `.ogg`, `.opus` | Transcribed via Whisper (needs `OPENAI_API_KEY`). |
+| Video | `.mp4`, `.mov`, `.mkv`, `.webm` | ffmpeg pulls the audio track, Whisper transcribes (needs `ffmpeg` + OpenAI). |
+| Image | `.png`, `.jpg`, `.webp`, `.gif` | Vision model describes the image, then analyzed as text (needs OpenAI). |
+| Stdin | `-` or piped | Treated as plain text. |
+
+Reports land at `~/.unread/reports/files/<kind>/<file-slug>-<preset>-<stamp>.md`. Citations
+in the report use `file://` URIs (`[#7](file:///abs/path)`) so clicking
+re-opens the source. Re-running on an unchanged file hits
+`local_files` cache → no LLM cost.
+
+Flags that only make sense for Telegram chats (`--folder`, `--thread`,
+`--all-flat`, etc.) are rejected with a clear error when given a file
+or stdin ref.
 
 ---
 

@@ -1107,6 +1107,66 @@ class Repo:
         )
         await self._conn.commit()
 
+    # ----------------------------------------------- local files
+
+    async def get_local_file(self, file_id: str) -> dict[str, Any] | None:
+        """Fetch a cached local-file row (metadata + paragraphs), or None."""
+        cur = await self._conn.execute(
+            "SELECT * FROM local_files WHERE file_id=?",
+            (file_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else None
+
+    async def put_local_file(
+        self,
+        *,
+        file_id: str,
+        abs_path: str,
+        name: str,
+        kind: str,
+        extension: str | None,
+        content_hash: str,
+        paragraphs: list[str],
+        extract_size: int | None,
+    ) -> None:
+        """Upsert a local-file row. Mirrors `put_website_page` exactly so
+        the file path and the website path share the same caching shape
+        in the analyzer (just a different table to look up by id).
+        """
+        paragraphs_json = json.dumps(paragraphs, ensure_ascii=False)
+        await self._conn.execute(
+            """
+            INSERT INTO local_files(
+                file_id, abs_path, name, kind, extension,
+                content_hash, paragraphs_json, extract_size, fetched_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_id) DO UPDATE SET
+                abs_path=excluded.abs_path,
+                name=excluded.name,
+                kind=excluded.kind,
+                extension=excluded.extension,
+                content_hash=excluded.content_hash,
+                paragraphs_json=excluded.paragraphs_json,
+                extract_size=excluded.extract_size,
+                fetched_at=excluded.fetched_at
+            """,
+            (
+                file_id,
+                abs_path,
+                name,
+                kind,
+                extension,
+                content_hash,
+                paragraphs_json,
+                extract_size,
+                _utcnow(),
+            ),
+        )
+        await self._conn.commit()
+
     # ----------------------------------------------- last-run-args (wizard)
 
     async def put_last_run_args(
@@ -1213,6 +1273,57 @@ class Repo:
         deleted = cur.rowcount or 0
         await cur.close()
         return deleted
+
+    # ------------------------------------------------------- secrets
+
+    async def get_secrets(self) -> dict[str, str]:
+        """Return persisted secrets keyed by allowlisted name.
+
+        Filters out any rows that don't match the allowlist — defensive
+        against schema additions / manual SQL inserts that aren't part
+        of the documented set.
+        """
+        cur = await self._conn.execute("SELECT key, value FROM secrets")
+        rows = await cur.fetchall()
+        await cur.close()
+        return {row["key"]: row["value"] for row in rows if row["key"] in _SECRET_KEYS}
+
+    async def put_secrets(self, values: dict[str, str]) -> None:
+        """Upsert a subset of secrets in one transaction.
+
+        Empty / falsy values are skipped — passing
+        ``{"telegram.api_hash": ""}`` is a no-op rather than wiping the
+        existing row. To explicitly clear a secret, call
+        :meth:`delete_secret`. Unknown keys (outside the allowlist) are
+        rejected with a ``ValueError`` so a typo can't silently grow
+        the secrets table.
+        """
+        for key in values:
+            if key not in _SECRET_KEYS:
+                raise ValueError(f"unknown secret key: {key!r}; allowed: {sorted(_SECRET_KEYS)}")
+        rows = [(k, v, _utcnow()) for k, v in values.items() if v]
+        if not rows:
+            return
+        await self._conn.executemany(
+            """
+            INSERT INTO secrets(key, value, updated_at) VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+            """,
+            rows,
+        )
+        await self._conn.commit()
+
+    async def delete_secret(self, key: str) -> bool:
+        """Remove one secret row. Returns True iff a row existed."""
+        if key not in _SECRET_KEYS:
+            raise ValueError(f"unknown secret key: {key!r}")
+        cur = await self._conn.execute("DELETE FROM secrets WHERE key=?", (key,))
+        await self._conn.commit()
+        deleted = cur.rowcount or 0
+        await cur.close()
+        return deleted > 0
 
     # ------------------------------------------------------- embeddings
 
@@ -1636,6 +1747,27 @@ async def open_repo(path: Path | str) -> AsyncIterator[Repo]:
         await repo.close()
 
 
+# Allow-list of `secrets` table keys. Anything outside this set is
+# rejected on write so a typo can't silently grow the secrets schema,
+# and ignored on read so a manual sqlite INSERT can't surface as a
+# leaked credential. Keep in sync with the wizard in `tg/commands.py`
+# and the read overlay in `secrets.py`.
+_SECRET_KEYS: frozenset[str] = frozenset(
+    {
+        "telegram.api_id",
+        "telegram.api_hash",
+        # Per-provider chat keys. Each provider (selected via
+        # `settings.ai.provider`) reads its own row; OpenAI's key
+        # additionally backs Whisper / embeddings / vision regardless
+        # of which provider drives chat.
+        "openai.api_key",
+        "openrouter.api_key",
+        "anthropic.api_key",
+        "google.api_key",
+    }
+)
+
+
 # Allow-list of `app_settings` keys that may overlay the config singleton.
 # Any other rows are stored but ignored — keeps the surface tight.
 #
@@ -1657,6 +1789,12 @@ _OVERRIDE_KEYS = (
     "openai.filter_model_default",
     "openai.audio_model_default",
     "enrich.vision_model",
+    # Chat-provider routing (multi-provider support)
+    "ai.provider",
+    "ai.base_url",
+    "ai.chat_model",
+    "ai.filter_model",
+    "local.base_url",
     # Enrichment defaults (booleans persisted as "0"/"1")
     "enrich.voice",
     "enrich.videonote",
@@ -1757,6 +1895,19 @@ def _apply_one_override(settings, key: str, value: str) -> None:
             return
         settings.analyze.min_msg_chars = n
         return
+    # AI provider routing — strings, empty value resets to default.
+    if key == "ai.provider":
+        if value:
+            settings.ai.provider = value
+        return
+    if key in {"ai.base_url", "ai.chat_model", "ai.filter_model"}:
+        attr = key.split(".", 1)[1]
+        setattr(settings.ai, attr, value)
+        return
+    if key == "local.base_url":
+        if value:
+            settings.local.base_url = value
+        return
 
 
 def apply_db_overrides_sync(settings, db_path: Path | str | None = None) -> None:
@@ -1800,6 +1951,38 @@ def apply_db_overrides_sync(settings, db_path: Path | str | None = None) -> None
     for key in _OVERRIDE_KEYS:
         if key in rows:
             _apply_one_override(settings, key, rows[key])
+
+
+def read_data_db_secrets_sync(db_path: Path | str) -> dict[str, str]:
+    """Read persisted secrets from `data.sqlite` without an event loop.
+
+    Used at `load_settings` time to overlay api_id / api_hash /
+    api_key when env / `.env` left them empty. Mirrors the defensive
+    shape of `apply_db_overrides_sync`: read-only URI open, every
+    sqlite error degrades to an empty dict so the CLI never fails to
+    construct because the user hasn't run a command yet.
+
+    Allowlist filtering happens here too — a manual `INSERT` of an
+    unknown key never leaks back into settings.
+    """
+    import sqlite3
+
+    target = Path(db_path)
+    if not target.is_file():
+        return {}
+    try:
+        absolute = target.resolve()
+        conn = sqlite3.connect(f"file:{absolute}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return {}
+    try:
+        cur = conn.execute("SELECT key, value FROM secrets")
+        rows = dict(cur.fetchall())
+    except sqlite3.Error:
+        conn.close()
+        return {}
+    conn.close()
+    return {k: v for k, v in rows.items() if k in _SECRET_KEYS and v}
 
 
 async def _apply_db_overrides(repo: Repo) -> None:

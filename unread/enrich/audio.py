@@ -42,6 +42,14 @@ def _openai_client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=s.openai.api_key, timeout=s.openai.request_timeout_sec)
 
 
+def _openai_key_present() -> bool:
+    """Audio transcription is OpenAI-only (Whisper). Multi-provider installs
+    that picked Anthropic / Google still need an OpenAI key for this — we
+    skip with a one-line warning when it's missing rather than failing
+    the whole analyze run."""
+    return bool(get_settings().openai.api_key)
+
+
 @retry_on_429()
 async def _transcribe_file(
     oai: AsyncOpenAI,
@@ -86,6 +94,18 @@ async def enrich_audio(
     if msg.transcript is not None:
         return EnrichResult(kind="transcript", content=msg.transcript, cache_hit=True)
     if msg.media_doc_id is None or msg.media_type is None:
+        return None
+
+    # Whisper requires an OpenAI key regardless of which chat provider
+    # is active. Skip with a clear warning so the analyze pipeline keeps
+    # going for the text-only messages instead of crashing the whole run.
+    if not _openai_key_present():
+        log.warning(
+            "enrich.audio.skipped_no_openai_key",
+            chat_id=msg.chat_id,
+            msg_id=msg.msg_id,
+            hint="run `unread tg init` and add an OpenAI key (chat provider can stay non-OpenAI)",
+        )
         return None
 
     cached = await repo.get_media_enrichment(msg.media_doc_id, "transcript")

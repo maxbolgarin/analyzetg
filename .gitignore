@@ -228,3 +228,7 @@ storage/media/*
 # Analyze/dump reports — local output, don't commit.
 reports/*
 !reports/.gitkeep
+
+CLAUDE.md
+.claude
+docs/superpowers

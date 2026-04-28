@@ -19,6 +19,7 @@ from unread.analyzer.commands import (
     _topic_slug,
     _unique_path,
 )
+from unread.core.paths import reports_dir
 
 # --- slug helpers ------------------------------------------------------
 
@@ -56,9 +57,9 @@ def test_default_path_non_forum():
         preset="summary",
     )
     # No thread → no nested topic dir.
-    assert p.parts[0] == "reports"
-    assert p.parts[1] == "bull-trading"
-    assert p.parts[2] == "analyze"
+    rel = p.relative_to(reports_dir())
+    assert rel.parts[0] == "bull-trading"
+    assert rel.parts[1] == "analyze"
     assert p.name.startswith("summary-") and p.name.endswith(".md")
 
 
@@ -70,12 +71,11 @@ def test_default_path_forum_with_topic_title():
         thread_title="AI hub",
         preset="summary",
     )
-    parts = p.parts
-    # reports/<chat>/<topic>/analyze/<file>.md — four levels below 'reports'.
-    assert parts[0] == "reports"
-    assert parts[1] == "union-3-0-work-group"
-    assert parts[2] == "ai-hub"
-    assert parts[3] == "analyze"
+    rel = p.relative_to(reports_dir())
+    # <chat>/<topic>/analyze/<file>.md — three levels below the reports root.
+    assert rel.parts[0] == "union-3-0-work-group"
+    assert rel.parts[1] == "ai-hub"
+    assert rel.parts[2] == "analyze"
     assert p.name.startswith("summary-") and p.name.endswith(".md")
 
 
@@ -89,7 +89,7 @@ def test_default_path_forum_without_topic_title_falls_back():
         thread_title=None,
         preset="digest",
     )
-    assert p.parts[2] == "topic-5"
+    assert p.relative_to(reports_dir()).parts[1] == "topic-5"
 
 
 def test_default_path_untitled_chat_never_produces_generic_chat():

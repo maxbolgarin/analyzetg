@@ -207,6 +207,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TIMESTAMP NOT NULL
 );
 
+-- Persisted secrets written by `unread tg init` — Telegram api_id /
+-- api_hash and the OpenAI api_key. Lets a user delete `~/.unread/.env`
+-- after the first successful interactive setup and keep working off
+-- the saved values. Schema mirrors `app_settings`; kept in a separate
+-- table so the `unread settings` CLI can't accidentally surface or
+-- mutate them. Allowlisted keys: telegram.api_id, telegram.api_hash,
+-- openai.api_key.
+CREATE TABLE IF NOT EXISTS secrets (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
 -- One row per analyzed YouTube video. Reused across runs: a re-analyze of
 -- the same `video_id` skips both yt-dlp metadata and Whisper. Transcript
 -- is stored inline; the audio file itself is not retained.
@@ -266,3 +279,28 @@ CREATE TABLE IF NOT EXISTS website_pages (
 
 CREATE INDEX IF NOT EXISTS idx_website_pages_domain
     ON website_pages(domain, fetched_at);
+
+-- One row per analyzed local file. Same shape as `website_pages` so the
+-- analyzer's caching logic can treat files and websites symmetrically.
+-- `content_hash` is sha256 of the extracted text, NOT of the source
+-- bytes — so a re-saved Word doc with whitespace tweaks but identical
+-- extracted prose still hits the cache. `paragraphs_json` is the array
+-- of synthetic-message bodies fed to the LLM.
+--
+-- Stdin invocations write a row too, with `abs_path = ""` and
+-- `kind = "stdin"`; `file_id` is sha256 of the stdin bytes so piping
+-- the same content twice still hits cache.
+CREATE TABLE IF NOT EXISTS local_files (
+    file_id         TEXT PRIMARY KEY,        -- sha256(abs_path or stdin bytes)[:16]
+    abs_path        TEXT NOT NULL,           -- "" for stdin
+    name            TEXT NOT NULL,           -- basename or "stdin"
+    kind            TEXT NOT NULL,           -- text | pdf | docx | audio | video | image | stdin
+    extension       TEXT,
+    content_hash    TEXT NOT NULL,
+    paragraphs_json TEXT NOT NULL,
+    extract_size    INTEGER,
+    fetched_at      TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_files_kind
+    ON local_files(kind, fetched_at);

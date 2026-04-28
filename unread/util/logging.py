@@ -15,11 +15,7 @@ console = Console()
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure structlog + stdlib logging. Idempotent."""
-    level = (
-        logging.DEBUG
-        if verbose or os.environ.get("UNREAD_DEBUG")
-        else logging.INFO
-    )
+    level = logging.DEBUG if verbose or os.environ.get("UNREAD_DEBUG") else logging.INFO
 
     handler = RichHandler(
         console=console,

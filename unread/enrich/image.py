@@ -107,6 +107,19 @@ async def enrich_image(
     if msg.media_type != "photo" or msg.media_doc_id is None:
         return None
 
+    # Vision (image description) is OpenAI-only in our pipeline. Skip
+    # cleanly with a one-line warning when the OpenAI key is missing —
+    # multi-provider installs that picked Anthropic / Google can still
+    # run the rest of the analyze pipeline.
+    if not settings.openai.api_key:
+        log.warning(
+            "enrich.image.skipped_no_openai_key",
+            chat_id=msg.chat_id,
+            msg_id=msg.msg_id,
+            hint="run `unread tg init` and add an OpenAI key (chat provider can stay non-OpenAI)",
+        )
+        return None
+
     cached = await repo.get_media_enrichment(msg.media_doc_id, "image_description")
     if cached:
         content = cached.get("content") or ""

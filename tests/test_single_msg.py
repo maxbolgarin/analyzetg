@@ -72,9 +72,20 @@ async def test_iter_messages_thread_none_skips_filter(repo: Repo) -> None:
 
 
 def test_msg_flag_forwarded_to_cmd_analyze() -> None:
+    # `unread <ref> --msg ID` — the `analyze` Typer command was removed
+    # in the UX overhaul; the bare ref now lands directly on the root
+    # callback which dispatches to cmd_analyze.
+    #
+    # The root callback runs `_ensure_ready_for_analyze` first to seed
+    # `~/.unread/` and bail with a friendly banner when credentials are
+    # missing. We patch it out so the test exercises only the dispatch
+    # plumbing (cmd_analyze is itself mocked).
     runner = CliRunner()
-    with patch("unread.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
-        result = runner.invoke(app, ["analyze", "@foo", "--msg", "12345"])
+    with (
+        patch("unread.cli._ensure_ready_for_analyze", return_value=True),
+        patch("unread.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock,
+    ):
+        result = runner.invoke(app, ["@foo", "--msg", "12345"])
     assert result.exit_code == 0, result.output
     mock.assert_called_once()
     kwargs = mock.call_args.kwargs
@@ -84,9 +95,12 @@ def test_msg_flag_forwarded_to_cmd_analyze() -> None:
 
 def test_msg_flag_accepts_link() -> None:
     runner = CliRunner()
-    with patch("unread.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
+    with (
+        patch("unread.cli._ensure_ready_for_analyze", return_value=True),
+        patch("unread.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock,
+    ):
         link = "https://t.me/somechat/9876"
-        result = runner.invoke(app, ["analyze", "@foo", "--msg", link])
+        result = runner.invoke(app, ["@foo", "--msg", link])
     assert result.exit_code == 0, result.output
     assert mock.call_args.kwargs["msg"] == link
 
@@ -96,8 +110,11 @@ def test_bare_msg_link_becomes_single_msg_mode() -> None:
     single-msg mode — matches the natural paste-a-link-to-one-voice flow."""
     runner = CliRunner()
     link = "https://t.me/c/3865481227/11/792"
-    with patch("unread.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock:
-        result = runner.invoke(app, ["analyze", link])
+    with (
+        patch("unread.cli._ensure_ready_for_analyze", return_value=True),
+        patch("unread.analyzer.commands.cmd_analyze", new_callable=AsyncMock) as mock,
+    ):
+        result = runner.invoke(app, [link])
     assert result.exit_code == 0, result.output
     kwargs = mock.call_args.kwargs
     assert kwargs["ref"] == link

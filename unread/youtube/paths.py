@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from unread.core.paths import slugify
+from unread.core.paths import reports_dir, slugify
 
 
 def _channel_slug(channel_title: str | None, channel_id: str | None) -> str:
@@ -46,9 +46,9 @@ def youtube_report_path(
     """Default disk path for a YouTube analysis report."""
     when = stamp or datetime.now()
     ts = when.strftime("%Y-%m-%d_%H%M%S")
-    return Path(
-        "reports",
-        "youtube",
-        _channel_slug(channel_title, channel_id),
-        f"{_video_slug(title, video_id)}-{preset}-{ts}.md",
+    return (
+        reports_dir()
+        / "youtube"
+        / _channel_slug(channel_title, channel_id)
+        / f"{_video_slug(title, video_id)}-{preset}-{ts}.md"
     )

@@ -209,6 +209,17 @@ async def cmd_ask(
     when the scope resolves to a single chat — folder / global scopes
     silently no-op since there's no single chat to mark.
     """
+    # Bail with a friendly banner before any retrieval / Telegram work
+    # if the OpenAI key is missing — `ask` always ends with an LLM call,
+    # so there's no value in doing the work first. Reads through the
+    # already-imported `get_settings` so test patches on this module's
+    # binding are honored.
+    if not get_settings().openai.api_key:
+        from unread.cli import _print_first_run_banner
+
+        _print_first_run_banner("openai")
+        raise typer.Exit(1)
+
     _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
 
     _no_scope = ref is None and chat is None and folder is None and not global_scope
@@ -420,8 +431,21 @@ async def cmd_ask(
         # --build-index → fill the message_embeddings table for the scoped
         # chats and exit. Idempotent. The flagship answer path is skipped.
         if build_index:
+            from openai import AsyncOpenAI
+
             from unread.ask.embeddings import build_index as _build_index
             from unread.ask.embeddings import default_model as _default_embed_model
+
+            # Embeddings are OpenAI-only — build a direct AsyncOpenAI
+            # client with the OpenAI key, regardless of which chat
+            # provider is active. Bail with a friendly message when the
+            # key is missing.
+            if not settings.openai.api_key:
+                console.print(
+                    "[yellow]Embeddings (`ask --semantic --build-index`) need an OpenAI key.[/] "
+                    "Run `unread tg init` and add one (chat provider can stay non-OpenAI)."
+                )
+                raise typer.Exit(1)
 
             assert chat_ids is not None  # validated above
             embed_model = _default_embed_model()
@@ -429,9 +453,13 @@ async def cmd_ask(
                 f"[dim]→ Building embeddings index for {len(chat_ids)} chat(s) "
                 f"with[/] [bold]{embed_model}[/]..."
             )
+            embed_client = AsyncOpenAI(
+                api_key=settings.openai.api_key,
+                timeout=settings.openai.request_timeout_sec,
+            )
             written = await _build_index(
                 repo=repo,
-                oai=make_client(),
+                oai=embed_client,
                 chat_ids=chat_ids,
                 model=embed_model,
             )
@@ -633,6 +661,8 @@ async def _run_single_turn(
     candidate_limit = max(limit, ask_cfg.rerank_top_k) if rerank_on else limit
 
     if semantic:
+        from openai import AsyncOpenAI
+
         from unread.ask.embeddings import default_model as _embed_model_name
         from unread.ask.embeddings import semantic_search
 
@@ -643,14 +673,25 @@ async def _run_single_turn(
                 "synced chat would be slow without an ANN index."
             )
             raise typer.Exit(2)
+        # Embeddings are OpenAI-only — same gate as `--build-index`.
+        if not settings.openai.api_key:
+            console.print(
+                "[yellow]Semantic retrieval (`ask --semantic`) needs an OpenAI key.[/] "
+                "Run `unread tg init` to add one (chat provider can stay non-OpenAI)."
+            )
+            raise typer.Exit(1)
         console.print(
             f"[dim]→ Semantic retrieval[/] ({embed_model}; "
             f"pool={candidate_limit}"
             f"{', rerank→' + str(min(limit, ask_cfg.rerank_keep)) if rerank_on else ''})"
         )
+        embed_client = AsyncOpenAI(
+            api_key=settings.openai.api_key,
+            timeout=settings.openai.request_timeout_sec,
+        )
         sem_scored = await semantic_search(
             repo=repo,
-            oai=oai,
+            oai=embed_client,
             question=question,
             chat_ids=chat_ids,
             model=embed_model,

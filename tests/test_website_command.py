@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from unread.analyzer.pipeline import AnalysisOptions
 from unread.analyzer.prompts import get_presets
+from unread.core.paths import reports_dir
 from unread.website.commands import (
     _build_synthetic_messages,
     _meta_header,
@@ -177,13 +178,12 @@ def test_report_path_layout() -> None:
         domain="example.com",
         preset="website",
     )
-    parts = p.parts
-    assert parts[0] == "reports"
-    assert parts[1] == "website"
-    assert parts[2] == "example-com"
-    assert "my-article" in parts[3]
-    assert parts[3].endswith(".md")
-    assert "website" in parts[3]
+    rel_parts = p.relative_to(reports_dir()).parts
+    assert rel_parts[0] == "website"
+    assert rel_parts[1] == "example-com"
+    assert "my-article" in rel_parts[2]
+    assert rel_parts[2].endswith(".md")
+    assert "website" in rel_parts[2]
 
 
 def test_report_path_falls_back_for_missing_title() -> None:
@@ -194,7 +194,7 @@ def test_report_path_falls_back_for_missing_title() -> None:
         preset="website",
     )
     # Page slug should fall back to "page-<suffix>".
-    assert "page-" in p.parts[3]
+    assert "page-" in p.relative_to(reports_dir()).parts[2]
 
 
 def test_report_path_unknown_domain() -> None:
@@ -204,4 +204,4 @@ def test_report_path_unknown_domain() -> None:
         domain=None,
         preset="website",
     )
-    assert p.parts[2] == "unknown-domain"
+    assert p.relative_to(reports_dir()).parts[1] == "unknown-domain"

@@ -28,6 +28,7 @@ from unread.core.paths import compute_window as _compute_window
 from unread.core.paths import derive_internal_id as _derive_internal_id
 from unread.core.paths import has_explicit_period as _has_explicit_period
 from unread.core.paths import parse_ymd as _parse_ymd
+from unread.core.paths import reports_dir as _reports_dir
 from unread.core.paths import slugify as _slugify  # noqa: F401  re-export for tests
 from unread.core.paths import topic_slug as _topic_slug
 from unread.core.paths import unique_path as _unique_path
@@ -328,7 +329,14 @@ async def cmd_analyze(
     model: str | None,
     filter_model: str | None,
     output: Path | None,
+    # `console_out` historically meant "skip the file". The output flip
+    # in Phase 3 keeps the file-skip semantics here so internal callers
+    # keep working; rich-rendering on the terminal is now unconditional
+    # (handled inside `_print_and_write`). Set `no_save=True` from the
+    # CLI surface (`--no-save`) to skip writing the report file while
+    # still rendering it to the terminal.
     console_out: bool = False,
+    no_save: bool = False,
     save_default: bool = False,
     mark_read: bool | None = None,
     no_cache: bool = False,
@@ -354,6 +362,12 @@ async def cmd_analyze(
     content_language: str | None = None,
     youtube_source: str = "auto",
 ) -> None:
+    # The CLI surface exposes `--no-save` as the explicit "skip file"
+    # flag; the legacy `--console`/`-c` and `--save`/`-s` map onto the
+    # internal `console_out` parameter. Collapse them here so the rest
+    # of the pipeline only deals with `console_out`.
+    if no_save:
+        console_out = True
     settings_for_lang = get_settings()
     effective_language = (language or settings_for_lang.locale.language or "en").lower()
     effective_content_language = (
@@ -467,6 +481,60 @@ async def cmd_analyze(
             if ref and ref != msg:
                 console.print(f"[dim]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
             effective_ref = msg
+
+    # File / stdin branch: detect first so paths and the explicit stdin
+    # sentinel never fall through to the Telegram resolver. No
+    # Telegram-specific flags apply.
+    from unread.cli import _STDIN_REF_SENTINEL, _looks_like_local_file
+
+    if effective_ref and (effective_ref == _STDIN_REF_SENTINEL or _looks_like_local_file(effective_ref)):
+        _rejected_file: list[str] = []
+        for label, val in (
+            ("--folder", folder),
+            ("--thread", thread),
+            ("--all-flat", all_flat),
+            ("--all-per-topic", all_per_topic),
+            ("--with-comments", with_comments),
+            ("--from-msg", from_msg),
+            ("--full-history", full_history),
+            ("--since", since),
+            ("--until", until),
+            ("--last-days", last_days),
+            ("--last-hours", last_hours),
+            ("--msg", msg),
+            ("--repeat-last", repeat_last),
+        ):
+            if val:
+                _rejected_file.append(label)
+        if mark_read is not None:
+            _rejected_file.append("--mark-read/--no-mark-read")
+        if _rejected_file:
+            raise typer.BadParameter(
+                f"Local files / stdin do not support {', '.join(_rejected_file)}. "
+                "These flags only apply to Telegram chats."
+            )
+
+        from unread.files.commands import cmd_analyze_file
+
+        await cmd_analyze_file(
+            ref=effective_ref,
+            preset=preset,
+            prompt_file=prompt_file,
+            model=model,
+            filter_model=filter_model,
+            output=output,
+            console_out=console_out,
+            no_cache=no_cache,
+            max_cost=max_cost,
+            dry_run=dry_run,
+            self_check=self_check,
+            post_to=post_to,
+            post_saved=post_saved,
+            language=effective_language,
+            content_language=effective_content_language,
+            yes=yes,
+        )
+        return
 
     # YouTube branch: detect a YouTube URL early and dispatch to the
     # dedicated handler. No Telegram resolve / backfill / mark_read.
@@ -994,7 +1062,7 @@ async def _run_single_msg(
         language=language,
         content_language=content_language,
     )
-    _print_and_write(result, output=output, title=title, console_out=console_out)
+    _print_and_write(result, output=output, title=title, no_save=console_out)
 
 
 async def _run_single(
@@ -1260,7 +1328,7 @@ async def _run_single(
         output=output,
         title=title,
         thread_title=thread_title,
-        console_out=console_out,
+        no_save=console_out,
     )
 
     # `--post-saved` is sugar for `--post-to=me`. Explicit --post-to wins
@@ -1332,7 +1400,7 @@ async def _run_forum_per_topic(
             console.print(f"[red]{_tf('output_is_file_need_dir', path=output)}[/]")
             raise typer.Exit(2)
         else:
-            base_dir = output or Path("reports")
+            base_dir = output or _reports_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
     chat_slug = _chat_slug(chat_title, chat_id)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -1392,7 +1460,7 @@ async def _run_forum_per_topic(
                 output=per_file,
                 title=prepared.chat_title,
                 thread_title=prepared.thread_title,
-                console_out=console_out,
+                no_save=console_out,
             )
             if prepared.mark_read_fn and result.msg_count > 0:
                 await prepared.mark_read_fn()
@@ -1516,7 +1584,7 @@ async def _run_no_ref(
     if console_out:
         out_dir: Path | None = None
     else:
-        out_dir = _resolve_output_dir(output, 0) or Path("reports")
+        out_dir = _resolve_output_dir(output, 0) or _reports_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
@@ -1597,7 +1665,7 @@ async def _run_no_ref(
                 result,
                 output=per_file,
                 title=prepared.chat_title,
-                console_out=console_out,
+                no_save=console_out,
             )
             if prepared.mark_read_fn and result.msg_count > 0:
                 try:
@@ -1730,14 +1798,14 @@ async def _run_multichat_batch(
     if console_out:
         out_path: Path | None = None
     else:
-        base = _resolve_output_dir(output, 0) or Path("reports")
+        base = _resolve_output_dir(output, 0) or _reports_dir()
         base.mkdir(parents=True, exist_ok=True)
         out_path = base / "multichat" / f"{preset}-{stamp}.md"
     _print_and_write(
         result,
         output=out_path,
         title=f"{len(chat_groups)} chats — multichat",
-        console_out=console_out,
+        no_save=console_out,
     )
 
     # Fire each chat's mark-read after the LLM call succeeded.
@@ -1864,14 +1932,19 @@ def _print_and_write(
     output: Path | None,
     title: str | None,
     thread_title: str | None = None,
-    console_out: bool = False,
+    console_out: bool = True,
+    no_save: bool = False,
 ) -> None:
-    """Write the report to disk (and/or stdout) and log the summary line.
+    """Render the report to the terminal and (by default) save to disk.
 
-    `thread_title` is used only for the default output path when `output`
-    is None and the run targeted a forum topic; callers that already
-    computed an explicit `output=` path (batch mode, per-topic loop)
-    don't need to pass it.
+    Default behavior: rich-print to the terminal AND write a markdown
+    file under `~/.unread/reports/...`. Pass `no_save=True` (or the
+    `--no-save` CLI flag) to skip the file. `console_out=False` keeps
+    the legacy "save only, no rich rendering" mode for callers that
+    really want it (batch / non-tty paths).
+
+    `thread_title` is used only for the default output path when
+    `output` is None and the run targeted a forum topic.
     """
     console.print(
         f"[bold cyan]Run[/] preset={result.preset} msgs={result.msg_count} "
@@ -1895,11 +1968,8 @@ def _print_and_write(
         console.print(Rule(title or "result", style="cyan"))
         console.print(Markdown(body))
         console.print(Rule(style="cyan"))
-        if output is not None:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output = _unique_path(output)
-            output.write_text(body, encoding="utf-8")
-            console.print(f"[green]{_tf('also_saved', path=output)}[/]")
+
+    if no_save:
         return
 
     if output is None:
@@ -1911,11 +1981,13 @@ def _print_and_write(
             preset=result.preset,
         )
     output.parent.mkdir(parents=True, exist_ok=True)
-    # Even with seconds-precision stamps, two parallel invocations can still
-    # land in the same second — _unique_path appends -2/-3 to avoid overwrite.
+    # Even with seconds-precision stamps, two parallel invocations can
+    # still land in the same second — _unique_path appends -2/-3 so we
+    # never silently overwrite a previous report.
     output = _unique_path(output)
     output.write_text(body, encoding="utf-8")
-    console.print(f"[green]{_tf('written_to', path=output)}[/]")
+    label = "also_saved" if console_out else "written_to"
+    console.print(f"[green]{_tf(label, path=output)}[/]")
 
 
 # Telegram caps a single message at 4096 chars (UTF-16 code units, but
@@ -2042,11 +2114,11 @@ def _default_output_path(
     way to tell which topic each belongs to).
     """
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    parts: list[str] = ["reports", _chat_slug(chat_title, chat_id)]
+    parts: list[str] = [_chat_slug(chat_title, chat_id)]
     if thread_id:
         parts.append(_topic_slug(thread_title, thread_id))
     parts.extend(["analyze", f"{preset}-{stamp}.md"])
-    return Path(*parts)
+    return _reports_dir().joinpath(*parts)
 
 
 async def run_all_unread_analyze(

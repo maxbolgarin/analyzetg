@@ -2,20 +2,22 @@
 
 Covers regressions in:
 - `build_messages` ordering (prompt-caching hygiene: system → static → dynamic)
-- `chat_complete` automatic retry on `finish_reason == "length"` with
+- `chat_complete` automatic retry on the provider's `truncated` flag with
   doubled `max_tokens`, capped at `_MAX_RETRY_TOKENS`.
 - Truncation flag propagation (used to skip the analysis cache).
 
-We stub out `_completion` so no real OpenAI calls are made.
+We stub the active provider (a `ChatProvider`) so no real network calls
+are made. The orchestrator behavior under test is provider-agnostic —
+swapping any of the five real adapters here would yield the same result.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
+from unread.ai import ChatResult
 from unread.analyzer import openai_client
 from unread.analyzer.openai_client import build_messages, chat_complete
 
@@ -43,36 +45,6 @@ def test_build_messages_strips_outer_whitespace() -> None:
 # --- chat_complete retry on truncation ----------------------------------
 
 
-@dataclass
-class _FakeUsage:
-    prompt_tokens: int
-    completion_tokens: int
-
-    @property
-    def prompt_tokens_details(self) -> Any:
-        class _D:
-            cached_tokens = 0
-
-        return _D()
-
-
-@dataclass
-class _FakeMessage:
-    content: str
-
-
-@dataclass
-class _FakeChoice:
-    message: _FakeMessage
-    finish_reason: str
-
-
-@dataclass
-class _FakeResp:
-    choices: list[_FakeChoice]
-    usage: _FakeUsage
-
-
 class _FakeRepo:
     """Minimal repo stub — chat_complete only calls `log_usage`."""
 
@@ -83,22 +55,52 @@ class _FakeRepo:
         self.calls.append(kw)
 
 
-def _mk_resp(text: str, finish_reason: str, prompt: int = 100, completion: int = 50) -> _FakeResp:
-    return _FakeResp(
-        choices=[_FakeChoice(_FakeMessage(text), finish_reason)],
-        usage=_FakeUsage(prompt_tokens=prompt, completion_tokens=completion),
+class _FakeProvider:
+    """ChatProvider stand-in that hands out scripted `ChatResult`s.
+
+    Tracks every call's `max_tokens` so the retry assertions can
+    confirm the doubling / clamping behavior.
+    """
+
+    name = "fake"
+    default_chat_model = "fake-chat"
+    default_filter_model = "fake-filter"
+
+    def __init__(self, results: list[ChatResult]) -> None:
+        self._results = list(results)
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+    ) -> ChatResult:
+        self.calls.append({"model": model, "max_tokens": max_tokens, "temperature": temperature})
+        if not self._results:
+            raise AssertionError("FakeProvider ran out of scripted results")
+        return self._results.pop(0)
+
+
+def _mk_result(text: str, truncated: bool, prompt: int = 100, completion: int = 50) -> ChatResult:
+    return ChatResult(
+        text=text,
+        prompt_tokens=prompt,
+        cached_tokens=0,
+        completion_tokens=completion,
+        cost_usd=None,
+        truncated=truncated,
     )
 
 
-async def test_chat_complete_no_retry_when_finish_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_complete_no_retry_when_finish_stop() -> None:
     repo = _FakeRepo()
+    provider = _FakeProvider([_mk_result("all good", truncated=False)])
 
-    async def fake_completion(oai, model, messages, max_tokens, temperature):
-        return _mk_resp("all good", "stop")
-
-    monkeypatch.setattr(openai_client, "_completion", fake_completion)
     res = await chat_complete(
-        oai=None,
+        provider,
         repo=repo,
         model="gpt-5.4",
         messages=build_messages("s", "s", "d"),
@@ -106,31 +108,30 @@ async def test_chat_complete_no_retry_when_finish_stop(monkeypatch: pytest.Monke
     )
     assert res.text == "all good"
     assert res.truncated is False
-    # Exactly one usage log entry — no retry.
+    # Exactly one provider call, exactly one usage log entry — no retry.
+    assert len(provider.calls) == 1
     assert len(repo.calls) == 1
 
 
-async def test_chat_complete_retries_once_on_length(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_complete_retries_once_on_length() -> None:
     """First call truncates; retry with doubled budget succeeds."""
     repo = _FakeRepo()
-    seen_max_tokens: list[int] = []
+    provider = _FakeProvider(
+        [
+            _mk_result("partial…", truncated=True),
+            _mk_result("full response", truncated=False),
+        ]
+    )
 
-    async def fake_completion(oai, model, messages, max_tokens, temperature):
-        seen_max_tokens.append(max_tokens)
-        if len(seen_max_tokens) == 1:
-            return _mk_resp("partial…", "length")  # truncated
-        return _mk_resp("full response", "stop")
-
-    monkeypatch.setattr(openai_client, "_completion", fake_completion)
     res = await chat_complete(
-        oai=None,
+        provider,
         repo=repo,
         model="gpt-5.4",
         messages=build_messages("s", "s", "d"),
         max_tokens=1000,
     )
     # First call used 1000, retry doubled to 2000.
-    assert seen_max_tokens == [1000, 2000]
+    assert [c["max_tokens"] for c in provider.calls] == [1000, 2000]
     assert res.text == "full response"
     assert res.truncated is False
     # Both calls logged.
@@ -139,69 +140,84 @@ async def test_chat_complete_retries_once_on_length(monkeypatch: pytest.MonkeyPa
     assert repo.calls[1]["context"].get("retry_of_truncated") is True
 
 
-async def test_chat_complete_retry_also_truncates_surfaces_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_complete_retry_also_truncates_surfaces_flag() -> None:
     """If retry ALSO truncates, result still carries truncated=True."""
     repo = _FakeRepo()
+    provider = _FakeProvider(
+        [
+            _mk_result("still cut off", truncated=True),
+            _mk_result("still cut off", truncated=True),
+        ]
+    )
 
-    async def fake_completion(oai, model, messages, max_tokens, temperature):
-        return _mk_resp("still cut off", "length")
-
-    monkeypatch.setattr(openai_client, "_completion", fake_completion)
     res = await chat_complete(
-        oai=None,
+        provider,
         repo=repo,
         model="gpt-5.4",
         messages=build_messages("s", "s", "d"),
         max_tokens=1000,
     )
     assert res.truncated is True
-    # Retried once → two calls.
+    assert len(provider.calls) == 2
     assert len(repo.calls) == 2
 
 
-async def test_chat_complete_no_retry_when_already_at_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_complete_no_retry_when_already_at_cap() -> None:
     """At the retry ceiling we don't re-call — avoids infinite loop / waste."""
     repo = _FakeRepo()
-    calls = 0
+    provider = _FakeProvider([_mk_result("partial", truncated=True)])
 
-    async def fake_completion(oai, model, messages, max_tokens, temperature):
-        nonlocal calls
-        calls += 1
-        return _mk_resp("partial", "length")
-
-    monkeypatch.setattr(openai_client, "_completion", fake_completion)
     res = await chat_complete(
-        oai=None,
+        provider,
         repo=repo,
         model="gpt-5.4",
         messages=build_messages("s", "s", "d"),
         max_tokens=openai_client._MAX_RETRY_TOKENS,  # already at ceiling
     )
-    assert calls == 1  # no retry
+    assert len(provider.calls) == 1  # no retry
     assert res.truncated is True
 
 
-async def test_chat_complete_retry_caps_at_max(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_complete_retry_caps_at_max() -> None:
     """Doubled budget is clamped to `_MAX_RETRY_TOKENS`, not doubled past it."""
     repo = _FakeRepo()
-    seen: list[int] = []
+    provider = _FakeProvider(
+        [
+            _mk_result("partial", truncated=True),
+            _mk_result("done", truncated=False),
+        ]
+    )
 
-    async def fake_completion(oai, model, messages, max_tokens, temperature):
-        seen.append(max_tokens)
-        if len(seen) == 1:
-            return _mk_resp("partial", "length")
-        return _mk_resp("done", "stop")
-
-    monkeypatch.setattr(openai_client, "_completion", fake_completion)
     # Start just below the cap so doubling would exceed it.
     below_cap = openai_client._MAX_RETRY_TOKENS - 1000
     await chat_complete(
-        oai=None,
+        provider,
         repo=repo,
         model="gpt-5.4",
         messages=build_messages("s", "s", "d"),
         max_tokens=below_cap,
     )
+    seen = [c["max_tokens"] for c in provider.calls]
     assert seen[0] == below_cap
     # Retry is clamped to _MAX_RETRY_TOKENS (not below_cap * 2).
     assert seen[1] == openai_client._MAX_RETRY_TOKENS
+
+
+# --- regression: usage log includes provider name ----------------------
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "anthropic", "google"])
+async def test_chat_complete_logs_provider_name(provider_name: str) -> None:
+    """Multi-provider installs need usage rows tagged with the active provider."""
+    repo = _FakeRepo()
+    provider = _FakeProvider([_mk_result("ok", truncated=False)])
+    provider.name = provider_name  # overwrite the default "fake"
+
+    await chat_complete(
+        provider,
+        repo=repo,
+        model="m",
+        messages=build_messages("s", "s", "d"),
+        max_tokens=100,
+    )
+    assert repo.calls[0]["context"]["provider"] == provider_name
