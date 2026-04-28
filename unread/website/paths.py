@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from unread.core.paths import slugify
+from unread.core.paths import reports_dir, slugify
 
 
 def _domain_slug(domain: str | None) -> str:
@@ -43,9 +43,4 @@ def website_report_path(
     """Default disk path for a website analysis report."""
     when = stamp or datetime.now()
     ts = when.strftime("%Y-%m-%d_%H%M%S")
-    return Path(
-        "reports",
-        "website",
-        _domain_slug(domain),
-        f"{_page_slug(title, page_id)}-{preset}-{ts}.md",
-    )
+    return reports_dir() / "website" / _domain_slug(domain) / f"{_page_slug(title, page_id)}-{preset}-{ts}.md"

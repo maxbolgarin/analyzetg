@@ -652,10 +652,10 @@ async def _cmd_run_flat(
             raise
 
         # Save to a single timestamped file.
-        from pathlib import Path
+        from unread.core.paths import reports_dir
 
         ts = _dt.now().strftime("%Y-%m-%d_%H-%M")
-        out_dir = Path("reports")
+        out_dir = reports_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"run-flat-{ts}.md"
         cost_str = f"{float(result.total_cost_usd or 0):.4f}"

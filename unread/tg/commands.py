@@ -41,33 +41,318 @@ log = get_logger(__name__)
 
 
 async def cmd_init() -> None:
-    """Interactive log-in to Telegram + OpenAI key smoke test."""
-    import os
-    from pathlib import Path as _Path
+    """Interactive first-run setup: install folder, OpenAI key, Telegram login.
+
+    Runs as a pipeline of four conditional steps. Each step gates on
+    "is this thing already configured?" so re-running `unread tg init`
+    is always safe and only prompts for what's missing:
+
+      1. **Folder pick** — runs iff `~/.unread/install.toml` is absent.
+         User picks default / current dir / custom path / exit. The
+         choice persists in the pointer file.
+      2. **OpenAI key** — runs iff `settings.openai.api_key` is empty.
+         Skippable; press Enter to keep `unread` operating in a
+         no-AI mode (`dump`, `describe`, etc. still work).
+      3. **Telegram credentials** — runs iff api_id/api_hash empty AND
+         no valid session. Skippable.
+      4. **Telethon auth** — runs iff Telegram creds end the run
+         populated AND the session is unauthorized.
+
+    Persistence is per-step (each value lands in `data.sqlite::secrets`
+    immediately) and `reset_settings()` is called between steps so the
+    in-memory singleton picks up freshly-written values.
+    """
+    from unread.config import reset_settings
+    from unread.core.paths import (
+        default_session_path,
+        ensure_unread_home,
+        install_pointer_path,
+        storage_dir,
+    )
+
+    # Step 1: folder pick (only on first run).
+    if not install_pointer_path().is_file():
+        if not _run_folder_step():
+            # User chose "Exit". Bail without writing anything.
+            return
+        # Folder choice changes `unread_home()` → reload settings so
+        # `data_path` / `session_path` resolve to the new location.
+        reset_settings()
+
+    # Make sure the storage dir exists for the data DB write below.
+    ensure_unread_home()
+    storage_dir().mkdir(parents=True, exist_ok=True)
 
     settings = get_settings()
-    env_path = _Path(".env").resolve()
-    missing = []
-    if not settings.telegram.api_id or not settings.telegram.api_hash:
-        missing.append("TELEGRAM_API_ID / TELEGRAM_API_HASH")
-    if not settings.openai.api_key:
-        missing.append("OPENAI_API_KEY")
-    if missing:
-        console.print(f"[red]{_tf('doctor_missing', missing=', '.join(missing))}[/]")
-        if env_path.exists():
-            console.print(_tf("doctor_env_seen_at", path=env_path))
-        # Also show what we actually see in env for debugging
-        seen = {
-            k: bool(os.environ.get(k)) for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "OPENAI_API_KEY")
-        }
-        console.print(f"[dim]{_tf('doctor_env_seen', seen=seen)}[/]")
-        raise typer.Exit(1)
 
-    # Ensure DB is migrated
-    async with open_repo(settings.storage.data_path):
-        pass
+    # Step 2: AI provider + its API key (both skippable).
+    # On a fresh install we ask the user to pick a chat provider so the
+    # right key field gets prompted. On re-runs, we skip the entire
+    # block when the active provider already has a key.
+    if not _active_provider_has_key(settings):
+        await _run_provider_step()
+        reset_settings()
+        settings = get_settings()
 
-    # Telegram auth — delegate retries to client.start()
+    # Step 3: Telegram credentials (skippable). Skip the prompt entirely
+    # when an authorized session already exists — the prior install must
+    # have had api_id/hash, and there's no need to ask again to re-auth.
+    session_path = default_session_path()
+    session_present = session_path.exists() or session_path.with_name(session_path.name + ".session").exists()
+    if (
+        not (settings.telegram.api_id and settings.telegram.api_hash)
+        and not session_present
+        and await _run_telegram_creds_step()
+    ):
+        reset_settings()
+        settings = get_settings()
+
+    # Step 4: Telethon auth (only if credentials are populated).
+    if settings.telegram.api_id and settings.telegram.api_hash:
+        await _run_telethon_auth_step(settings)
+
+
+# ----- wizard steps -----------------------------------------------------
+
+
+def _run_folder_step() -> bool:
+    """Prompt for the install folder. Returns False on "Exit"."""
+    from pathlib import Path as _Path
+
+    from unread.core.paths import write_install_pointer
+
+    default_home = _Path.home() / ".unread"
+    cwd = _Path.cwd()
+    console.print("\n[bold]Welcome to unread.[/]\n")
+    console.print("Where would you like unread to store its data (storage, reports, cache)?\n")
+    console.print(f"  [cyan]1[/]. Default — [bold]{default_home}/[/]")
+    console.print(
+        f"  [cyan]2[/]. Current folder — [bold]{cwd}/[/]  [dim](creates ./storage and ./reports here)[/]"
+    )
+    console.print("  [cyan]3[/]. Custom path…")
+    console.print("  [cyan]4[/]. Exit\n")
+
+    while True:
+        choice = typer.prompt("Select [1-4]", default="1").strip()
+        if choice == "1":
+            write_install_pointer(None)  # empty `home`, falls through to default
+            console.print(f"[green]✓[/] Using default: {default_home}/")
+            return True
+        if choice == "2":
+            write_install_pointer(cwd)
+            console.print(f"[green]✓[/] Using current folder: {cwd}/")
+            return True
+        if choice == "3":
+            raw = typer.prompt("Custom path").strip()
+            if not raw:
+                console.print("[yellow]Empty path — try again.[/]")
+                continue
+            target = _Path(raw).expanduser().resolve()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                console.print(f"[red]Can't create {target}: {e}. Try again.[/]")
+                continue
+            write_install_pointer(target)
+            console.print(f"[green]✓[/] Using custom path: {target}/")
+            return True
+        if choice == "4":
+            console.print("[dim]Setup cancelled. Run `unread tg init` again when ready.[/]")
+            return False
+        console.print("[yellow]Pick 1, 2, 3, or 4.[/]")
+
+
+def _active_provider_has_key(settings) -> bool:  # type: ignore[no-untyped-def]
+    """True iff the currently-selected AI provider has a usable API key.
+
+    For "local" the key is optional (most local servers don't check it),
+    so this returns True as long as the provider is selected — the
+    wizard's provider step is what writes the choice.
+    """
+    name = (settings.ai.provider or "openai").strip().lower()
+    if name == "openai":
+        return bool(settings.openai.api_key)
+    if name == "openrouter":
+        return bool(settings.openrouter.api_key)
+    if name == "anthropic":
+        return bool(settings.anthropic.api_key)
+    if name == "google":
+        return bool(settings.google.api_key)
+    # Local mode is "configured" once `ai.provider == "local"` is
+    # persisted — the base_url has a sensible default and most
+    # servers don't enforce a key. Unknown provider names fall through
+    # to False so the wizard re-prompts.
+    return name == "local"
+
+
+# Provider-selection menu metadata. Keep in sync with `unread.ai.providers`.
+# Each entry: (numeric label, display name, secrets-key-or-None, info_url, hint).
+_PROVIDER_CHOICES: tuple[tuple[str, str, str | None, str, str], ...] = (
+    (
+        "1",
+        "openai",
+        "openai.api_key",
+        "https://platform.openai.com/api-keys",
+        "Default. Powers Whisper / embeddings / vision in addition to chat.",
+    ),
+    (
+        "2",
+        "openrouter",
+        "openrouter.api_key",
+        "https://openrouter.ai/keys",
+        "Single key, many models (OpenAI / Anthropic / Mistral / …) via one endpoint.",
+    ),
+    (
+        "3",
+        "anthropic",
+        "anthropic.api_key",
+        "https://console.anthropic.com/settings/keys",
+        "Claude (Sonnet / Haiku) directly from Anthropic.",
+    ),
+    (
+        "4",
+        "google",
+        "google.api_key",
+        "https://aistudio.google.com/app/apikey",
+        "Gemini (2.5 Flash / Flash Lite) via the Developer API.",
+    ),
+    (
+        "5",
+        "local",
+        None,  # no API key — base_url + (optional) placeholder key
+        "",
+        "Self-hosted server: Ollama, LM Studio, vLLM, etc.",
+    ),
+)
+
+
+async def _run_provider_step() -> None:
+    """Pick a chat provider, persist the choice, and collect its API key.
+
+    Each step is skippable: pressing Enter at the menu keeps the current
+    `ai.provider` (default OpenAI on a fresh install); pressing Enter at
+    the API-key prompt yields a no-AI install where local-only commands
+    still work. Persists the provider choice to `app_settings::ai.provider`
+    and the key to `data.sqlite::secrets`.
+    """
+    console.print("\n[bold]Which AI provider do you want to use?[/]")
+    for num, name, _key, _url, hint in _PROVIDER_CHOICES:
+        console.print(f"  [cyan]{num}[/]. [bold]{name}[/]  [dim]— {hint}[/]")
+    console.print("  [dim]Press Enter to keep the default (OpenAI).[/]")
+
+    while True:
+        choice = typer.prompt("Select [1-5]", default="1").strip()
+        match = next((c for c in _PROVIDER_CHOICES if c[0] == choice), None)
+        if match is None:
+            console.print("[yellow]Pick a number 1–5.[/]")
+            continue
+        _num, provider_name, secret_key, info_url, _hint = match
+        break
+
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        await repo.set_app_setting("ai.provider", provider_name)
+        if provider_name == "local":
+            # Local mode needs a base_url. Default works for vanilla
+            # Ollama; prompt for a custom one (skippable).
+            current = settings.local.base_url
+            url = typer.prompt(
+                f"Local server base URL (default: {current})",
+                default="",
+                show_default=False,
+            ).strip()
+            if url:
+                await repo.set_app_setting("local.base_url", url)
+            console.print("[green]✓[/] Local provider configured — no API key needed.")
+            return
+        # Cloud providers: prompt for their API key.
+        prompt_label = f"{provider_name} API key"
+        if info_url:
+            console.print(f"\n[bold]{prompt_label}[/] ([dim]{info_url}[/])")
+        else:
+            console.print(f"\n[bold]{prompt_label}[/]")
+        console.print(
+            "  [dim]Press Enter to skip — `dump`, `describe`, `sync`, etc. still work without it.[/]"
+        )
+        raw = typer.prompt("Key", default="", show_default=False).strip()
+        if not raw:
+            console.print(
+                "[dim]Skipped — `analyze` / `ask` will require an AI key. "
+                "Re-run `unread tg init` to add one later.[/]"
+            )
+            return
+        assert secret_key is not None  # guaranteed by _PROVIDER_CHOICES
+        await repo.put_secrets({secret_key: raw})
+    console.print("[green]✓[/] Saved.")
+
+    # Smoke test only when the picked provider is OpenAI (the SDK has a
+    # cheap models.list() endpoint). Other providers don't have a uniform
+    # "ping" call across versions; the first real chat completion is the
+    # smoke test for them.
+    if provider_name == "openai":
+        await _smoke_test_openai(raw)
+
+
+async def _smoke_test_openai(api_key: str) -> None:
+    """1-token validation of an OpenAI key. Failures don't undo the save."""
+    settings = get_settings()
+    console.print("  Running OpenAI smoke test…")
+    try:
+        from openai import AsyncOpenAI
+
+        oai = AsyncOpenAI(api_key=api_key, timeout=settings.openai.request_timeout_sec)
+        await asyncio.wait_for(oai.models.list(), timeout=15)
+        console.print("[green]✓[/] OpenAI smoke test passed.")
+    except Exception as e:
+        console.print(
+            f"[yellow]OpenAI smoke test failed: {e}.[/] "
+            "[dim]Saved anyway — you can re-run `unread tg init` to update.[/]"
+        )
+
+
+async def _run_telegram_creds_step() -> bool:
+    """Optional Telegram-credentials prompt. Returns True if creds were saved."""
+    console.print("\n[bold]Set up Telegram login now?[/]")
+    console.print("  [dim]Skip if you only want YouTube / website analysis.[/]")
+    if not typer.confirm("Set up Telegram", default=False):
+        console.print(
+            "[dim]Skipped — Telegram-based commands (describe, dump, sync, …) "
+            "won't be available. Re-run `unread tg init` to add credentials later.[/]"
+        )
+        return False
+
+    api_id_raw = ""
+    api_id = 0
+    while not api_id:
+        api_id_raw = typer.prompt(
+            "Telegram api_id (https://my.telegram.org → API development tools)",
+            default="",
+            show_default=False,
+        ).strip()
+        if not api_id_raw:
+            console.print("[yellow]api_id is required — try again, or Ctrl-C to bail.[/]")
+            continue
+        try:
+            api_id = int(api_id_raw)
+        except ValueError:
+            console.print("[yellow]api_id must be an integer (digits only).[/]")
+            api_id = 0
+
+    api_hash = ""
+    while not api_hash:
+        api_hash = typer.prompt("Telegram api_hash", default="", show_default=False).strip()
+        if not api_hash:
+            console.print("[yellow]api_hash is required — try again, or Ctrl-C to bail.[/]")
+
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        await repo.put_secrets({"telegram.api_id": str(api_id), "telegram.api_hash": api_hash})
+    console.print("[green]✓[/] Saved.")
+    return True
+
+
+async def _run_telethon_auth_step(settings) -> None:  # type: ignore[no-untyped-def]
+    """Run Telethon's interactive login if the session isn't already authorized."""
     client = build_client(settings)
 
     def _phone() -> str:
@@ -90,17 +375,6 @@ async def cmd_init() -> None:
             console.print(f"[green]{_t('doctor_logged_in')}[/]")
     finally:
         await client.disconnect()
-
-    # OpenAI smoke test
-    console.print(_t("doctor_check_openai"))
-    try:
-        from openai import AsyncOpenAI
-
-        oai = AsyncOpenAI(api_key=settings.openai.api_key, timeout=settings.openai.request_timeout_sec)
-        await asyncio.wait_for(oai.models.list(), timeout=15)
-        console.print(f"[green]{_t('doctor_openai_ok')}[/]")
-    except Exception as e:
-        console.print(f"[yellow]{_tf('doctor_openai_failed', err=e)}[/]")
 
 
 # --------------------------------------------------------------------- doctor
@@ -129,13 +403,11 @@ async def cmd_doctor() -> None:
 
     console.print(f"[bold]{_t('tg_doctor_banner')}[/]")
 
-    # 1. Config files
-    cwd = _Path.cwd()
-    env_path = cwd / ".env"
-    cfg_path = _Path(
-        os.environ.get("UNREAD_CONFIG_PATH")
-        or "config.toml"
-    )
+    # 1. Config files (resolved under ~/.unread/, override via UNREAD_HOME / UNREAD_CONFIG_PATH)
+    from unread.core.paths import default_config_path, default_env_path, unread_home
+
+    env_path = default_env_path()
+    cfg_path = _Path(os.environ.get("UNREAD_CONFIG_PATH") or default_config_path())
     if env_path.exists():
         _line(ok, ".env present", str(env_path))
     else:
@@ -144,6 +416,19 @@ async def cmd_doctor() -> None:
         _line(ok, "config.toml present", str(cfg_path))
     else:
         _line(warn, "config.toml missing", f"expected at {cfg_path}")
+
+    # Legacy install detection — surface a single actionable hint when the
+    # user upgraded but their old cwd-relative install is still around.
+    home = unread_home()
+    cwd = _Path.cwd()
+    legacy_data = cwd / "storage" / "data.sqlite"
+    legacy_env = cwd / ".env"
+    if not home.exists() and (legacy_data.exists() or legacy_env.exists()):
+        _line(
+            warn,
+            "legacy install detected",
+            f"found {cwd}/storage or {cwd}/.env — run `unread migrate` to move into {home}",
+        )
 
     # 2. Secrets resolved
     if settings.telegram.api_id and settings.telegram.api_hash:

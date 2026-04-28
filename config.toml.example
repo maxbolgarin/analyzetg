@@ -10,6 +10,44 @@
 #   gpt-5.4-nano  — cheapest; per-chunk map/filter passes.
 #   gpt-4o / gpt-4o-mini — previous generation; gpt-4o-mini is the vision default.
 
+# ====================================================== AI provider (chat)
+#
+# `provider` picks which adapter `analyze` / `ask` route through:
+#   openai     — Chat Completions via the OpenAI SDK (default).
+#   openrouter — Same SDK, pointed at https://openrouter.ai/api/v1.
+#                Set `[openrouter] api_key` (or run `unread tg init`).
+#   anthropic  — Claude (claude-sonnet-4-5 / claude-haiku-4-5 by default).
+#                Set `[anthropic] api_key`.
+#   google     — Gemini Developer API (gemini-2.5-flash by default).
+#                Set `[google] api_key`.
+#   local      — Self-hosted OpenAI-compatible server (Ollama / LM Studio
+#                / vLLM). Set `[local] base_url` (default Ollama port).
+#
+# Capabilities other than chat (Whisper transcription, embeddings, vision)
+# remain OpenAI-only and read `[openai] api_key` directly. They skip with
+# a warning when that key is missing — you can still run the rest of the
+# pipeline with a non-OpenAI chat provider.
+
+# [ai]
+# provider = "openai"
+# base_url = ""             # OpenAI-compat endpoint override (Azure, …)
+# chat_model = ""           # empty → provider's hard-coded default
+# filter_model = ""
+
+# [openrouter]
+# api_key = "sk-or-…"
+# base_url = "https://openrouter.ai/api/v1"
+
+# [anthropic]
+# api_key = "sk-ant-…"
+
+# [google]
+# api_key = "AI…"
+
+# [local]
+# base_url = "http://localhost:11434/v1"   # Ollama default
+# api_key = "local-no-key"                  # most local servers ignore this
+
 # ==================================================================== OpenAI
 
 [openai]
@@ -143,6 +181,40 @@ output = 0.60
 "gpt-4o-mini-transcribe" = 0.003
 # "gpt-4o-transcribe" = 0.006
 # "whisper-1" = 0.006
+
+# Anthropic Claude — used when `ai.provider = "anthropic"`. Approximate
+# prices in $/1M tokens; refresh from console.anthropic.com when rates
+# move.
+[pricing.chat."claude-sonnet-4-5"]
+input = 3.00
+cached_input = 0.30
+output = 15.00
+
+[pricing.chat."claude-haiku-4-5"]
+input = 1.00
+cached_input = 0.10
+output = 5.00
+
+# Google Gemini — used when `ai.provider = "google"`. Refresh from
+# ai.google.dev/pricing when rates move.
+[pricing.chat."gemini-2.5-flash"]
+input = 0.30
+cached_input = 0.075
+output = 2.50
+
+[pricing.chat."gemini-2.5-flash-lite"]
+input = 0.10
+cached_input = 0.025
+output = 0.40
+
+# OpenRouter aliases (`ai.provider = "openrouter"`). Pricing varies by
+# upstream model; the alias keys mirror the SDK's vendor/model form.
+# Add entries for the models you actually use; missing models surface
+# as "unpriced calls" in `unread stats`.
+# [pricing.chat."openai/gpt-5.4-mini"]
+# input = 0.75
+# cached_input = 0.075
+# output = 4.50
 
 # ==================================================================== Media
 

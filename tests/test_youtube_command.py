@@ -15,6 +15,7 @@ import pytest
 
 from unread.analyzer.pipeline import AnalysisOptions
 from unread.analyzer.prompts import get_presets
+from unread.core.paths import reports_dir
 from unread.youtube.commands import (
     _build_synthetic_messages,
     _meta_header,
@@ -252,14 +253,13 @@ def test_report_path_shape() -> None:
         channel_id="UCxyz",
         preset="summary",
     )
-    parts = list(p.parts)
-    assert parts[0] == "reports"
-    assert parts[1] == "youtube"
-    assert parts[2] == "rick-astley"
+    rel_parts = list(p.relative_to(reports_dir()).parts)
+    assert rel_parts[0] == "youtube"
+    assert rel_parts[1] == "rick-astley"
     # video slug includes title-derived bits AND last-6 of id (lowercased)
-    assert "9wgxcq" in parts[3].lower()
-    assert parts[3].endswith(".md")
-    assert "summary" in parts[3]
+    assert "9wgxcq" in rel_parts[2].lower()
+    assert rel_parts[2].endswith(".md")
+    assert "summary" in rel_parts[2]
 
 
 def test_report_path_unknown_channel_fallback() -> None:
@@ -270,9 +270,9 @@ def test_report_path_unknown_channel_fallback() -> None:
         channel_id=None,
         preset="single_msg",
     )
-    parts = list(p.parts)
-    assert parts[2] == "unknown-channel"
-    assert "video-" in parts[3]
+    rel_parts = list(p.relative_to(reports_dir()).parts)
+    assert rel_parts[1] == "unknown-channel"
+    assert "video-" in rel_parts[2]
 
 
 # --- AnalysisOptions youtube_video_id wiring -------------------------------

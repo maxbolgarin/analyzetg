@@ -28,6 +28,7 @@ from rich.progress import (
 from unread.config import get_settings
 from unread.core.paths import chat_slug as _chat_slug
 from unread.core.paths import compute_window as _compute_window
+from unread.core.paths import reports_dir as _reports_dir
 from unread.core.paths import topic_slug as _topic_slug
 from unread.db.repo import open_repo
 from unread.i18n import t as _t
@@ -123,7 +124,7 @@ async def save_raw_media(
     client = prepared.client
 
     if output_dir is None:
-        base = Path("reports")
+        base = _reports_dir()
         chat_slug = _chat_slug(prepared.chat_title, prepared.chat_id)
         if prepared.thread_id:
             topic_slug = _topic_slug(prepared.thread_title, prepared.thread_id)

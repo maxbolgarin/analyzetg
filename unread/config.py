@@ -10,6 +10,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from unread.core.paths import (
+    default_config_path,
+    default_data_path,
+    default_env_path,
+    default_media_dir,
+    default_session_path,
+)
+
 
 class _StrictCfg(BaseModel):
     """Base for every nested config block.
@@ -25,7 +33,9 @@ class _StrictCfg(BaseModel):
 class TelegramCfg(_StrictCfg):
     api_id: int = 0
     api_hash: str = ""
-    session_path: Path = Path("storage/session.sqlite")
+    # Resolved lazily via the factory so `UNREAD_HOME` overrides — both
+    # in tests and at runtime — flow through without rewriting config.
+    session_path: Path = Field(default_factory=default_session_path)
     max_msgs_per_minute: int = 3000
 
 
@@ -44,6 +54,63 @@ class OpenAICfg(_StrictCfg):
     temperature: float = 0.2
 
 
+class AICfg(_StrictCfg):
+    """Primary chat-completion provider routing.
+
+    `provider` is the single switch that selects which adapter
+    `chat_complete()` dispatches to. The OpenAI key still lives in
+    `[openai]` (back-compat) and continues to back capabilities the
+    other providers can't supply (Whisper transcription, embeddings,
+    vision). Per-provider keys for the four alternative providers
+    live in their own blocks below.
+
+    `base_url` and `chat_model` / `filter_model` are optional
+    overrides — when empty, each provider supplies its own default.
+    """
+
+    provider: str = "openai"  # openai | openrouter | anthropic | google | local
+    base_url: str = ""  # OpenAI-compatible endpoint override; auto-derived for openrouter
+    chat_model: str = ""  # empty → provider's hard-coded default
+    filter_model: str = ""  # ditto
+
+
+class OpenRouterCfg(_StrictCfg):
+    """OpenRouter routes the OpenAI Chat Completions API to many backends.
+
+    Stored separately so a user can have OpenAI configured for fallback
+    capabilities (Whisper / embeddings / vision) while running the
+    primary chat through OpenRouter.
+    """
+
+    api_key: str = ""
+    base_url: str = "https://openrouter.ai/api/v1"
+
+
+class AnthropicCfg(_StrictCfg):
+    api_key: str = ""
+
+
+class GoogleCfg(_StrictCfg):
+    """Google Gen AI (Gemini) — Developer API only for now; Vertex would
+    require additional `project` / `location` / ADC plumbing not worth
+    the surface increase for v1."""
+
+    api_key: str = ""
+
+
+class LocalCfg(_StrictCfg):
+    """Self-hosted OpenAI-compatible server (Ollama, LM Studio, vLLM, …).
+
+    `base_url` is required. `api_key` defaults to a placeholder so the
+    OpenAI SDK doesn't refuse the request — most local servers ignore
+    the header but the SDK's client constructor enforces a non-empty
+    string.
+    """
+
+    base_url: str = "http://localhost:11434/v1"
+    api_key: str = "local-no-key"
+
+
 class SyncCfg(_StrictCfg):
     default_lookback_days: int = 7
     batch_size: int = 500
@@ -57,7 +124,7 @@ class MediaCfg(_StrictCfg):
     max_media_duration_sec: int = 600
     min_media_duration_sec: int = 1
     download_concurrency: int = 3
-    tmp_dir: Path = Path("storage/media")
+    tmp_dir: Path = Field(default_factory=default_media_dir)
     ffmpeg_path: str = "ffmpeg"
 
 
@@ -155,7 +222,7 @@ class RetentionCfg(_StrictCfg):
 
 
 class StorageCfg(_StrictCfg):
-    data_path: Path = Path("storage/data.sqlite")
+    data_path: Path = Field(default_factory=default_data_path)
 
 
 class LocaleCfg(_StrictCfg):
@@ -199,6 +266,11 @@ class Settings(BaseSettings):
 
     telegram: TelegramCfg = Field(default_factory=TelegramCfg)
     openai: OpenAICfg = Field(default_factory=OpenAICfg)
+    ai: AICfg = Field(default_factory=AICfg)
+    openrouter: OpenRouterCfg = Field(default_factory=OpenRouterCfg)
+    anthropic: AnthropicCfg = Field(default_factory=AnthropicCfg)
+    google: GoogleCfg = Field(default_factory=GoogleCfg)
+    local: LocalCfg = Field(default_factory=LocalCfg)
     sync: SyncCfg = Field(default_factory=SyncCfg)
     media: MediaCfg = Field(default_factory=MediaCfg)
     analyze: AnalyzeCfg = Field(default_factory=AnalyzeCfg)
@@ -210,7 +282,10 @@ class Settings(BaseSettings):
     locale: LocaleCfg = Field(default_factory=LocaleCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
 
-    config_path: Path = Path("config.toml")
+    # Resolved at load time by `load_settings()`. Field default is the
+    # cwd-relative fallback that almost never wins — `default_config_path()`
+    # under `~/.unread/` and `UNREAD_CONFIG_PATH` both take precedence.
+    config_path: Path = Field(default_factory=default_config_path)
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -257,22 +332,31 @@ def _load_dotenv(path: Path) -> None:
 
 
 def load_settings(config_path: Path | str | None = None) -> Settings:
-    """Load settings from .env + config.toml + environment.
+    """Load settings from .env + config.toml + environment + session DB.
 
     Precedence (high → low):
       1. Shell env vars already exported
-      2. .env file (working dir)
-      3. config.toml values
-      4. dataclass defaults
-    """
-    _load_dotenv(Path(".env"))
+      2. ~/.unread/.env (or `UNREAD_HOME/.env`)
+      3. ~/.unread/config.toml (or `UNREAD_CONFIG_PATH`)
+      4. Persisted secrets in the Telethon session DB (api_id /
+         api_hash / openai_api_key) — only fills fields the higher
+         layers left empty, so a populated `.env` always wins.
+      5. dataclass defaults
 
-    # `UNREAD_CONFIG_PATH` is the canonical name.
-    cfg_path = Path(
-        config_path
-        or os.environ.get("UNREAD_CONFIG_PATH")
-        or "config.toml"
-    )
+    `.env` and `config.toml` live exclusively under `unread_home()` —
+    cwd-relative discovery has been removed so a stray `./config.toml`
+    in a checkout can't silently shadow the user's real settings.
+    Use `UNREAD_HOME=$(pwd)` to point both at a project directory
+    explicitly during development.
+
+    Layer 4 lets a user delete `~/.unread/.env` after the first
+    successful `unread tg init` and keep using the CLI — credentials
+    are written into the session DB at init time and read back here.
+    """
+    _load_dotenv(default_env_path())
+
+    # `UNREAD_CONFIG_PATH` is the canonical override.
+    cfg_path = Path(config_path or os.environ.get("UNREAD_CONFIG_PATH") or default_config_path())
     raw = _read_toml(cfg_path)
 
     # Env overrides for secrets
@@ -306,6 +390,35 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
 
     settings = Settings(**raw)
     settings.config_path = cfg_path
+
+    # Layer 4: fill in missing credentials from the session DB. Only
+    # touches fields the prior layers left empty, so env / .env always
+    # wins on rotation. Imported lazily to avoid a circular import
+    # (secrets reads from the session-path field defined here).
+    # Always consult the secrets DB — the user may have any subset of
+    # provider keys persisted (one per active install), and we want
+    # each to overlay onto the matching empty config slot independently.
+    import contextlib as _contextlib
+
+    from unread.secrets import read_secrets
+
+    persisted = read_secrets(settings)
+    if persisted:
+        if not settings.telegram.api_id and (raw_id := persisted.get("telegram.api_id")):
+            # Stale row from a corrupt write — ignore, keep going.
+            with _contextlib.suppress(ValueError):
+                settings.telegram.api_id = int(raw_id)
+        if not settings.telegram.api_hash and (h := persisted.get("telegram.api_hash")):
+            settings.telegram.api_hash = h
+        if not settings.openai.api_key and (k := persisted.get("openai.api_key")):
+            settings.openai.api_key = k
+        if not settings.openrouter.api_key and (k := persisted.get("openrouter.api_key")):
+            settings.openrouter.api_key = k
+        if not settings.anthropic.api_key and (k := persisted.get("anthropic.api_key")):
+            settings.anthropic.api_key = k
+        if not settings.google.api_key and (k := persisted.get("google.api_key")):
+            settings.google.api_key = k
+
     return settings
 
 

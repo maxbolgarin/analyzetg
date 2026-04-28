@@ -3,13 +3,133 @@
 Previously duplicated across analyzer/commands.py, export/commands.py,
 and media/commands.py. Consolidated here so a future slug rule change
 (e.g. adding a new fallback shape) is one-liner instead of three.
+
+Also owns the `unread_home()` family of helpers — the single source of
+truth for `~/.unread/...` path defaults. Every storage / reports / config
+/ session path in the codebase derives from `unread_home()`. Override
+the root with `UNREAD_HOME=/abs/path` for tests, dev installs, or
+multi-profile setups.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+
+def install_pointer_path() -> Path:
+    """Canonical location of the `install.toml` pointer file.
+
+    Always at `~/.unread/install.toml`, even when the actual data lives
+    elsewhere (custom path / current folder picked during the wizard).
+    The pointer has to be findable BEFORE `unread_home()` resolves —
+    that's the whole reason it can't itself live under `unread_home()`.
+    """
+    return Path.home() / ".unread" / "install.toml"
+
+
+def unread_home() -> Path:
+    """Resolve the per-user `~/.unread/` install directory.
+
+    Resolution order (high → low):
+      1. `UNREAD_HOME` env var (tests, dev, multi-profile installs).
+      2. `~/.unread/install.toml` pointer file with a `home = "..."`
+         entry — written by `unread tg init` when the user picks
+         "current folder" or "custom path". Empty / absent value falls
+         through to the default.
+      3. Default: `~/.unread/`.
+
+    Defensive about pointer-file errors: a missing/corrupt TOML simply
+    falls through to the default. We never want a bad pointer to
+    surface as an exception — the user can always recover by deleting
+    the file and re-running `unread tg init`.
+    """
+    override = os.environ.get("UNREAD_HOME")
+    if override:
+        return Path(override).expanduser()
+    pointer = install_pointer_path()
+    if pointer.is_file():
+        try:
+            import tomllib
+
+            data = tomllib.loads(pointer.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # `tomllib.TOMLDecodeError` is a subclass of `ValueError`;
+            # broader catch keeps this defensive against any read snag.
+            data = {}
+        home = data.get("home")
+        if home:
+            return Path(home).expanduser()
+    return Path.home() / ".unread"
+
+
+def write_install_pointer(home: Path | None) -> None:
+    """Persist the install-folder choice to `~/.unread/install.toml`.
+
+    Pass `None` (or the default `~/.unread/` itself) to record the
+    "default" choice as `home = ""` — its presence is the canonical
+    "setup has been done" marker that keeps subsequent `unread tg init`
+    runs from re-prompting for folder selection.
+    """
+    pointer = install_pointer_path()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    # Default choice → empty value, so a future move of the pointer
+    # subtree never accidentally redirects somewhere weird.
+    target = "" if home is None else str(Path(home).expanduser().resolve())
+    body = f'# Written by `unread tg init`. Delete to re-pick the install folder.\nhome = "{target}"\n'
+    pointer.write_text(body, encoding="utf-8")
+
+
+def storage_dir() -> Path:
+    return unread_home() / "storage"
+
+
+def reports_dir() -> Path:
+    return unread_home() / "reports"
+
+
+def default_session_path() -> Path:
+    return storage_dir() / "session.sqlite"
+
+
+def default_data_path() -> Path:
+    return storage_dir() / "data.sqlite"
+
+
+def default_media_dir() -> Path:
+    return storage_dir() / "media"
+
+
+def default_backups_dir() -> Path:
+    return storage_dir() / "backups"
+
+
+def default_config_path() -> Path:
+    return unread_home() / "config.toml"
+
+
+def default_env_path() -> Path:
+    return unread_home() / ".env"
+
+
+def ensure_unread_home() -> Path:
+    """Create `~/.unread/` (mode 0700) if missing. Idempotent.
+
+    Mode 0700 matches the README's old `chmod 700 storage` advice — the
+    SQLite DBs and the `.env` file aren't encrypted, so file-system
+    permissions are the only confidentiality boundary.
+    """
+    import contextlib
+
+    p = unread_home()
+    p.mkdir(parents=True, exist_ok=True)
+    # Best-effort: Windows / network mounts may not support chmod.
+    with contextlib.suppress(OSError):
+        p.chmod(0o700)
+    return p
+
 
 # Permissive regex: keep Unicode letters/digits/underscore/hyphen, collapse
 # everything else. Empty → empty string (callers supply a fallback).

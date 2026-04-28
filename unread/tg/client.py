@@ -56,8 +56,30 @@ def entity_id(entity) -> int:
     return get_peer_id(entity)
 
 
+def _exit_missing_telegram_credentials() -> None:
+    """Show a friendly first-run banner instead of Telethon's raw ValueError.
+
+    Catches the common "fresh install / never logged in" case at the one
+    chokepoint every Telegram-using command flows through (`build_client`).
+    Without this, commands like `describe`, `sync`, `dump @user`, the
+    wizard, etc. crash with an unhelpful Telethon traceback.
+
+    Delegates to `cli._print_first_run_banner` for the exact copy so
+    every Telegram-missing path (root analyze gate, individual subcommands,
+    interactive wizard) shows identical text.
+    """
+    import typer
+
+    from unread.cli import _print_first_run_banner
+
+    _print_first_run_banner("telegram")
+    raise typer.Exit(1)
+
+
 def build_client(settings: Settings | None = None) -> TelegramClient:
     s = settings or get_settings()
+    if not s.telegram.api_id or not s.telegram.api_hash:
+        _exit_missing_telegram_credentials()
     s.telegram.session_path.parent.mkdir(parents=True, exist_ok=True)
     return TelegramClient(
         str(s.telegram.session_path),
@@ -75,7 +97,7 @@ async def tg_client(
     await client.connect()
     try:
         if require_auth and not await client.is_user_authorized():
-            raise RuntimeError("Telegram session is not authorized. Run `unread init` first.")
+            raise RuntimeError("Telegram session is not authorized. Run `unread tg init` first.")
         yield client
     finally:
         await client.disconnect()

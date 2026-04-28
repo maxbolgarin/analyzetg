@@ -4,17 +4,75 @@ declare the final signatures so UX is stable from day one."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sys
 from datetime import datetime
 from pathlib import Path
 
+import click
 import typer
 from rich.console import Console
+from typer.core import TyperGroup
 
 from unread.config import get_settings
 from unread.db.repo import apply_db_overrides_sync, open_repo
 from unread.i18n import t as _t
 from unread.i18n import tf as _tf
 from unread.util.logging import setup_logging
+
+
+class _PreferSubcommandsGroup(TyperGroup):
+    """Click group that prefers subcommand routing over the optional
+    positional `ref` argument on the root callback.
+
+    The root callback declares `ref: str | None = typer.Argument(None)`.
+    Standard Click consumes the first non-option token into `ref` BEFORE
+    checking for subcommand matches — so `unread describe` ends up
+    invoking analyze with ref="describe" instead of dispatching to the
+    describe subcommand. We peel a leading subcommand token out of args
+    so the positional sees nothing, then inject the token back into
+    `ctx.protected_args` so Group's normal routing fires.
+
+    `unread -- describe` (or `unread tg describe`) explicitly forces
+    the ref interpretation when a chat is literally titled like a
+    subcommand.
+    """
+
+    def parse_args(self, ctx, args):  # type: ignore[override]
+        # Find the first non-option token. If it's a registered
+        # subcommand name, peel it out before super() can consume it
+        # as the optional positional.
+        sub_idx = -1
+        for i, tok in enumerate(args):
+            if tok == "--":
+                break  # `--` terminates options; everything after is positional
+            if tok.startswith("-"):
+                continue
+            if tok in self.commands:
+                sub_idx = i
+            break  # first non-option non-terminator decides
+        if sub_idx < 0:
+            return super().parse_args(ctx, args)
+        sub_name = args[sub_idx]
+        # Tokens BEFORE the subcommand belong to the root callback
+        # (options, possibly a positional ref). Tokens AFTER belong to
+        # the subcommand. We parse only the `pre` slice here so the
+        # root's optional positional doesn't accidentally consume the
+        # subcommand's own arguments.
+        pre = list(args[:sub_idx])
+        post = list(args[sub_idx + 1 :])
+        click.Command.parse_args(self, ctx, pre)
+        # Click 8.3 made `Context.protected_args` a read-only property;
+        # the canonical setter is the underscored attribute Click's own
+        # `Group.parse_args` writes to.
+        if self.chain:
+            ctx._protected_args = [sub_name, *post]
+            ctx.args = []
+        else:
+            ctx._protected_args = [sub_name]
+            ctx.args = post
+        return ctx.args
+
 
 # Bootstrap DB-saved overrides into the live settings singleton BEFORE
 # Typer constructs the app — Typer reads `help=` strings (and panel
@@ -30,12 +88,22 @@ PANEL_MAIN = _t("cli_panel_main")
 PANEL_SYNC = _t("cli_panel_sync")
 PANEL_MAINT = _t("cli_panel_maint")
 
+# `no_args_is_help` removed: the root callback handles the no-arg case
+# (opens the analyze wizard). `--help` and the new `help` subcommand are
+# the explicit help entry points.
 app = typer.Typer(
     name="unread",
     help=_t("cli_app_help"),
-    no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
+    invoke_without_command=True,
+    cls=_PreferSubcommandsGroup,
+    # Click groups default to `allow_interspersed_args=False`, which
+    # would reject `unread @somegroup --dry-run` (an option after the
+    # positional ref). With our `_PreferSubcommandsGroup` already
+    # peeling subcommand tokens explicitly, it's safe to allow
+    # interspersed options on the root callback.
+    context_settings={"allow_interspersed_args": True},
 )
 
 chats_app = typer.Typer(help=_t("cmd_chats"), no_args_is_help=True)
@@ -46,27 +114,385 @@ app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 console = Console()
 
 
-@app.callback()
-def _root(
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
-) -> None:
-    """Global options. Runs before every subcommand."""
-    setup_logging(verbose=verbose)
-
-
 def _run(coro) -> None:
     asyncio.run(coro)
 
 
-# =============================================================== 5.1 Setup & nav
+# Names of every Typer command/group on the root app. Used by the root
+# callback to warn when `unread <bare-word>` collides with a subcommand
+# name (Click resolves subcommands first; the user almost certainly
+# meant `unread tg <ref>` to disambiguate).
+_RESERVED_TOP_LEVEL: set[str] = set()
 
 
-@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_init"))
-def init() -> None:
-    """Interactive first-time setup: log in to Telegram and verify OpenAI key."""
+def _maybe_warn_subcommand_collision(ref: str | None) -> None:
+    """Surface a one-line hint when `ref` shadows a real subcommand.
+
+    The user typed something like `unread describe` intending a chat
+    titled "describe" — Click already routed to the subcommand instead.
+    They land here only when `ref` slipped through the parser (which
+    means they used a non-colliding form). This hook is a future-proof:
+    it warns when the value matches anyway, suggesting the `tg` form.
+    """
+    if ref and ref in _RESERVED_TOP_LEVEL:
+        console.print(
+            f"[yellow]Note: `{ref}` is also a subcommand name. "
+            f"For a chat literally titled '{ref}', use `unread tg {ref}` "
+            f"or `unread -- {ref}`.[/]"
+        )
+
+
+def _session_exists() -> bool:
+    """True iff a Telegram session file is present (either name variant)."""
+    settings = get_settings()
+    p = Path(settings.telegram.session_path)
+    return p.exists() or p.with_name(p.name + ".session").exists()
+
+
+def _telegram_credentials_present() -> bool:
+    """True iff Telegram api_id + api_hash are resolvable from settings or env."""
+    import os as _os
+
+    s = get_settings()
+    if s.telegram.api_id and s.telegram.api_hash:
+        return True
+    return all(_os.environ.get(k) for k in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH"))
+
+
+def _openai_credentials_present() -> bool:
+    """True iff the OpenAI API key is resolvable from settings or env.
+
+    OpenAI is special-cased because it's the only provider that backs
+    Whisper / embeddings / vision in addition to chat. Even when chat
+    runs through Anthropic / Google / OpenRouter, those three features
+    look here.
+    """
+    import os as _os
+
+    s = get_settings()
+    return bool(s.openai.api_key) or bool(_os.environ.get("OPENAI_API_KEY"))
+
+
+def _active_provider_credentials_present() -> bool:
+    """True iff the currently-selected chat provider has its key set.
+
+    Routed by `settings.ai.provider`. Used to gate chat-only commands
+    (`analyze`, `ask`) so a Telegram-only or wrong-provider install
+    surfaces a focused banner instead of a confusing 401.
+    """
+    import os as _os
+
+    s = get_settings()
+    name = (s.ai.provider or "openai").strip().lower()
+    if name == "openai":
+        return bool(s.openai.api_key) or bool(_os.environ.get("OPENAI_API_KEY"))
+    if name == "openrouter":
+        return bool(s.openrouter.api_key)
+    if name == "anthropic":
+        return bool(s.anthropic.api_key)
+    if name == "google":
+        return bool(s.google.api_key)
+    # Local mode — base_url + placeholder key are always present.
+    return name == "local"
+
+
+def _credentials_present() -> bool:
+    """True iff BOTH Telegram and OpenAI credentials are resolvable.
+
+    Used for the strict "everything ready" check; per-command gating
+    typically wants the granular `_telegram_credentials_present` /
+    `_openai_credentials_present` instead so a Telegram-only or
+    OpenAI-only install can still run the commands it supports.
+    """
+    return _telegram_credentials_present() and _openai_credentials_present()
+
+
+def _print_first_run_banner(missing: str = "both") -> None:
+    """Print the friendly setup banner, scoped to which keys are missing.
+
+    `missing` ∈ {"openai", "telegram", "both"} controls the copy. The
+    banner always points at `unread tg init` first (the interactive
+    wizard handles missing keys without re-prompting for already-set
+    ones), and mentions the `~/.unread/.env` non-interactive path as a
+    secondary option.
+    """
+    from unread.core.paths import default_env_path, ensure_unread_home
+
+    ensure_unread_home()
+    env_path = default_env_path()
+    if missing == "openai":
+        title = "OpenAI key missing."
+        env_lines = "  OPENAI_API_KEY=sk-…"
+    elif missing == "telegram":
+        title = "Telegram credentials missing."
+        env_lines = "  TELEGRAM_API_ID=…\n  TELEGRAM_API_HASH=…"
+    else:
+        title = "First-run setup needed."
+        env_lines = "  OPENAI_API_KEY=sk-…\n  TELEGRAM_API_ID=…\n  TELEGRAM_API_HASH=…"
+    console.print(
+        f"[bold yellow]{title}[/]\n"
+        f"\n"
+        f"Run [cyan]unread tg init[/] to set up your install folder, "
+        f"OpenAI key, and (optionally) Telegram login.\n"
+        f"\n"
+        f"Or, for scripted / non-interactive setup, edit [bold]{env_path}[/] and fill in:\n"
+        f"{env_lines}\n"
+        f"\n"
+        f"Telegram credentials: https://my.telegram.org → API development tools. "
+        f"OpenAI: https://platform.openai.com/api-keys."
+    )
+
+
+def _exit_missing_openai_credentials() -> typer.Exit:
+    """Print the OpenAI-missing banner and raise `typer.Exit(1)`.
+
+    Used by analyze and ask paths so the user gets a consistent message
+    instead of OpenAI's "401 Unauthorized" raw error mid-run.
+    """
+    _print_first_run_banner("openai")
+    raise typer.Exit(1)
+
+
+def _seed_home_templates() -> None:
+    """Drop `.env` and `config.toml` templates into `~/.unread/` if absent.
+
+    Lets the user fill in credentials in-place after a first-run banner
+    instead of hunting for the example files in the repo.
+    """
+    from shutil import copyfile
+
+    from unread.core.paths import default_config_path, default_env_path, ensure_unread_home
+
+    ensure_unread_home()
+    # Repo-relative example files. Best-effort: skipped if the install
+    # is the wheel without the templates.
+    repo_root = Path(__file__).resolve().parent.parent
+    env_target = default_env_path()
+    cfg_target = default_config_path()
+    env_template = repo_root / ".env.example"
+    cfg_template = repo_root / "config.toml.example"
+    if not env_target.exists() and env_template.exists():
+        copyfile(env_template, env_target)
+        with contextlib.suppress(OSError):
+            env_target.chmod(0o600)
+    if not cfg_target.exists() and cfg_template.exists():
+        copyfile(cfg_template, cfg_target)
+
+
+def _dispatch_analyze(**kwargs) -> None:
+    """Shared bridge from the root + tg callbacks to `cmd_analyze`.
+
+    Both the root callback (`unread <ref>`) and the `tg` callback
+    (`unread tg <ref>`) collect the same option set and need to dispatch
+    to the same analyze pipeline. This helper lives here so the only
+    difference between the two callbacks is the auto-init policy.
+    """
+    from unread.analyzer.commands import cmd_analyze
+
+    save_flag = kwargs.pop("save", False)
+    _run(cmd_analyze(save_default=save_flag, **kwargs))
+
+
+_STDIN_REF_SENTINEL = "<stdin>"
+
+
+def _looks_like_local_file(ref: str) -> bool:
+    """True iff `ref` resolves to a local file on disk.
+
+    Files are detected before Telegram so `unread ./report.pdf` and
+    `unread /tmp/notes.md` route to the file analyzer instead of
+    being interpreted as a chat title. We use a path-shape probe
+    first (cheap, never touches the filesystem) and only stat when
+    the shape is ambiguous — avoids surprising Telegram users with
+    stat() calls for `@username` etc.
+    """
+    rl = ref.strip()
+    if not rl:
+        return False
+    # Path-shape signals: explicit relative / absolute / home-relative,
+    # or `file://` URI. These never collide with Telegram refs.
+    if rl.startswith(("./", "../", "/", "~/", "~")) or rl.startswith("file://"):
+        return True
+    # `@user` is a Telegram ref; never a file path.
+    if rl.startswith("@"):
+        return False
+    # `http(s)://` and `tg://` URLs route to website / YouTube / Telegram.
+    if rl.startswith(("http://", "https://", "tg://")):
+        return False
+    # Bare names with a `/` (Windows uses `\` too) → very likely a path.
+    # Bare extension-only names (`report.pdf`) need a stat to disambiguate
+    # from chat titles. We do that probe last and only if the token
+    # contains a recognized file extension to avoid stat-storming on
+    # every fuzzy chat lookup.
+    if "/" in rl or "\\" in rl:
+        return True
+    # Last-resort probe: bare filename with a known extension AND the
+    # file exists in cwd. Anything else falls through to Telegram so
+    # fuzzy-title lookups still work.
+    from pathlib import Path as _Path
+
+    p = _Path(rl).expanduser()
+    return bool(p.suffix and p.is_file())
+
+
+def _resolve_local_file_path(ref: str) -> Path | None:  # type: ignore[name-defined]
+    """Return the resolved absolute path for a file ref, or None on miss."""
+    rl = ref.strip()
+    if rl.startswith("file://"):
+        from urllib.parse import unquote, urlparse
+
+        parsed = urlparse(rl)
+        rl = unquote(parsed.path)
+    p = Path(rl).expanduser()
+    try:
+        p = p.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not p.is_file():
+        return None
+    return p
+
+
+def _stdin_has_data() -> bool:
+    """True when stdin is piped / redirected (not an interactive TTY).
+
+    `unread` (no args) on a TTY shows the quickstart panel. The same
+    invocation with stdin piped (`cat foo.txt | unread`) routes the
+    piped bytes through the file analyzer instead — same UX as bare
+    `unread <ref>`, just sourcing content from stdin.
+    """
+    try:
+        return not sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        # Some embedded environments (e.g. older Windows shells) raise
+        # on `isatty()`; treating those as "no stdin" preserves the
+        # quickstart-panel default.
+        return False
+
+
+def _looks_like_telegram_ref(ref: str | None) -> bool:
+    """True when this analyze run will need a live Telegram session.
+
+    Wizard mode (`ref is None`) and Telegram-shaped refs need it.
+    YouTube, websites, local files, and stdin do not.
+    """
+    if ref is None:
+        return True
+    rl = ref.strip().lower()
+    if rl in (_STDIN_REF_SENTINEL, "-"):
+        return False
+    if _looks_like_local_file(rl):
+        return False
+    youtube_prefixes = (
+        "https://www.youtube.com/",
+        "https://youtu.be/",
+        "https://m.youtube.com/",
+        "https://music.youtube.com/",
+        "http://www.youtube.com/",
+        "http://youtu.be/",
+    )
+    if rl.startswith(youtube_prefixes):
+        return False
+    if rl.startswith(("https://t.me/", "http://t.me/", "tg://")):
+        return True
+    # Any other http(s) URL → website analyzer; everything else (@user,
+    # fuzzy title, numeric id, …) routes to Telegram.
+    return not rl.startswith(("http://", "https://"))
+
+
+def _print_quickstart() -> None:
+    """Short cheat sheet shown when `unread` is run with no args.
+
+    The full reference lives behind `unread help` / `--help`. This panel
+    is just enough to get a first-time user oriented: log in, pick a
+    chat, find more.
+    """
+    console.print(
+        "[bold]unread[/] — local Telegram / YouTube / web-page analyzer\n"
+        "\n"
+        "[bold]Get started[/]\n"
+        "  [cyan]unread tg init[/]              interactive setup — pick install folder, OpenAI key, optional Telegram login\n"
+        "  [cyan]unread tg[/]                   interactive wizard — pick a chat, run analyzer\n"
+        "  [cyan]unread <ref>[/]                analyze a chat, YouTube link, or web page\n"
+        "  [cyan]unread tg <ref>[/]             same, plus auto-runs login on first use\n"
+        "\n"
+        "[bold]Other common commands[/]\n"
+        '  [cyan]unread ask[/] [dim]"<question>"[/]      Q&A across your synced archive\n'
+        "  [cyan]unread dump <ref>[/]           export chat history to a file\n"
+        "  [cyan]unread describe[/]             list dialogs / inspect a chat\n"
+        "  [cyan]unread doctor[/]               preflight check (creds, session, ffmpeg, …)\n"
+        "  [cyan]unread migrate[/]              move legacy ./storage + ./reports into ~/.unread/\n"
+        "\n"
+        '[bold]<ref>[/] examples: [dim]@username[/], [dim]t.me/c/123/45[/], [dim]"Fuzzy title"[/], '
+        "[dim]-1001234567890[/], [dim]https://youtu.be/...[/], [dim]https://example.com/article[/], "
+        "[dim]./report.pdf[/], [dim]-[/] (stdin)\n"
+        "\n"
+        "[dim]Tip:[/] you can run `unread tg init` without an OpenAI key — "
+        "[cyan]dump[/], [cyan]describe[/], [cyan]sync[/], etc. still work.\n"
+        "\n"
+        "[dim]More:[/] [cyan]unread help[/] · [cyan]unread help <command>[/] · [cyan]unread --help[/]"
+    )
+
+
+def _ensure_ready_for_analyze(ref: str | None) -> bool:
+    """Bootstrap `~/.unread/` and Telegram session before any analyze run.
+
+    Called for both `unread <ref>` and `unread tg <ref>`. Analyze always
+    needs the *active chat provider's* key (OpenAI / OpenRouter /
+    Anthropic / Google / Local-server-credential) — gate on that and
+    surface a focused banner pointing at `unread tg init` when missing.
+
+    For Telegram refs (chat / wizard / Telegram URL), if no session
+    exists we kick off `cmd_init()` to walk the user through Telegram
+    setup. Missing Telegram credentials surface via `build_client`'s
+    own friendly banner (in `tg/client.py`) so we don't double-message.
+
+    Returns True if the caller should proceed with analyze, False if
+    the caller should stop (a banner has already been printed).
+    """
     from unread.tg.commands import cmd_init
 
-    _run(cmd_init())
+    _seed_home_templates()
+    if not _active_provider_credentials_present():
+        # Raises typer.Exit(1) — analyze is dead in the water without
+        # the active provider's key, so we surface the friendly banner
+        # + non-zero exit instead of silently returning to the caller.
+        _exit_missing_provider_credentials()
+    if _looks_like_telegram_ref(ref) and not _session_exists():
+        _run(cmd_init())
+    return True
+
+
+def _exit_missing_provider_credentials() -> typer.Exit:
+    """Banner + exit for chat commands when the active provider has no key."""
+    s = get_settings()
+    provider = (s.ai.provider or "openai").strip().lower()
+    _print_provider_credentials_banner(provider)
+    raise typer.Exit(1)
+
+
+def _print_provider_credentials_banner(provider: str) -> None:
+    """One unified banner for any provider's missing chat credential."""
+    from unread.core.paths import default_env_path, ensure_unread_home
+
+    ensure_unread_home()
+    env_path = default_env_path()
+    label_map = {
+        "openai": ("OpenAI", "OPENAI_API_KEY=sk-…"),
+        "openrouter": ("OpenRouter", "OPENROUTER_API_KEY=sk-or-…"),
+        "anthropic": ("Anthropic (Claude)", "ANTHROPIC_API_KEY=sk-ant-…"),
+        "google": ("Google (Gemini)", "GOOGLE_API_KEY=AI…"),
+        "local": ("local server", "<set local.base_url in config.toml>"),
+    }
+    label, env_line = label_map.get(provider, (provider, "<provider-specific key>"))
+    console.print(
+        f"[bold yellow]{label} key missing for the active chat provider.[/]\n"
+        f"\n"
+        f"Run [cyan]unread tg init[/] to add one (or pick a different provider).\n"
+        f"\n"
+        f"Or, for scripted / non-interactive setup, edit [bold]{env_path}[/] and fill in:\n"
+        f"  {env_line}"
+    )
 
 
 @app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_describe"))
@@ -443,8 +869,9 @@ def backfill(
 # =================================================================== 5.4 Analyze
 
 
-@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_analyze"))
-def analyze(
+@app.callback(invoke_without_command=True)
+def _root(
+    ctx: typer.Context,
     ref: str | None = typer.Argument(
         None,
         help=(
@@ -452,10 +879,11 @@ def analyze(
             "A message link like t.me/c/ID/MSG is treated as single-message "
             "mode (analyze just that one message, auto-transcribing voice/video). "
             "For a negative numeric id use `--` to separate from flags, e.g. "
-            "`unread analyze -- -1001234567890`. Omit to pick every dialog "
+            "`unread -- -1001234567890`. Omit to pick every dialog "
             "with unread messages (interactive)."
         ),
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
     thread: int | None = typer.Option(None, "--thread", help="Forum-topic id."),
     msg: str | None = typer.Option(
         None,
@@ -491,13 +919,18 @@ def analyze(
         False,
         "--console",
         "-c",
-        help="Render the result in the terminal (pretty-printed markdown) instead of saving a file.",
+        help="[DEPRECATED] Same as --no-save. Reports always render in the terminal now; this flag only skips the file write.",
     ),
     save: bool = typer.Option(
         False,
         "--save",
         "-s",
-        help="Save to the default reports/ path (skips the interactive output picker).",
+        help="[DEPRECATED] No-op. Saving is now the default; pass --no-save to opt out.",
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="Skip writing the report file. The result still renders in the terminal.",
     ),
     mark_read: bool | None = typer.Option(
         None,
@@ -664,59 +1097,89 @@ def analyze(
         ),
     ),
 ) -> None:
-    """Analyze a chat. Default window = messages since your Telegram read marker.
+    """Default action: analyze a chat / YouTube video / web page.
+
+    `unread <ref>` is the analyze entry point. Without `<ref>` (and
+    without a subcommand), opens the interactive wizard. With a Telegram
+    folder (`--folder NAME`) and no `<ref>`, batch-analyzes every chat in
+    that folder with unread messages.
 
     For forum chats: `--thread N` targets one topic, `--all-flat` treats
-    the forum as one chat (needs --last-days / --full-history),
+    the forum as one chat (needs `--last-days` / `--full-history`),
     `--all-per-topic` runs one analysis per topic.
 
-    Without `<ref>` and with `--folder NAME`: batch-analyzes every chat in
-    that Telegram folder that has unread messages (skips the wizard).
+    For Telegram-only setup, use `unread tg` (auto-runs login on first
+    use) or `unread tg init --force` to re-link.
     """
-    from unread.analyzer.commands import cmd_analyze
-
-    _run(
-        cmd_analyze(
-            ref=ref,
-            thread=thread,
-            msg=msg,
-            from_msg=from_msg,
-            full_history=full_history,
-            since=since,
-            until=until,
-            last_days=last_days,
-            last_hours=last_hours,
-            preset=preset,
-            prompt_file=prompt_file,
-            model=model,
-            filter_model=filter_model,
-            output=output,
-            console_out=console_out,
-            save_default=save,
-            mark_read=mark_read,
-            no_cache=no_cache,
-            include_transcripts=include_transcripts,
-            min_msg_chars=min_msg_chars,
-            enrich=enrich,
-            enrich_all=enrich_all,
-            no_enrich=no_enrich,
-            yes=yes,
-            all_flat=all_flat,
-            all_per_topic=all_per_topic,
-            folder=folder,
-            max_cost=max_cost,
-            post_saved=post_saved,
-            dry_run=dry_run,
-            cite_context=cite_context,
-            self_check=self_check,
-            by=by,
-            post_to=post_to,
-            repeat_last=repeat_last,
-            with_comments=with_comments,
-            language=language,
-            content_language=content_language,
-            youtube_source=youtube_source,
-        )
+    setup_logging(verbose=verbose)
+    if ctx.invoked_subcommand is not None:
+        # A subcommand was matched (describe, ask, sync, …); let it run.
+        return
+    # Same callback is registered on the root app AND the `tg` /
+    # `telegram` sub-typer. `info_name` tells us which entrypoint Click
+    # resolved — used here to differentiate the no-args UX.
+    via_tg = ctx.info_name in ("tg", "telegram")
+    # Stdin auto-detect: `cat foo.txt | unread` (no ref, non-TTY stdin)
+    # routes the piped bytes through the file analyzer. The explicit
+    # form is `unread -`; both flow through `cmd_analyze_file` with a
+    # sentinel that tells it to read stdin instead of opening a path.
+    if ref == "-" or (ref is None and not via_tg and _stdin_has_data()):
+        ref = _STDIN_REF_SENTINEL
+    if ref is None and not via_tg:
+        # Bare `unread` is an orientation panel, not a command — the
+        # interactive wizard moved to `unread tg`. This keeps the
+        # zero-arg invocation cheap and discoverable instead of
+        # surprising new users with a credential prompt or wizard.
+        _print_quickstart()
+        return
+    # `unread <ref>` and `unread tg [<ref>]` both need ~/.unread/ ready
+    # plus (for Telegram refs / wizard) an authorized session. Skipped
+    # for YouTube / non-Telegram URL refs since those analyzers don't
+    # need a Telegram session at all.
+    if not _ensure_ready_for_analyze(ref):
+        return
+    _maybe_warn_subcommand_collision(ref)
+    _dispatch_analyze(
+        ref=ref,
+        thread=thread,
+        msg=msg,
+        from_msg=from_msg,
+        full_history=full_history,
+        since=since,
+        until=until,
+        last_days=last_days,
+        last_hours=last_hours,
+        preset=preset,
+        prompt_file=prompt_file,
+        model=model,
+        filter_model=filter_model,
+        output=output,
+        console_out=console_out,
+        save=save,
+        no_save=no_save,
+        mark_read=mark_read,
+        no_cache=no_cache,
+        include_transcripts=include_transcripts,
+        min_msg_chars=min_msg_chars,
+        enrich=enrich,
+        enrich_all=enrich_all,
+        no_enrich=no_enrich,
+        yes=yes,
+        all_flat=all_flat,
+        all_per_topic=all_per_topic,
+        folder=folder,
+        max_cost=max_cost,
+        post_saved=post_saved,
+        dry_run=dry_run,
+        cite_context=cite_context,
+        self_check=self_check,
+        by=by,
+        post_to=post_to,
+        repeat_last=repeat_last,
+        with_comments=with_comments,
+        language=language,
+        content_language=content_language,
+        youtube_source=youtube_source,
     )
 
 
@@ -1412,22 +1875,29 @@ app.add_typer(reports_app, name="reports", rich_help_panel=PANEL_MAINT)
 @reports_app.command("prune")
 def reports_prune(
     older_than: str = typer.Option("30d", "--older-than", help="Nd / Nw"),
-    root: Path = typer.Option(Path("reports"), "--root", help="Reports root directory (default: ./reports)."),
+    root: Path | None = typer.Option(
+        None,
+        "--root",
+        help="Reports root directory (default: ~/.unread/reports).",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="List what would be pruned, take no action."),
     purge: bool = typer.Option(
         False,
         "--purge",
-        help="Hard-delete instead of moving to reports/.trash/<ts>/. Irreversible.",
+        help="Hard-delete instead of moving to <root>/.trash/<ts>/. Irreversible.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Move (or delete) report files older than --older-than to reports/.trash/.
+    """Move (or delete) report files older than --older-than to <root>/.trash/.
 
-    Default behavior: trash them by moving to `reports/.trash/<ts>/`. The
+    Default behavior: trash them by moving to `<root>/.trash/<ts>/`. The
     `.trash/` subtree is itself ignored when scanning. Run with `--purge`
     to hard-delete (after confirmation, unless `--yes`).
     """
-    _run(_reports_prune(older_than, root, dry_run, purge, yes))
+    from unread.core.paths import reports_dir
+
+    resolved_root = root if root is not None else reports_dir()
+    _run(_reports_prune(older_than, resolved_root, dry_run, purge, yes))
 
 
 async def _reports_prune(
@@ -1656,8 +2126,10 @@ async def _backup(output: Path | None, overwrite: bool) -> None:
         console.print(f"[red]{_tf('cli_backup_no_db', path=str(src))}[/]")
         raise typer.Exit(1)
     if output is None:
+        from unread.core.paths import default_backups_dir
+
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output = Path("storage/backups") / f"data-{stamp}.sqlite"
+        output = default_backups_dir() / f"data-{stamp}.sqlite"
     output = output.resolve()
     if output.exists():
         if not overwrite:
@@ -1993,6 +2465,245 @@ def _preprocess_argv(argv: list[str] | None = None) -> list[str]:
     if not negs:
         return list(argv)
     return [argv[0], *kept, "--", *negs]
+
+
+# =============================================================== Telegram subgroup
+# `unread tg` and `unread telegram` mirror the root analyze entry point
+# but auto-run login on first use. The shared callback is `_root`
+# (registered above on the root app); we register the SAME function as
+# this typer's callback so `unread tg <ref>` accepts the full flag set
+# without duplicating 30+ option declarations. The branch on
+# `ctx.info_name` inside `_root` picks up the auto-init policy.
+
+tg_app = typer.Typer(
+    name="tg",
+    help="Analyze a Telegram chat (auto-runs `init` on first use). Same flags as `unread <ref>`.",
+    invoke_without_command=True,
+    add_completion=False,
+    rich_markup_mode="rich",
+    cls=_PreferSubcommandsGroup,
+    context_settings={"allow_interspersed_args": True},
+)
+tg_app.registered_callback = app.registered_callback  # share the analyze callback
+
+
+@tg_app.command("init")
+def tg_init(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Delete the existing session file and run init from scratch.",
+    ),
+) -> None:
+    """First-time Telegram login (and OpenAI key smoke test).
+
+    `--force` removes the saved session before logging in — useful when
+    you want to re-link a different Telegram account or your session
+    file got into a weird state.
+    """
+    from unread.tg.commands import cmd_init
+
+    settings = get_settings()
+    session_path = Path(settings.telegram.session_path)
+
+    _seed_home_templates()
+    if force:
+        # Telethon writes either `<name>.sqlite` or `<name>.sqlite.session`
+        # depending on platform / version. Wipe both forms.
+        for p in (session_path, session_path.with_name(session_path.name + ".session")):
+            with contextlib.suppress(FileNotFoundError):
+                p.unlink()
+        console.print("[yellow]Existing session removed. Re-running init.[/]")
+    _run(cmd_init())
+
+
+# Register `tg` as the visible primary, `telegram` as a hidden alias
+# that resolves to the same callback. Two `add_typer` calls give Typer
+# two TyperInfo entries pointing at the same Typer instance — the
+# callback (`_root`) is shared, so flags stay in sync automatically.
+app.add_typer(tg_app, name="tg", rich_help_panel=PANEL_MAIN)
+app.add_typer(tg_app, name="telegram", rich_help_panel=PANEL_MAIN, hidden=True)
+
+
+# =============================================================== migrate command
+
+
+@app.command(
+    rich_help_panel=PANEL_MAINT,
+    help="Move legacy ./storage and ./reports from the current directory into ~/.unread/.",
+)
+def migrate(
+    move: bool = typer.Option(
+        False,
+        "--move",
+        help="Move files instead of copying. Removes the cwd-relative copies after success.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print what would happen, take no action.",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace files in ~/.unread/ if they already exist.",
+    ),
+) -> None:
+    """Migrate a legacy cwd-relative install into ~/.unread/.
+
+    Useful after upgrading from an older `unread` that lived in a cloned
+    repo directory. Detects `./.env`, `./config.toml`, `./storage/`, and
+    `./reports/` in the working directory and (by default) copies them
+    into `~/.unread/`. `--move` removes the cwd-relative copy on success.
+    """
+    import shutil
+
+    from unread.core.paths import (
+        default_config_path,
+        default_env_path,
+        ensure_unread_home,
+        reports_dir,
+        storage_dir,
+    )
+
+    ensure_unread_home()
+    cwd = Path.cwd()
+
+    # Each entry: (label, source path, destination path)
+    plan: list[tuple[str, Path, Path]] = [
+        (".env", cwd / ".env", default_env_path()),
+        ("config.toml", cwd / "config.toml", default_config_path()),
+        ("storage/", cwd / "storage", storage_dir()),
+        ("reports/", cwd / "reports", reports_dir()),
+    ]
+
+    actions: list[tuple[str, Path, Path, str]] = []  # (label, src, dest, action)
+    for label, src, dest in plan:
+        if not src.exists():
+            actions.append((label, src, dest, "skip (source missing)"))
+            continue
+        if src.resolve() == dest.resolve():
+            actions.append((label, src, dest, "skip (already at destination)"))
+            continue
+        if dest.exists() and not overwrite:
+            actions.append((label, src, dest, "skip (destination exists; use --overwrite)"))
+            continue
+        actions.append((label, src, dest, "MOVE" if move else "COPY"))
+
+    console.print(f"[bold]Migration plan ([dim]home={ensure_unread_home()}[/]):[/]")
+    for label, src, dest, action in actions:
+        marker = "[yellow]→[/]" if action in ("MOVE", "COPY") else "[dim]·[/]"
+        console.print(f"  {marker} {label:<14} {src}  →  {dest}  [{action}]")
+
+    if dry_run:
+        console.print("[dim]--dry-run: no changes made.[/]")
+        return
+
+    moved_or_copied = 0
+    for label, src, dest, action in actions:
+        if action not in ("MOVE", "COPY"):
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            if src.is_dir():
+                if action == "MOVE":
+                    shutil.move(str(src), str(dest))
+                else:
+                    shutil.copytree(src, dest)
+            elif action == "MOVE":
+                shutil.move(str(src), str(dest))
+            else:
+                shutil.copy2(src, dest)
+            moved_or_copied += 1
+            past = "moved" if action == "MOVE" else "copied"
+            console.print(f"  [green]✓[/] {label} {past}")
+        except Exception as e:
+            console.print(f"  [red]×[/] {label}: {e}")
+
+    if moved_or_copied == 0:
+        console.print("[dim]Nothing to migrate.[/]")
+    else:
+        console.print(
+            f"\n[green]Migration complete:[/] {moved_or_copied} item(s) "
+            f"{'moved' if move else 'copied'} into {ensure_unread_home()}."
+        )
+
+
+# =============================================================== help command
+
+
+@app.command(
+    name="help",
+    rich_help_panel=PANEL_MAIN,
+    help="Show help. `unread help <cmd>` shows command-specific help.",
+)
+def help_cmd(
+    command: list[str] | None = typer.Argument(
+        None,
+        help="Subcommand path. Example: `unread help chats add` shows chats-add help.",
+    ),
+) -> None:
+    """Print the same help that `--help` would produce.
+
+    With no args, shows the top-level overview. Walks the Click command
+    tree when subcommand names are given so deeply nested commands
+    (`unread help chats add`) work too. Hidden commands stay reachable
+    via this path even though they don't appear in the main listing.
+    """
+    import click
+
+    root_click = typer.main.get_command(app)
+    cmd: click.Command = root_click
+    cur_ctx = click.Context(root_click, info_name="unread")
+    for name in command or []:
+        if not isinstance(cmd, click.Group):
+            raise typer.BadParameter(f"`{name}` is not a subcommand of `{cur_ctx.info_name}`.")
+        sub = cmd.get_command(cur_ctx, name)
+        if sub is None:
+            raise typer.BadParameter(f"unknown command: {name}")
+        cur_ctx = click.Context(sub, info_name=name, parent=cur_ctx)
+        cmd = sub
+    typer.echo(cmd.get_help(cur_ctx))
+
+
+# Names known to Click as direct subcommands of the root. The collision
+# warning in `_maybe_warn_subcommand_collision` reads from this set.
+_RESERVED_TOP_LEVEL.update(
+    {
+        "tg",
+        "telegram",
+        "help",
+        "migrate",
+        "describe",
+        "folders",
+        "sync",
+        "chats",
+        "cache",
+        "stats",
+        "ask",
+        "dump",
+        "cleanup",
+        "settings",
+        "reports",
+        "watch",
+        "doctor",
+        "backup",
+        "restore",
+        # Hidden compat commands — still resolvable, still collide.
+        "dialogs",
+        "topics",
+        "resolve",
+        "channel-info",
+        "backfill",
+        "download-media",
+        "export",
+    }
+)
 
 
 def main() -> None:

@@ -228,10 +228,16 @@ class AnalysisOptions:
     # paywall toggled, layout changed). Telegram + YouTube runs leave both None.
     website_page_id: str | None = None
     website_content_hash: str | None = None
-    # Source kind hint: "chat" (default), "video", or "website". Drives the
-    # preamble label and base prompt's per-kind addendum. In options_payload
-    # so a cache row from a chat run can't be served to a video / website
-    # run with the same msg_ids (extremely unlikely but cheap to lock down).
+    # Local-file / stdin analysis: file_id pins cache to the source; content_hash
+    # busts when the file is edited. Same shape as the website pair so the
+    # cache layer treats them symmetrically. Stdin runs use sha256(stdin bytes)
+    # as file_id, so piping the same content twice still hits cache.
+    local_file_id: str | None = None
+    local_file_content_hash: str | None = None
+    # Source kind hint: "chat" (default), "video", "website", or "file".
+    # Drives the preamble label and base prompt's per-kind addendum. In
+    # options_payload so a cache row from a chat run can't be served to
+    # a file / video / website run with the same msg_ids.
     source_kind: str = "chat"
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
@@ -271,6 +277,8 @@ class AnalysisOptions:
             "youtube_video_id": self.youtube_video_id,
             "website_page_id": self.website_page_id,
             "website_content_hash": self.website_content_hash,
+            "local_file_id": self.local_file_id,
+            "local_file_content_hash": self.local_file_content_hash,
             "source_kind": self.source_kind,
         }
         if self.enrich:
