@@ -145,7 +145,7 @@ async def _ask_continue() -> bool:
         event.app.exit(result=False)
 
     label = _t("ask_continue_q")
-    console.print(f"[bold cyan]{label}[/] [dim](Enter/y to continue, n/Esc to exit)[/] ", end="")
+    console.print(f"[bold cyan]{label}[/] [grey70](Enter/y to continue, n/Esc to exit)[/] ", end="")
     session: PromptSession = PromptSession()
     try:
         result = await session.prompt_async("", key_bindings=kb)
@@ -167,6 +167,7 @@ async def cmd_ask(
     until: str | None = None,
     last_days: int | None = None,
     last_hours: int | None = None,
+    last_minutes: int | None = None,
     limit: int = 200,
     model: str | None = None,
     output: Path | None = None,
@@ -243,8 +244,14 @@ async def cmd_ask(
     # accepting these flags too would silently drop or duplicate them.
     if _no_scope:
         forbidden_with_wizard: list[str] = []
-        if since is not None or until is not None or last_days is not None or last_hours is not None:
-            forbidden_with_wizard.append("--since/--until/--last-days/--last-hours")
+        if (
+            since is not None
+            or until is not None
+            or last_days is not None
+            or last_hours is not None
+            or last_minutes is not None
+        ):
+            forbidden_with_wizard.append("--since/--until/--last-days/--last-hours/--last-minutes")
         if thread is not None:
             forbidden_with_wizard.append("--thread")
         if with_comments:
@@ -314,14 +321,14 @@ async def cmd_ask(
     effective_content_language = (
         content_language or settings.locale.content_language or effective_language
     ).lower()
-    since_dt, until_dt = compute_window(since, until, last_days, last_hours)
+    since_dt, until_dt = compute_window(since, until, last_days, last_hours, last_minutes)
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         # Resolve scope.
         chat_ids: list[int] | None = None
         chat_titles: dict[int, str] = {}
         if chat:
-            console.print(f"[dim]{_tf('resolving', ref=chat)}[/]")
+            console.print(f"[grey70]{_tf('resolving', ref=chat)}[/]")
             resolved = await resolve_ref(client, repo, chat)
             chat_ids = [resolved.chat_id]
             chat_titles[resolved.chat_id] = resolved.title or str(resolved.chat_id)
@@ -351,7 +358,7 @@ async def cmd_ask(
                     linked_row = await repo.get_chat(linked_id) or {}
                     chat_titles[linked_id] = linked_row.get("title") or f"Comments {linked_id}"
                     console.print(
-                        f"[dim]→ Including comments from linked chat[/] "
+                        f"[grey70]→ Including comments from linked chat[/] "
                         f"[bold]{chat_titles[linked_id]}[/] ({linked_id})"
                     )
                 else:
@@ -374,7 +381,7 @@ async def cmd_ask(
                 )
                 raise typer.Exit(2)
             console.print(
-                f"[dim]{_t('ask_folder_label')}[/] [bold]{matched.title}[/] — "
+                f"[grey70]{_t('ask_folder_label')}[/] [bold]{matched.title}[/] — "
                 f"{_tf('ask_n_chats', n=len(chat_ids))}"
             )
         # else: chat_ids stays None → search all synced chats.
@@ -413,7 +420,7 @@ async def cmd_ask(
                     )
                 if msgs_to_enrich:
                     console.print(
-                        f"[dim]→ Enriching {len(msgs_to_enrich)} messages "
+                        f"[grey70]→ Enriching {len(msgs_to_enrich)} messages "
                         f"({', '.join(enrich_opts.kinds_enabled())})...[/]"
                     )
                     stats = await enrich_messages(
@@ -426,7 +433,7 @@ async def cmd_ask(
                     )
                     summary = stats.summary()
                     if summary:
-                        console.print(f"[dim]→ {summary}[/]")
+                        console.print(f"[grey70]→ {summary}[/]")
 
         # --build-index → fill the message_embeddings table for the scoped
         # chats and exit. Idempotent. The flagship answer path is skipped.
@@ -450,7 +457,7 @@ async def cmd_ask(
             assert chat_ids is not None  # validated above
             embed_model = _default_embed_model()
             console.print(
-                f"[dim]→ Building embeddings index for {len(chat_ids)} chat(s) "
+                f"[grey70]→ Building embeddings index for {len(chat_ids)} chat(s) "
                 f"with[/] [bold]{embed_model}[/]..."
             )
             embed_client = AsyncOpenAI(
@@ -466,7 +473,7 @@ async def cmd_ask(
             if written:
                 console.print(f"[green]{_tf('ask_indexed_n', n=written)}[/]")
             else:
-                console.print(f"[dim]{_t('ask_index_up_to_date')}[/]")
+                console.print(f"[grey70]{_t('ask_index_up_to_date')}[/]")
             return
 
         # Rerank decision: explicit CLI flag wins, else config default.
@@ -550,7 +557,7 @@ async def cmd_ask(
 
                 ok = await _mark_as_read(client, target_chat, int(max_id), thread_id=thread)
                 if ok:
-                    console.print(f"[dim]{_tf('marked_read_up_to', msg_id=max_id)}[/]")
+                    console.print(f"[grey70]{_tf('marked_read_up_to', msg_id=max_id)}[/]")
             except Exception as e:
                 log.warning("ask.mark_read_failed", chat_id=chat_ids[0], err=str(e)[:200])
                 console.print(f"[yellow]{_tf('couldnt_mark_read', err=e)}[/]")
@@ -681,7 +688,7 @@ async def _run_single_turn(
             )
             raise typer.Exit(1)
         console.print(
-            f"[dim]→ Semantic retrieval[/] ({embed_model}; "
+            f"[grey70]→ Semantic retrieval[/] ({embed_model}; "
             f"pool={candidate_limit}"
             f"{', rerank→' + str(min(limit, ask_cfg.rerank_keep)) if rerank_on else ''})"
         )
@@ -712,7 +719,7 @@ async def _run_single_turn(
         scored = [(m, max(0, min(100, round((s + 1) * 50)))) for m, s in sem_scored]
     else:
         console.print(
-            f"[dim]→ Searching local corpus[/] (tokens: {', '.join(tokens) or '(none)'}; "
+            f"[grey70]→ Searching local corpus[/] (tokens: {', '.join(tokens) or '(none)'}; "
             f"pool={candidate_limit}"
             f"{', rerank→' + str(min(limit, ask_cfg.rerank_keep)) if rerank_on else ''})"
         )
@@ -733,8 +740,8 @@ async def _run_single_turn(
         keep_n = min(limit, ask_cfg.rerank_keep)
         rerank_model = ask_cfg.rerank_model or settings.openai.filter_model_default
         console.print(
-            f"[dim]→ Reranking {len(scored)} candidates with[/] [bold]{rerank_model}[/]"
-            f"[dim] → keep top-{keep_n}...[/]"
+            f"[grey70]→ Reranking {len(scored)} candidates with[/] [bold]{rerank_model}[/]"
+            f"[grey70] → keep top-{keep_n}...[/]"
         )
         scored = await _rerank_fn(
             repo=repo,
@@ -755,7 +762,7 @@ async def _run_single_turn(
         if fallback_pool:
             scored = list(fallback_pool)
             msgs = [m for m, _ in scored]
-            console.print(f"[dim]{_t('ask_no_matches_reusing')}[/]")
+            console.print(f"[grey70]{_t('ask_no_matches_reusing')}[/]")
         else:
             console.print(
                 "[yellow]No matching messages.[/] Try `unread sync <chat>` first if "
@@ -812,7 +819,7 @@ async def _run_single_turn(
     est_cost = chat_cost(used_model, prompt_tokens, 0, 2000, settings=settings)
     if est_cost is not None:
         console.print(
-            f"[dim]→ Estimated cost: ~${est_cost:.4f}[/] "
+            f"[grey70]→ Estimated cost: ~${est_cost:.4f}[/] "
             f"({prompt_tokens:,} prompt tokens × {used_model}; output capped at 2000)"
         )
         if max_cost is not None and est_cost > max_cost:
@@ -824,14 +831,16 @@ async def _run_single_turn(
             if yes:
                 console.print(f"[red]{_t('aborting_yes_set')}[/]")
                 raise typer.Exit(2)
-            if not typer.confirm(_t("run_anyway_q"), default=False):
+            from unread.util.prompt import confirm as _confirm
+
+            if not _confirm(_t("run_anyway_q"), default=False):
                 console.print(f"[yellow]{_t('aborted')}[/]")
                 raise typer.Exit(0)
     elif max_cost is not None:
-        console.print(f"[dim]{_t('max_cost_not_enforced')}[/]")
+        console.print(f"[grey70]{_t('max_cost_not_enforced')}[/]")
 
     console.print(
-        f"[dim]{_t('ask_asking_label')}[/] [bold]{used_model}[/] {_tf('ask_over_n_msgs', n=len(msgs))}"
+        f"[grey70]{_t('ask_asking_label')}[/] [bold]{used_model}[/] {_tf('ask_over_n_msgs', n=len(msgs))}"
     )
     res = await chat_complete(
         oai,
@@ -861,8 +870,13 @@ async def _run_single_turn(
         from rich.markdown import Markdown
         from rich.rule import Rule
 
+        from unread.analyzer.commands import _flatten_citations
+
+        console_body = body
+        if get_settings().analyze.plain_citations:
+            console_body = _flatten_citations(console_body)
         console.print(Rule("answer", style="cyan"))
-        console.print(Markdown(body))
+        console.print(Markdown(console_body))
         console.print(Rule(style="cyan"))
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -960,7 +974,7 @@ async def _refresh_chats(
     from unread.tg.sync import backfill
 
     sem = _asyncio.Semaphore(3)
-    console.print(f"[dim]{_tf('ask_refreshing', n=len(chat_ids))}[/]")
+    console.print(f"[grey70]{_tf('ask_refreshing', n=len(chat_ids))}[/]")
 
     async def _one(chat_id: int) -> tuple[int, int | None, str | None]:
         async with sem:
@@ -993,7 +1007,7 @@ async def _refresh_chats(
     if total_new:
         console.print(f"[green]{_tf('ask_refreshed_total', total=total_new, n=len(chat_ids))}[/]")
     else:
-        console.print(f"[dim]{_t('ask_refreshed_none')}[/]")
+        console.print(f"[grey70]{_t('ask_refreshed_none')}[/]")
     if failed:
         console.print(f"[yellow]{_tf('ask_refresh_failed', n=len(failed))}[/]")
 

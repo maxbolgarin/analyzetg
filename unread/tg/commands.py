@@ -40,23 +40,32 @@ log = get_logger(__name__)
 # --------------------------------------------------------------------- init
 
 
-async def cmd_init() -> None:
-    """Interactive first-run setup: install folder, OpenAI key, Telegram login.
+async def cmd_init(*, scope: str = "full") -> None:
+    """Interactive first-run setup: install folder, AI provider, Telegram login.
 
     Runs as a pipeline of four conditional steps. Each step gates on
-    "is this thing already configured?" so re-running `unread tg init`
-    is always safe and only prompts for what's missing:
+    "is this thing already configured?" so re-running `unread init`
+    (or `unread tg init`) is always safe and only prompts for what's
+    missing:
 
       1. **Folder pick** — runs iff `~/.unread/install.toml` is absent.
-         User picks default / current dir / custom path / exit. The
-         choice persists in the pointer file.
-      2. **OpenAI key** — runs iff `settings.openai.api_key` is empty.
-         Skippable; press Enter to keep `unread` operating in a
-         no-AI mode (`dump`, `describe`, etc. still work).
+         User picks default / current dir / custom path / exit.
+      2. **AI provider + key** — runs iff `scope == "full"`. Always
+         offered on re-runs so the user can change providers / add a
+         sibling key / replace a stale key; the menu pre-selects a
+         "Keep current" row when the active provider already has a
+         key, so re-running `unread init` for Telegram alone is one
+         Enter press.
       3. **Telegram credentials** — runs iff api_id/api_hash empty AND
          no valid session. Skippable.
       4. **Telethon auth** — runs iff Telegram creds end the run
          populated AND the session is unauthorized.
+
+    `scope` selects which steps fire. `"full"` (the default, used by
+    `unread init`) runs every step. `"telegram_only"` (used by
+    `unread tg init`) skips the AI-provider step — convenient when
+    the user just wants to (re-)link a Telegram account without
+    revisiting credential prompts.
 
     Persistence is per-step (each value lands in `data.sqlite::secrets`
     immediately) and `reset_settings()` is called between steps so the
@@ -85,11 +94,15 @@ async def cmd_init() -> None:
 
     settings = get_settings()
 
-    # Step 2: AI provider + its API key (both skippable).
-    # On a fresh install we ask the user to pick a chat provider so the
-    # right key field gets prompted. On re-runs, we skip the entire
-    # block when the active provider already has a key.
-    if not _active_provider_has_key(settings):
+    # Step 2: AI provider + its API key.
+    # Always offered on full-scope re-runs so the user can change
+    # providers, add a sibling key (e.g. OpenAI for Whisper alongside
+    # Anthropic for chat), or replace a stale key. The provider menu
+    # has a "Keep current" entry preselected when a key is already
+    # set, so re-running `unread init` to refresh Telegram alone is
+    # one Enter press. `tg init` (the telegram-only scope) bypasses
+    # this step entirely.
+    if scope == "full":
         await _run_provider_step()
         reset_settings()
         settings = get_settings()
@@ -116,50 +129,57 @@ async def cmd_init() -> None:
 
 
 def _run_folder_step() -> bool:
-    """Prompt for the install folder. Returns False on "Exit"."""
+    """Prompt for the install folder. Returns False on "Exit" / Esc."""
     from pathlib import Path as _Path
 
     from unread.core.paths import write_install_pointer
+    from unread.util.prompt import Choice, ask_text, select
 
     default_home = _Path.home() / ".unread"
     cwd = _Path.cwd()
     console.print("\n[bold]Welcome to unread.[/]\n")
-    console.print("Where would you like unread to store its data (storage, reports, cache)?\n")
-    console.print(f"  [cyan]1[/]. Default — [bold]{default_home}/[/]")
-    console.print(
-        f"  [cyan]2[/]. Current folder — [bold]{cwd}/[/]  [dim](creates ./storage and ./reports here)[/]"
-    )
-    console.print("  [cyan]3[/]. Custom path…")
-    console.print("  [cyan]4[/]. Exit\n")
+    console.print("[grey70]Pick where to keep your data — analyses, cache, downloaded media.[/]\n")
 
+    choice = select(
+        "Where would you like unread to store its data (storage, reports, cache)?",
+        choices=[
+            Choice("default", f"Default — {default_home}/"),
+            Choice("cwd", f"Current folder — {cwd}/", "creates ./storage and ./reports here"),
+            Choice("custom", "Custom path…"),
+            Choice("exit", "Exit"),
+        ],
+        default_value="default",
+    )
+    if choice in (None, "exit"):
+        console.print("[grey70]Setup cancelled. Run `unread init` again when ready.[/]")
+        return False
+    if choice == "default":
+        write_install_pointer(None)
+        console.print(f"[green]✓[/] Using default: {default_home}/")
+        return True
+    if choice == "cwd":
+        write_install_pointer(cwd)
+        console.print(f"[green]✓[/] Using current folder: {cwd}/")
+        return True
+    # Custom path: free-form text, with re-prompt on bad / unwritable input.
     while True:
-        choice = typer.prompt("Select [1-4]", default="1").strip()
-        if choice == "1":
-            write_install_pointer(None)  # empty `home`, falls through to default
-            console.print(f"[green]✓[/] Using default: {default_home}/")
-            return True
-        if choice == "2":
-            write_install_pointer(cwd)
-            console.print(f"[green]✓[/] Using current folder: {cwd}/")
-            return True
-        if choice == "3":
-            raw = typer.prompt("Custom path").strip()
-            if not raw:
-                console.print("[yellow]Empty path — try again.[/]")
-                continue
-            target = _Path(raw).expanduser().resolve()
-            try:
-                target.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                console.print(f"[red]Can't create {target}: {e}. Try again.[/]")
-                continue
-            write_install_pointer(target)
-            console.print(f"[green]✓[/] Using custom path: {target}/")
-            return True
-        if choice == "4":
-            console.print("[dim]Setup cancelled. Run `unread tg init` again when ready.[/]")
+        raw = ask_text("Custom path", default="")
+        if raw is None:
+            console.print("[grey70]Setup cancelled.[/]")
             return False
-        console.print("[yellow]Pick 1, 2, 3, or 4.[/]")
+        raw = raw.strip()
+        if not raw:
+            console.print("[yellow]Empty path — try again, or Esc to cancel.[/]")
+            continue
+        target = _Path(raw).expanduser().resolve()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            console.print(f"[red]Can't create {target}: {e}. Try again.[/]")
+            continue
+        write_install_pointer(target)
+        console.print(f"[green]✓[/] Using custom path: {target}/")
+        return True
 
 
 def _active_provider_has_key(settings) -> bool:  # type: ignore[no-untyped-def]
@@ -193,35 +213,35 @@ _PROVIDER_CHOICES: tuple[tuple[str, str, str | None, str, str], ...] = (
         "openai",
         "openai.api_key",
         "https://platform.openai.com/api-keys",
-        "Default. Powers Whisper / embeddings / vision in addition to chat.",
+        "Chat + audio (Whisper) + embeddings + vision. The only provider with audio.",
     ),
     (
         "2",
         "openrouter",
         "openrouter.api_key",
         "https://openrouter.ai/keys",
-        "Single key, many models (OpenAI / Anthropic / Mistral / …) via one endpoint.",
+        "Many models via one key. Chat + image (model-dependent). No audio.",
     ),
     (
         "3",
         "anthropic",
         "anthropic.api_key",
         "https://console.anthropic.com/settings/keys",
-        "Claude (Sonnet / Haiku) directly from Anthropic.",
+        "Claude (Sonnet / Haiku). Chat + image / file. No audio / embeddings.",
     ),
     (
         "4",
         "google",
         "google.api_key",
         "https://aistudio.google.com/app/apikey",
-        "Gemini (2.5 Flash / Flash Lite) via the Developer API.",
+        "Gemini (2.5 Flash / Flash Lite). Chat + image / file. No audio.",
     ),
     (
         "5",
         "local",
         None,  # no API key — base_url + (optional) placeholder key
         "",
-        "Self-hosted server: Ollama, LM Studio, vLLM, etc.",
+        "Self-hosted (Ollama / LM Studio / vLLM). Chat + image if the model supports it.",
     ),
 )
 
@@ -229,68 +249,115 @@ _PROVIDER_CHOICES: tuple[tuple[str, str, str | None, str, str], ...] = (
 async def _run_provider_step() -> None:
     """Pick a chat provider, persist the choice, and collect its API key.
 
-    Each step is skippable: pressing Enter at the menu keeps the current
-    `ai.provider` (default OpenAI on a fresh install); pressing Enter at
-    the API-key prompt yields a no-AI install where local-only commands
-    still work. Persists the provider choice to `app_settings::ai.provider`
-    and the key to `data.sqlite::secrets`.
+    Arrow-driven: ↑/↓ navigate, Enter selects, Esc raises (cancels the
+    whole wizard — Esc = Ctrl-C). On re-runs, the menu offers a "Keep
+    current" row at the top, pre-selected when the active provider
+    already has a key — so the common case (re-running `unread init`
+    to relink Telegram) is one Enter away. Persists the provider
+    choice to `app_settings::ai.provider` and the key to
+    `data.sqlite::secrets`.
     """
-    console.print("\n[bold]Which AI provider do you want to use?[/]")
-    for num, name, _key, _url, hint in _PROVIDER_CHOICES:
-        console.print(f"  [cyan]{num}[/]. [bold]{name}[/]  [dim]— {hint}[/]")
-    console.print("  [dim]Press Enter to keep the default (OpenAI).[/]")
+    from unread.util.prompt import Choice, ask_text, confirm, select, separator
 
-    while True:
-        choice = typer.prompt("Select [1-5]", default="1").strip()
-        match = next((c for c in _PROVIDER_CHOICES if c[0] == choice), None)
-        if match is None:
-            console.print("[yellow]Pick a number 1–5.[/]")
-            continue
-        _num, provider_name, secret_key, info_url, _hint = match
-        break
+    console.print(
+        "\n[bold]Audio transcription (Whisper) is OpenAI-only.[/]\n"
+        "[grey70]The other providers handle chat + image / file analysis "
+        "(image support depends on the chosen model). You can pick OpenAI now "
+        "and switch later, or pick another and add an OpenAI key alongside via "
+        "`unread init` if you need transcription.[/]\n"
+    )
 
     settings = get_settings()
+    current_provider = (settings.ai.provider or "openai").strip().lower()
+    has_key_now = _active_provider_has_key(settings)
+
+    provider_choices: list = []
+    if has_key_now:
+        # Re-run path: let the user keep what's already wired up by
+        # pressing Enter on the first row.
+        provider_choices.append(
+            Choice(
+                "__keep__", f"Keep current — {current_provider} (key set)", "press Enter to skip this step"
+            )
+        )
+        provider_choices.append(separator())
+    provider_choices.extend(Choice(name, name, hint) for _num, name, _key, _url, hint in _PROVIDER_CHOICES)
+    chosen = select(
+        "Which AI provider do you want to use?",
+        choices=provider_choices,
+        default_value="__keep__" if has_key_now else current_provider,
+    )
+    if chosen == "__keep__":
+        console.print(f"[grey70]Keeping current provider: {current_provider}.[/]")
+        return
+    match = next((c for c in _PROVIDER_CHOICES if c[1] == chosen), None)
+    if match is None:
+        return  # defensive — select() guarantees we got a known value
+    _num, provider_name, secret_key, info_url, _hint = match
+
     async with open_repo(settings.storage.data_path) as repo:
         await repo.set_app_setting("ai.provider", provider_name)
         if provider_name == "local":
-            # Local mode needs a base_url. Default works for vanilla
-            # Ollama; prompt for a custom one (skippable).
             current = settings.local.base_url
-            url = typer.prompt(
+            url_in = ask_text(
                 f"Local server base URL (default: {current})",
                 default="",
-                show_default=False,
-            ).strip()
+            )
+            url = (url_in or "").strip()
             if url:
                 await repo.set_app_setting("local.base_url", url)
             console.print("[green]✓[/] Local provider configured — no API key needed.")
             return
-        # Cloud providers: prompt for their API key.
+
+        # If the picked provider already has a key stored, ask before
+        # overwriting it — common case when the user picked the same
+        # provider again just to look around.
+        existing_key = _provider_key_value(settings, provider_name)
+        if existing_key and not confirm(
+            f"{provider_name} already has a key. Replace it?",
+            default=False,
+        ):
+            console.print(f"[grey70]Kept existing {provider_name} key.[/]")
+            return
+
         prompt_label = f"{provider_name} API key"
         if info_url:
-            console.print(f"\n[bold]{prompt_label}[/] ([dim]{info_url}[/])")
+            console.print(f"\n[bold]{prompt_label}[/] ([grey70]{info_url}[/])")
         else:
             console.print(f"\n[bold]{prompt_label}[/]")
         console.print(
-            "  [dim]Press Enter to skip — `dump`, `describe`, `sync`, etc. still work without it.[/]"
+            "  [grey70]Press Enter to skip — `dump`, `describe`, `sync`, etc. still work without it.[/]"
         )
-        raw = typer.prompt("Key", default="", show_default=False).strip()
+        raw_in = ask_text("Key", default="", password=True)
+        raw = (raw_in or "").strip()
         if not raw:
             console.print(
-                "[dim]Skipped — `analyze` / `ask` will require an AI key. "
-                "Re-run `unread tg init` to add one later.[/]"
+                "[grey70]Skipped — `analyze` / `ask` will require an AI key. "
+                "Re-run `unread init` to add one later.[/]"
             )
             return
         assert secret_key is not None  # guaranteed by _PROVIDER_CHOICES
         await repo.put_secrets({secret_key: raw})
     console.print("[green]✓[/] Saved.")
 
-    # Smoke test only when the picked provider is OpenAI (the SDK has a
-    # cheap models.list() endpoint). Other providers don't have a uniform
-    # "ping" call across versions; the first real chat completion is the
-    # smoke test for them.
+    # Smoke test only for OpenAI (cheap `models.list()`). Other providers'
+    # smoke is the first real chat completion.
     if provider_name == "openai":
         await _smoke_test_openai(raw)
+
+
+def _provider_key_value(settings, name: str) -> str:  # type: ignore[no-untyped-def]
+    """Return the stored key for `name`, or empty string if unset."""
+    name = name.strip().lower()
+    if name == "openai":
+        return settings.openai.api_key or ""
+    if name == "openrouter":
+        return settings.openrouter.api_key or ""
+    if name == "anthropic":
+        return settings.anthropic.api_key or ""
+    if name == "google":
+        return settings.google.api_key or ""
+    return ""
 
 
 async def _smoke_test_openai(api_key: str) -> None:
@@ -306,31 +373,38 @@ async def _smoke_test_openai(api_key: str) -> None:
     except Exception as e:
         console.print(
             f"[yellow]OpenAI smoke test failed: {e}.[/] "
-            "[dim]Saved anyway — you can re-run `unread tg init` to update.[/]"
+            "[grey70]Saved anyway — you can re-run `unread tg init` to update.[/]"
         )
 
 
 async def _run_telegram_creds_step() -> bool:
     """Optional Telegram-credentials prompt. Returns True if creds were saved."""
-    console.print("\n[bold]Set up Telegram login now?[/]")
-    console.print("  [dim]Skip if you only want YouTube / website analysis.[/]")
-    if not typer.confirm("Set up Telegram", default=False):
+    from unread.util.prompt import ask_text, confirm
+
+    console.print("\n[bold]Telegram login (optional).[/]")
+    console.print(
+        "[grey70]Needed to analyze chats / channels / groups. Skip if you only want "
+        "YouTube, web pages, or local files.[/]\n"
+    )
+    if not confirm("Set up Telegram login now?", default=False):
         console.print(
-            "[dim]Skipped — Telegram-based commands (describe, dump, sync, …) "
-            "won't be available. Re-run `unread tg init` to add credentials later.[/]"
+            "[grey70]Skipped — Telegram-based commands (describe, dump, sync, …) "
+            "won't be available. Re-run `unread init` (or `unread tg init`) to add credentials later.[/]"
         )
         return False
 
-    api_id_raw = ""
     api_id = 0
     while not api_id:
-        api_id_raw = typer.prompt(
+        raw = ask_text(
             "Telegram api_id (https://my.telegram.org → API development tools)",
             default="",
-            show_default=False,
-        ).strip()
+        )
+        if raw is None:
+            console.print("[grey70]Cancelled — Telegram credentials not saved.[/]")
+            return False
+        api_id_raw = raw.strip()
         if not api_id_raw:
-            console.print("[yellow]api_id is required — try again, or Ctrl-C to bail.[/]")
+            console.print("[yellow]api_id is required — try again, or Esc to bail.[/]")
             continue
         try:
             api_id = int(api_id_raw)
@@ -340,9 +414,13 @@ async def _run_telegram_creds_step() -> bool:
 
     api_hash = ""
     while not api_hash:
-        api_hash = typer.prompt("Telegram api_hash", default="", show_default=False).strip()
+        raw = ask_text("Telegram api_hash", default="", password=True)
+        if raw is None:
+            console.print("[grey70]Cancelled — Telegram credentials not saved.[/]")
+            return False
+        api_hash = raw.strip()
         if not api_hash:
-            console.print("[yellow]api_hash is required — try again, or Ctrl-C to bail.[/]")
+            console.print("[yellow]api_hash is required — try again, or Esc to bail.[/]")
 
     settings = get_settings()
     async with open_repo(settings.storage.data_path) as repo:
@@ -353,18 +431,23 @@ async def _run_telegram_creds_step() -> bool:
 
 async def _run_telethon_auth_step(settings) -> None:  # type: ignore[no-untyped-def]
     """Run Telethon's interactive login if the session isn't already authorized."""
+    from unread.util.prompt import ask_text as _ask_text
+
     client = build_client(settings)
 
     def _phone() -> str:
-        return typer.prompt(_t("init_phone_prompt"))
+        # Telethon expects a non-empty string; Esc returns None which we
+        # surface as an empty string so Telethon's own validation kicks
+        # in and re-asks.
+        return _ask_text(_t("init_phone_prompt")) or ""
 
     def _code() -> str:
-        return typer.prompt(_t("init_login_code_prompt"))
+        return _ask_text(_t("init_login_code_prompt")) or ""
 
     def _password() -> str:
         # Telethon retries this callback on PasswordHashInvalidError,
         # so a wrong 2FA password only reprompts the 2FA step.
-        return typer.prompt(_t("init_2fa_prompt"), hide_input=True)
+        return _ask_text(_t("init_2fa_prompt"), password=True) or ""
 
     await client.connect()
     try:
@@ -403,6 +486,15 @@ async def cmd_doctor() -> None:
 
     console.print(f"[bold]{_t('tg_doctor_banner')}[/]")
 
+    # Header: version + Python so a pasted bug report carries enough
+    # context to pin down regressions.
+    import platform as _platform
+
+    from unread import __version__ as _unread_version
+
+    _line(ok, "unread version", _unread_version)
+    _line(ok, "python", f"{_platform.python_version()} on {_platform.platform()}")
+
     # 1. Config files (resolved under ~/.unread/, override via UNREAD_HOME / UNREAD_CONFIG_PATH)
     from unread.core.paths import default_config_path, default_env_path, unread_home
 
@@ -430,9 +522,21 @@ async def cmd_doctor() -> None:
             f"found {cwd}/storage or {cwd}/.env — run `unread migrate` to move into {home}",
         )
 
+    # Install-pointer drift — `~/.unread/install.toml` says the data
+    # lives in a directory that's no longer there. Without this hint
+    # the user gets a fresh, empty DB on next run.
+    from unread.core.paths import install_pointer_drift
+
+    has_drift, drift_hint = install_pointer_drift()
+    if has_drift:
+        _line(fail, "install-pointer drift", drift_hint)
+
     # 2. Secrets resolved
     if settings.telegram.api_id and settings.telegram.api_hash:
-        _line(ok, "telegram credentials", f"api_id={settings.telegram.api_id}")
+        # Don't print the api_id value — it's a stable account fingerprint
+        # and shows up in pasted bug reports / screenshots. The presence
+        # check is enough for triage.
+        _line(ok, "telegram credentials", "api_id + api_hash present")
     else:
         _line(fail, "telegram credentials missing", "set TELEGRAM_API_ID / TELEGRAM_API_HASH in .env")
     if settings.openai.api_key:
@@ -491,15 +595,76 @@ async def cmd_doctor() -> None:
                 row = await cur.fetchone()
                 await cur.close()
                 verdict = (row["integrity_check"] if row else "?") if row is not None else "?"
+                # Cache-size advisory — daily users accumulate hundreds of
+                # MB in `analysis_cache` over months. We don't auto-trim
+                # here (no surprise destructive ops) but surface a hint
+                # the moment it becomes worth running `unread cache trim`.
+                cache_summary = await repo.cache_stats()
             size_mb = db_path.stat().st_size / 1024**2
             if verdict == "ok":
                 _line(ok, "DB integrity", f"{db_path} ({size_mb:.1f} MB)")
             else:
                 _line(fail, "DB integrity check failed", str(verdict)[:200])
+            cache_rows = int(cache_summary.get("rows") or 0)
+            cache_bytes = int(cache_summary.get("result_bytes") or 0)
+            if cache_bytes > 100 * 1024 * 1024:  # 100 MB
+                _line(
+                    warn,
+                    "analysis cache large",
+                    f"{cache_rows} rows / {cache_bytes / 1024**2:.0f} MB — "
+                    "consider `unread cache trim --keep-days 30`",
+                )
+            elif cache_rows > 0:
+                _line(ok, "analysis cache size", f"{cache_rows} rows / {cache_bytes / 1024**2:.1f} MB")
         except Exception as e:
             _line(fail, "DB open failed", str(e)[:200])
     else:
         _line(warn, "DB not yet created", str(db_path))
+
+    # 5b. Write permissions on storage dir. Catches the case where the
+    # user's `~/.unread/storage/` ended up read-only (sudo install,
+    # restored from a backup with wrong perms, etc) — every write would
+    # silently fail with the same opaque "attempt to write a readonly
+    # database" message, so flag it up front.
+    storage_dir = settings.storage.data_path.parent
+    if storage_dir.exists():
+        sentinel = storage_dir / ".doctor_write_test"
+        try:
+            sentinel.write_bytes(b"")
+            sentinel.unlink()
+            _line(ok, "storage writable", str(storage_dir))
+        except OSError as e:
+            _line(
+                fail,
+                "storage not writable",
+                f"{storage_dir} — {e.strerror or str(e)[:80]}; chmod / chown the directory",
+            )
+
+    # 5c. Storage permissions hardening. The DB is unencrypted; the only
+    # protection against another user on the same workstation reading
+    # secrets is filesystem mode. `ensure_unread_home()` chmods 0o700 on
+    # init, but pre-existing installs may carry 0o755. Skip on Windows
+    # (POSIX mode bits don't translate cleanly).
+    if os.name == "posix" and storage_dir.exists():
+        try:
+            mode = storage_dir.stat().st_mode & 0o777
+            db_mode = db_path.stat().st_mode & 0o777 if db_path.exists() else None
+            problems: list[str] = []
+            if mode & 0o077:  # group or other have any access
+                problems.append(f"dir mode {oct(mode)} — expect 0o700")
+            if db_mode is not None and (db_mode & 0o077):
+                problems.append(f"data.sqlite mode {oct(db_mode)} — expect 0o600")
+            if problems:
+                fix_cmd = f"chmod 700 {storage_dir} && chmod 600 {db_path}"
+                _line(
+                    warn,
+                    "storage permissions overpermissive",
+                    "; ".join(problems) + f" — fix: {fix_cmd}",
+                )
+            else:
+                _line(ok, "storage permissions", "0o700 / 0o600 (private)")
+        except OSError as e:
+            _line(warn, "storage permission check failed", str(e)[:100])
 
     # 6. Telegram session liveness
     session_path = settings.telegram.session_path
@@ -525,7 +690,9 @@ async def cmd_doctor() -> None:
         except Exception as e:
             _line(warn, "Telegram session check failed", str(e)[:200])
 
-    # 7. OpenAI key liveness
+    # 7. OpenAI key liveness — special-cased because OpenAI also backs
+    # Whisper / vision / embeddings even when the chat provider is
+    # something else.
     if settings.openai.api_key:
         try:
             from openai import AsyncOpenAI
@@ -538,6 +705,24 @@ async def cmd_doctor() -> None:
             _line(ok, "OpenAI API reachable")
         except Exception as e:
             _line(warn, "OpenAI API check failed", str(e)[:200])
+
+    # 7b. Active chat provider reachability. If the user picked
+    # Anthropic / Google / OpenRouter / local, ping that endpoint too.
+    # We don't burn an LLM call — just instantiate the provider, which
+    # validates the key + base URL via the SDK constructor.
+    chat_provider = (settings.ai.provider or "openai").lower()
+    if chat_provider != "openai":
+        try:
+            from unread.ai.providers import make_chat_provider
+
+            make_chat_provider(settings)
+            _line(ok, "chat provider configured", chat_provider)
+        except Exception as e:
+            _line(
+                fail,
+                f"chat provider {chat_provider!r} not configured",
+                str(e)[:200],
+            )
 
     # 8. Presets
     try:
@@ -623,7 +808,7 @@ async def cmd_dialogs(search: str | None, kind: str | None, limit: int) -> None:
             if shown >= limit:
                 break
         console.print(table)
-        console.print(f"[dim]{_tf('tg_n_rows', n=shown)}[/]")
+        console.print(f"[grey70]{_tf('tg_n_rows', n=shown)}[/]")
 
 
 # ------------------------------------------------------------------- describe
@@ -680,7 +865,7 @@ async def _describe_overview(
 ) -> None:
     from unread.tg.folders import chat_folder_index
 
-    console.print(f"[dim]{_t('tg_listing_dialogs')}[/]")
+    console.print(f"[grey70]{_t('tg_listing_dialogs')}[/]")
     folder_idx = await chat_folder_index(client)
     rows: list[tuple] = []
     async for d in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
@@ -745,8 +930,8 @@ async def _describe_overview(
     if not show_all:
         hint_parts.append(_t("tg_dialogs_default_filter"))
         hint_parts.append(_t("tg_dialogs_pass_all"))
-    console.print(f"[dim]{'. '.join(hint_parts)}.[/]")
-    console.print(f"[dim]{_t('tg_describe_hint')}[/]")
+    console.print(f"[grey70]{'. '.join(hint_parts)}.[/]")
+    console.print(f"[grey70]{_t('tg_describe_hint')}[/]")
 
 
 async def _describe_one(client, repo, ref: str) -> None:
@@ -760,13 +945,13 @@ async def _describe_one(client, repo, ref: str) -> None:
 
     # Header
     badge = f"[bold]{resolved.title or chat_id}[/]"
-    console.print(f"\n{badge} [dim]{_tf('tg_describe_id_kind', chat_id=chat_id, kind=kind)}[/]")
+    console.print(f"\n{badge} [grey70]{_tf('tg_describe_id_kind', chat_id=chat_id, kind=kind)}[/]")
 
     # --- Left/right-ish labeled properties
     def _row(label: str, value: str | None, *, dim_label: bool = True) -> None:
         if value is None or value == "":
             return
-        label_fmt = f"[dim]{label:>14}:[/]" if dim_label else f"{label:>14}:"
+        label_fmt = f"[grey70]{label:>14}:[/]" if dim_label else f"{label:>14}:"
         console.print(f"  {label_fmt} {value}")
 
     if resolved.username:
@@ -884,7 +1069,7 @@ async def _describe_one(client, repo, ref: str) -> None:
             for row in top:
                 console.print(f"  {row['sender_name']} — {row['count']}")
     else:
-        console.print(f"\n[dim]{_t('tg_no_messages_local')}[/]")
+        console.print(f"\n[grey70]{_t('tg_no_messages_local')}[/]")
 
 
 async def _fetch_last_msg_date(client, chat_id: int):
@@ -926,7 +1111,7 @@ async def cmd_topics(chat_ref: str) -> None:
         for x in topics:
             t.add_row(str(x.topic_id), x.title, "yes" if x.closed else "", "yes" if x.pinned else "")
         console.print(t)
-        console.print(f"[dim]{_tf('tg_n_topics', n=len(topics))}[/]")
+        console.print(f"[grey70]{_tf('tg_n_topics', n=len(topics))}[/]")
 
 
 # -------------------------------------------------------------------- resolve
@@ -989,8 +1174,6 @@ async def cmd_chats_add(
         # picking, ask the kind-specific questions inline so a user with
         # no flags ends up with a sensible subscription.
         if ref is None:
-            import questionary
-
             from unread.interactive import _pick_chat as _picker
 
             # Pre-load the set of already-subscribed chat ids so the
@@ -1005,7 +1188,7 @@ async def cmd_chats_add(
                 subscribed_ids=subscribed_ids,
             )
             if picked is None or not isinstance(picked, dict):
-                console.print(f"[dim]{_t('cancelled')}[/]")
+                console.print(f"[grey70]{_t('cancelled')}[/]")
                 return
             ref = str(picked["chat_id"])
             if int(picked["chat_id"]) in subscribed_ids:
@@ -1015,11 +1198,10 @@ async def cmd_chats_add(
                     "you bolt on extras (e.g. comments / topics) without removing the existing sub."
                 )
             # Forum / channel toggles get asked here unless the CLI
-            # already set them. Use `questionary.confirm` (prompt_toolkit
-            # under the hood) instead of `typer.confirm` — typer's
-            # blocking input() leaves the terminal in raw mode after a
-            # prior questionary picker, so Enter shows up as `^M` and
-            # never submits.
+            # already set them. Routed through `prompt.confirm` so the
+            # keys / styling match every other interactive screen.
+            from unread.util.prompt import confirm as _confirm
+
             kind = picked.get("kind")
             if kind == "channel" and not with_comments:
                 # Brief explainer so the choice is informed: comments
@@ -1029,24 +1211,20 @@ async def cmd_chats_add(
                 # into the same report as the channel — one analysis per
                 # channel, not two — see `--with-comments` semantics.
                 console.print(
-                    "[dim]→ Channels store posts; user comments live in a "
+                    "[grey70]→ Channels store posts; user comments live in a "
                     "linked discussion group (a separate Telegram chat). "
                     "Saying yes adds a sibling subscription for that group; "
                     "`unread chats run` will merge channel posts + comments "
                     "into ONE report (not two).[/]"
                 )
-                with_comments = bool(
-                    await questionary.confirm(
-                        "Also subscribe to this channel's linked discussion group (comments)?",
-                        default=True,
-                    ).ask_async()
+                with_comments = _confirm(
+                    "Also subscribe to this channel's linked discussion group (comments)?",
+                    default=True,
                 )
             if kind == "forum" and not all_topics and thread is None:
-                all_topics = bool(
-                    await questionary.confirm(
-                        "Forum: subscribe to every topic (recommended)?",
-                        default=True,
-                    ).ask_async()
+                all_topics = _confirm(
+                    "Forum: subscribe to every topic (recommended)?",
+                    default=True,
                 )
             # `unread chats run` settings: preset, period, enrich, mark_read.
             # These get persisted on the subscription so `unread chats run`
@@ -1067,7 +1245,7 @@ async def cmd_chats_add(
             )
 
             def _bail() -> None:
-                console.print(f"[dim]{_t('cancelled')}[/]")
+                console.print(f"[grey70]{_t('cancelled')}[/]")
 
             if preset is None:
                 picked_preset = await _pick_preset()
@@ -1110,25 +1288,32 @@ async def cmd_chats_add(
             # Resolution happens at run time via tg/resolver, so any
             # form `--post-to` accepts works here too.
             if post_to is None:
-                post_choice = await questionary.select(
+                from unread.util.prompt import Choice as _PromptChoice
+                from unread.util.prompt import ask_text as _ask_text
+                from unread.util.prompt import select as _select
+
+                post_choice = _select(
                     "After analyze, post the report to a Telegram chat?",
                     choices=[
-                        questionary.Choice("No — save to reports/ only", value="no"),
-                        questionary.Choice("Saved Messages (recommended for personal digests)", value="me"),
-                        questionary.Choice("Custom chat / channel…", value="custom"),
+                        _PromptChoice(value="no", label="No — save to reports/ only"),
+                        _PromptChoice(
+                            value="me",
+                            label="Saved Messages (recommended for personal digests)",
+                        ),
+                        _PromptChoice(value="custom", label="Custom chat / channel…"),
                     ],
-                    default="no",
-                ).ask_async()
+                    default_value="no",
+                )
                 if post_choice is None:
                     _bail()
                     return
                 if post_choice == "me":
                     post_to = "me"
                 elif post_choice == "custom":
-                    post_ref = await questionary.text(
+                    post_ref = _ask_text(
                         "Post-to ref (@channel, t.me link, numeric id, or fuzzy title — blank to skip)",
                         default="",
-                    ).ask_async()
+                    )
                     if post_ref is None:
                         _bail()
                         return
@@ -1247,7 +1432,7 @@ async def cmd_chats_add(
         # Note --last: we apply it by pulling last N messages immediately at next sync;
         # we record start_from_msg_id = (top_msg_id - last) after the first sync pass.
         if last is not None:
-            console.print(f"[dim]{_tf('tg_last_take_effect', value=last)}[/]")
+            console.print(f"[grey70]{_tf('tg_last_take_effect', value=last)}[/]")
             _hint_last_sync(subs_to_add, last)
 
 
@@ -1471,9 +1656,7 @@ async def cmd_chats_manage() -> None:
     until `← Done` / Ctrl-C / ESC. The only `chats` subcommands today
     are `add`, `manage`, and `run`.
     """
-    import questionary
-
-    from unread.interactive import LIST_STYLE, _expand_printable_for_search
+    from unread.interactive import _expand_printable_for_search
 
     _expand_printable_for_search()
 
@@ -1496,27 +1679,24 @@ async def cmd_chats_manage() -> None:
                 comments_bit = f"  {comments}" if comments and comments != "—" else ""
                 return f"{state}  {title}  ({kind_bit}){comments_bit}"
 
-            # Sentinel for the "← Done" choice. We can't use `value=None`
-            # — questionary then falls back to using the choice title as
-            # the picked value, which would make the unpack below explode
-            # (`too many values to unpack`). A unique object survives the
-            # round-trip cleanly.
-            _DONE = object()
-            choices = [questionary.Choice(_label(s), value=(int(s.chat_id), int(s.thread_id))) for s in subs]
-            choices.append(questionary.Choice(_t("tg_chats_done_label"), value=_DONE))
+            # Encode the (chat_id, thread_id) tuple as a `cid:tid` string
+            # so it survives the prompt.select round-trip (which returns
+            # strings only). `__done__` sentinel for the "← Done" row.
+            from unread.util.prompt import Choice as _PromptChoice
+            from unread.util.prompt import select as _select
 
-            picked = await questionary.select(
-                _tf("tg_chats_manage_q", n=len(subs)),
-                choices=choices,
-                style=LIST_STYLE,
-                use_search_filter=True,
-                use_jk_keys=False,
-                instruction=_t("wiz_filter_instruction"),
-            ).ask_async()
-            # Ctrl-C / ESC → questionary returns None. "← Done" → _DONE.
-            if picked is None or picked is _DONE:
+            _DONE = "__done__"
+            mgr_choices = [
+                _PromptChoice(value=f"{int(s.chat_id)}:{int(s.thread_id)}", label=_label(s)) for s in subs
+            ]
+            mgr_choices.append(_PromptChoice(value=_DONE, label=_t("tg_chats_done_label")))
+
+            picked = _select(_tf("tg_chats_manage_q", n=len(subs)), choices=mgr_choices)
+            if picked is None or picked == _DONE:
                 return
-            chat_id, thread_id = picked
+            chat_id_s, thread_id_s = picked.split(":", 1)
+            chat_id = int(chat_id_s)
+            thread_id = int(thread_id_s)
             sub = await repo.get_subscription(chat_id, thread_id)
             if not sub:
                 console.print(f"[red]{_t('tg_sub_gone')}[/] chat={chat_id} thread={thread_id}")
@@ -1535,16 +1715,15 @@ async def cmd_chats_manage() -> None:
             # `value="back"` (not None) for the back row — same questionary
             # gotcha as above.
             toggle_label = _t("tg_sub_action_disable") if sub.enabled else _t("tg_sub_action_enable")
-            action = await questionary.select(
+            action = _select(
                 _tf("tg_sub_what_next_q", title=sub.title or sub.chat_id),
                 choices=[
-                    questionary.Choice(toggle_label, value="toggle"),
-                    questionary.Choice(_t("tg_sub_action_remove_keep"), value="remove_keep"),
-                    questionary.Choice(_t("tg_sub_action_remove_purge"), value="remove_purge"),
-                    questionary.Choice(_t("tg_sub_back_label"), value="back"),
+                    _PromptChoice(value="toggle", label=toggle_label),
+                    _PromptChoice(value="remove_keep", label=_t("tg_sub_action_remove_keep")),
+                    _PromptChoice(value="remove_purge", label=_t("tg_sub_action_remove_purge")),
+                    _PromptChoice(value="back", label=_t("tg_sub_back_label")),
                 ],
-                style=LIST_STYLE,
-            ).ask_async()
+            )
             if action is None or action == "back":
                 continue
             if action == "toggle":
@@ -1555,14 +1734,14 @@ async def cmd_chats_manage() -> None:
                 purge = action == "remove_purge"
                 # Confirmation guard for purge — irreversible.
                 if purge:
-                    confirmed = bool(
-                        await questionary.confirm(
-                            _tf("tg_sub_purge_confirm_q", chat_id=chat_id),
-                            default=False,
-                        ).ask_async()
+                    from unread.util.prompt import confirm as _confirm
+
+                    confirmed = _confirm(
+                        _tf("tg_sub_purge_confirm_q", chat_id=chat_id),
+                        default=False,
                     )
                     if not confirmed:
-                        console.print(f"[dim]{_t('tg_sub_purge_skipped')}[/]")
+                        console.print(f"[grey70]{_t('tg_sub_purge_skipped')}[/]")
                         continue
                 await repo.remove_subscription(chat_id, thread_id, purge_messages=purge)
                 console.print(

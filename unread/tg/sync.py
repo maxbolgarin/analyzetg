@@ -342,7 +342,7 @@ async def backfill(
     _console = Console()
     columns: list = [
         SpinnerColumn(),
-        TextColumn("[dim]{task.description}[/]"),
+        TextColumn("[grey70]{task.description}[/]"),
     ]
     if estimated_total:
         columns.extend([BarColumn(), MofNCompleteColumn()])

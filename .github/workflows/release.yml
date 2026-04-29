@@ -47,3 +47,47 @@ jobs:
           else
             echo "new_release_published=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Setup uv (PyPI publish)
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync version into package + pyproject
+        if: steps.semantic.outputs.new_release_published == 'true'
+        env:
+          NEW_VERSION: ${{ steps.semantic.outputs.new_release_version }}
+        run: |
+          # semantic-release tags the commit but doesn't write the new
+          # version into pyproject.toml / __init__.py. We do that here so
+          # the wheel published below carries the correct number.
+          python - <<'PY'
+          import os, re, pathlib
+          version = os.environ["NEW_VERSION"]
+          for path, pattern in [
+              ("pyproject.toml", r'^version\s*=\s*"[^"]+"'),
+              ("unread/__init__.py", r'^__version__\s*=\s*"[^"]+"'),
+          ]:
+              p = pathlib.Path(path)
+              text = p.read_text()
+              new_text = re.sub(
+                  pattern,
+                  f'version = "{version}"' if path.endswith(".toml") else f'__version__ = "{version}"',
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              p.write_text(new_text)
+              print(f"updated {path} -> {version}")
+          PY
+
+      - name: Build wheel + sdist
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: uv build
+
+      - name: Publish to PyPI
+        if: steps.semantic.outputs.new_release_published == 'true'
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish

@@ -9,7 +9,9 @@ would otherwise skip.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -19,6 +21,9 @@ from typing import Any
 import aiosqlite
 
 from unread.models import Message, Subscription, SyncState
+from unread.util.logging import get_logger
+
+log = get_logger(__name__)
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -72,11 +77,17 @@ class Repo:
         `CREATE TABLE IF NOT EXISTS` handles fresh DBs, but does not add
         columns to existing tables. Run a tiny additive compatibility pass
         first so indexes and repo methods can rely on the current columns.
+        After applying, run a drift check that warns when an existing
+        table is missing columns declared in schema.sql but not listed
+        in `_apply_additive_migrations` — that combination silently
+        breaks queries, and the warning gives the maintainer the exact
+        ALTER they need to add.
         """
         await self._apply_additive_migrations()
         sql = SCHEMA_PATH.read_text(encoding="utf-8")
         await self._conn.executescript(sql)
         await self._conn.commit()
+        await self._warn_on_schema_drift(sql)
 
     async def _table_columns(self, table: str) -> set[str]:
         cur = await self._conn.execute(f"PRAGMA table_info({table})")
@@ -170,6 +181,112 @@ class Repo:
         )
         await self._migrate_legacy_media_transcripts()
         await self._conn.commit()
+
+    # `CREATE TABLE foo (...);` block — captures table name and the
+    # column list. We tolerate `IF NOT EXISTS` and surrounding whitespace.
+    # This regex is intentionally simple: schema.sql is a hand-written
+    # file we control, not arbitrary user SQL, so we don't need to
+    # handle every CREATE-statement variant SQLite accepts.
+    _CREATE_TABLE_RE = re.compile(
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*?)\);",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @staticmethod
+    def _parse_schema_columns(sql: str) -> dict[str, set[str]]:
+        """Extract `{table_name: {column_names…}}` from `schema.sql` text.
+
+        Skips `PRIMARY KEY (...)` and other constraint clauses by only
+        treating top-level entries whose first whitespace-split token
+        looks like a column name (alphanumeric + underscore, not a
+        SQL keyword).
+        """
+        # Reserved tokens that show up as the first word of constraint
+        # clauses inside `CREATE TABLE (...)`. Anything else is treated
+        # as a column declaration.
+        constraint_tokens = {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}
+        out: dict[str, set[str]] = {}
+        for m in Repo._CREATE_TABLE_RE.finditer(sql):
+            table = m.group(1)
+            # Strip line comments BEFORE the comma split — comments can
+            # contain commas (e.g. `-- JSON [[a, "b"], …]`) which would
+            # otherwise be treated as column separators and yield
+            # phantom "columns" like `"text"]` or `…];`.
+            body = re.sub(r"--[^\n]*", "", m.group(2))
+            cols: set[str] = set()
+            depth = 0
+            buf: list[str] = []
+            entries: list[str] = []
+            # Split on top-level commas only — `column REAL DEFAULT (a, b)`
+            # would otherwise blow up. depth tracks nested parentheses.
+            for ch in body:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                if ch == "," and depth == 0:
+                    entries.append("".join(buf))
+                    buf = []
+                else:
+                    buf.append(ch)
+            if buf:
+                entries.append("".join(buf))
+            for entry in entries:
+                cleaned = entry.strip()
+                if not cleaned:
+                    continue
+                first = cleaned.split(None, 1)[0].strip('"')
+                if first.upper() in constraint_tokens:
+                    continue
+                cols.add(first)
+            if cols:
+                out[table] = cols
+        return out
+
+    async def _warn_on_schema_drift(self, schema_sql: str) -> None:
+        """Compare runtime PRAGMA columns against schema.sql declarations.
+
+        Catches the case where `schema.sql` declares a new column on an
+        existing table but the maintainer forgot to add the matching
+        `ALTER TABLE` to ``_apply_additive_migrations``. SQLite's
+        ``CREATE TABLE IF NOT EXISTS`` does NOT add columns to a table
+        that already exists, so the new column never materializes and
+        any query referencing it silently breaks.
+
+        We only WARN (not auto-ALTER): the project deliberately ships
+        without a migration runner, and a destructive-by-default fixup
+        would surprise users. The warning carries the exact ALTER the
+        maintainer needs to add.
+        """
+        declared = self._parse_schema_columns(schema_sql)
+        for table, expected_cols in declared.items():
+            try:
+                actual = await self._table_columns(table)
+            except Exception:
+                # Table introspection failed (locked DB, etc) — drift
+                # detection is best-effort, never blocks startup.
+                continue
+            if not actual:
+                # Table not yet created — that's normal on a fresh DB
+                # before `executescript` runs the CREATE statements. By
+                # the time we're called, executescript has already run,
+                # so an empty PRAGMA likely means a virtual / FTS table
+                # that PRAGMA can't introspect cleanly. Skip.
+                continue
+            missing = expected_cols - actual
+            if missing:
+                log.warning(
+                    "db.schema_drift",
+                    table=table,
+                    missing=sorted(missing),
+                    hint=(
+                        f"schema.sql declares column(s) {sorted(missing)} on "
+                        f"`{table}` but the existing table is missing them. "
+                        "Add a matching `_add_missing_columns(...)` line to "
+                        "`Repo._apply_additive_migrations` so existing DBs "
+                        "pick up the change."
+                    ),
+                )
 
     # ------------------------------------------------------------------ chats
 
@@ -1624,6 +1741,49 @@ class Repo:
         cost_usd: float | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
+        """Insert a usage row; shielded against task cancellation.
+
+        By the time a caller invokes this, the LLM call has already
+        cost real money. A Ctrl-C between the API response and the DB
+        commit would otherwise abort the INSERT and the spend would
+        never appear in `unread stats`. We shield the INSERT so it
+        still runs even if the caller is being torn down, then
+        re-raise the cancellation so the rest of the pipeline unwinds.
+        """
+        coro = self._do_log_usage(
+            kind=kind,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached_tokens,
+            completion_tokens=completion_tokens,
+            audio_seconds=audio_seconds,
+            cost_usd=cost_usd,
+            context=context,
+        )
+        task = asyncio.ensure_future(coro)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Inner write is still in flight. Wait briefly for it to
+            # land, then bubble up so callers stop on schedule.
+            import contextlib as _cl
+
+            with _cl.suppress(TimeoutError, Exception):
+                await asyncio.wait_for(task, timeout=2.0)
+            raise
+
+    async def _do_log_usage(
+        self,
+        *,
+        kind: str,
+        model: str,
+        prompt_tokens: int | None,
+        cached_tokens: int | None,
+        completion_tokens: int | None,
+        audio_seconds: int | None,
+        cost_usd: float | None,
+        context: dict[str, Any] | None,
+    ) -> None:
         await self._conn.execute(
             """
             INSERT INTO usage_log(kind, model, prompt_tokens, cached_tokens, completion_tokens,
@@ -1747,66 +1907,20 @@ async def open_repo(path: Path | str) -> AsyncIterator[Repo]:
         await repo.close()
 
 
-# Allow-list of `secrets` table keys. Anything outside this set is
-# rejected on write so a typo can't silently grow the secrets schema,
-# and ignored on read so a manual sqlite INSERT can't surface as a
-# leaked credential. Keep in sync with the wizard in `tg/commands.py`
-# and the read overlay in `secrets.py`.
-_SECRET_KEYS: frozenset[str] = frozenset(
-    {
-        "telegram.api_id",
-        "telegram.api_hash",
-        # Per-provider chat keys. Each provider (selected via
-        # `settings.ai.provider`) reads its own row; OpenAI's key
-        # additionally backs Whisper / embeddings / vision regardless
-        # of which provider drives chat.
-        "openai.api_key",
-        "openrouter.api_key",
-        "anthropic.api_key",
-        "google.api_key",
-    }
-)
-
-
-# Allow-list of `app_settings` keys that may overlay the config singleton.
-# Any other rows are stored but ignored — keeps the surface tight.
+# Allow-list of `secrets` and `app_settings` keys. Defined once in
+# `unread.db._keys` so the wizard, the per-connect overlay, the sync
+# bootstrap reader, and the legacy fallback all see the same set.
 #
-# To add a new key:
-#   1. Append it here.
+# To add a new override key:
+#   1. Append it to `_keys.OVERRIDE_KEYS`.
 #   2. Add a branch in both `apply_db_overrides_sync` (sync, used at CLI
 #      bootstrap) and `_apply_db_overrides` (async, used per-`open_repo`).
 #      Mind the value type — bool / int / str — and any sentinel rules
 #      (e.g. empty string for "autodetect").
 #   3. Surface it in `unread/settings/commands.py:_SETTING_DEFS` so
 #      the interactive editor can show + edit it.
-_OVERRIDE_KEYS = (
-    # Languages
-    "locale.language",
-    "locale.content_language",
-    "openai.audio_language",
-    # Models
-    "openai.chat_model_default",
-    "openai.filter_model_default",
-    "openai.audio_model_default",
-    "enrich.vision_model",
-    # Chat-provider routing (multi-provider support)
-    "ai.provider",
-    "ai.base_url",
-    "ai.chat_model",
-    "ai.filter_model",
-    "local.base_url",
-    # Enrichment defaults (booleans persisted as "0"/"1")
-    "enrich.voice",
-    "enrich.videonote",
-    "enrich.video",
-    "enrich.image",
-    "enrich.doc",
-    "enrich.link",
-    # Analysis tuning
-    "analyze.high_impact_reactions",
-    "analyze.dedupe_forwards",
-    "analyze.min_msg_chars",
-)
+from unread.db._keys import OVERRIDE_KEYS as _OVERRIDE_KEYS  # noqa: E402
+from unread.db._keys import SECRET_KEYS as _SECRET_KEYS  # noqa: E402
 
 
 def _coerce_bool(raw: str) -> bool | None:
@@ -1894,6 +2008,12 @@ def _apply_one_override(settings, key: str, value: str) -> None:
         if n is None or n < 0:
             return
         settings.analyze.min_msg_chars = n
+        return
+    if key == "analyze.plain_citations":
+        b = _coerce_bool(value)
+        if b is None:
+            return
+        settings.analyze.plain_citations = b
         return
     # AI provider routing — strings, empty value resets to default.
     if key == "ai.provider":

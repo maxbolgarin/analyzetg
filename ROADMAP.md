@@ -142,6 +142,21 @@ default for `audio_language` unless the user overrides.
 
 ## Tier 4 — small UX polish (~1h each)
 
+### Localized `--help` strings  M
+
+`cli.py` has ~167 `help="..."` literals on Typer options. They render in
+English even when `locale.language=ru`. Replace with `_t("flag_help_*")`
+calls and add the matching keys to `i18n.py`. Note: `apply_db_overrides_sync`
+already runs before decorators (CLAUDE.md), so the locale is correct at
+import-time — no runtime help re-rendering needed. Mechanical churn but
+high reach for non-English users.
+
+### Localized questionary wizard prompts  S
+
+`unread/interactive.py` already imports `i18n_t` for some strings, but the
+questionary picker headers / "Pick a chat" / "← Back" labels still leak
+English. Wrap each in `_t()` and add Russian translations.
+
 ### Mark-read undo  S
 
 Store the previous `read_inbox_max_id` on the `chats` row before
@@ -185,6 +200,25 @@ returns a typed result. A FastAPI server is ~200 lines on top.
 ---
 
 ## Architectural cleanup (slow boring work, real payoff)
+
+### Remove the legacy `session.sqlite::unread_secrets` fallback  S
+
+The previous release stored credentials in a custom table inside the
+Telethon session DB. The current release writes to
+`data.sqlite::secrets` and falls back to the legacy table on read for
+one release of back-compat. `secrets.read_secrets` already emits a
+once-per-process WARN when the fallback fires.
+
+Do once any user running an upgraded install has had a chance to re-
+run `unread tg init` (or two minor releases out, whichever comes
+first):
+
+- Drop `_read_legacy_session_secrets` + `_resolve_session_db` in
+  `unread/secrets.py`.
+- Remove the deprecation flag (`_LEGACY_FALLBACK_WARNED`) and shrink
+  `read_secrets` back to one DB call.
+- Note in the release blurb: users who never ran the new wizard have
+  to re-enter `unread tg init`.
 
 ### Move wizard out of `interactive.py`  M
 

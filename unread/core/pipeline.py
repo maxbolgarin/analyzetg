@@ -57,12 +57,12 @@ async def _determine_start(
     if thread_id:
         console.print(f"[red]{_t('per_topic_unread_unsupported')}[/]")
         raise typer.Exit(2)
-    console.print(f"[dim]{_t('reading_unread_marker')}[/]")
+    console.print(f"[grey70]{_t('reading_unread_marker')}[/]")
     unread_count, read_marker = await get_unread_state(client, chat_id)
     if unread_count == 0:
         console.print(f"[yellow]{_tf('no_unread_in_chat', chat_id=chat_id)}[/]")
         raise typer.Exit(0)
-    console.print(f"[dim]{_tf('unread_after_marker', n=unread_count, marker=read_marker)}[/]")
+    console.print(f"[grey70]{_tf('unread_after_marker', n=unread_count, marker=read_marker)}[/]")
     return read_marker
 
 
@@ -96,7 +96,7 @@ async def _pull_history(
         )
         effective = floor if force_from_start else max(floor, local_max or 0)
         if local_max and local_max > floor:
-            console.print(f"[dim]{_tf('have_up_to_local', msg_id=local_max)}[/]")
+            console.print(f"[grey70]{_tf('have_up_to_local', msg_id=local_max)}[/]")
         await backfill(
             client,
             repo,
@@ -108,7 +108,7 @@ async def _pull_history(
         if full_history and start_msg_id is None:
             local_min = await repo.get_min_msg_id(chat_id, thread_param)
             if local_min and local_min > 1:
-                console.print(f"[dim]{_tf('have_from_local', msg_id=local_min)}[/]")
+                console.print(f"[grey70]{_tf('have_from_local', msg_id=local_min)}[/]")
                 await backfill(
                     client,
                     repo,
@@ -118,7 +118,7 @@ async def _pull_history(
                     direction="back",
                 )
             elif local_min is None:
-                console.print(f"[dim]{_t('no_local_msgs_full_history')}[/]")
+                console.print(f"[grey70]{_t('no_local_msgs_full_history')}[/]")
                 await backfill(
                     client,
                     repo,
@@ -189,7 +189,7 @@ def _build_mark_read_fn(
                     name=tname,
                     max_id=latest,
                 )
-        console.print(f"[dim]{_tf('marked_read_topics', marked=marked, total=len(topic_titles))}[/]")
+        console.print(f"[grey70]{_tf('marked_read_topics', marked=marked, total=len(topic_titles))}[/]")
         return marked
 
     async def _mark_single() -> int:
@@ -198,7 +198,7 @@ def _build_mark_read_fn(
             return 0
         ok = await mark_as_read(client, chat_id, latest, thread_id=thread_id)
         if ok:
-            console.print(f"[dim]{_tf('marked_read_up_to', msg_id=latest)}[/]")
+            console.print(f"[grey70]{_tf('marked_read_up_to', msg_id=latest)}[/]")
             return 1
         return 0
 
@@ -303,7 +303,7 @@ async def _pull_linked_comments(
             title = title or f"Comments {linked_id}"
 
     console.print(
-        f"[dim]{_tf('including_comments', title=title, linked_id=linked_id, since=com_since, until=com_until)}[/]"
+        f"[grey70]{_tf('including_comments', title=title, linked_id=linked_id, since=com_since, until=com_until)}[/]"
     )
 
     # Backfill the linked chat for the comment window. Use since_date
@@ -339,7 +339,7 @@ async def _pull_linked_comments(
         until=com_until,
     )
     if not comments_msgs:
-        console.print(f"[dim]{_t('no_comments_in_window')}[/]")
+        console.print(f"[grey70]{_t('no_comments_in_window')}[/]")
 
     meta: dict[str, Any] = {
         "chat_id": linked_id,
@@ -402,7 +402,7 @@ async def prepare_chat_run(
         time_window=(since_dt, until_dt),
     )
 
-    console.print(f"[dim]{_t('fetching_new_messages')}[/]")
+    console.print(f"[grey70]{_t('fetching_new_messages')}[/]")
     await _pull_history(
         client=client,
         repo=repo,
@@ -434,7 +434,9 @@ async def prepare_chat_run(
             or m.msg_id > topic_markers[m.thread_id]
         ]
         if before != len(msgs):
-            console.print(f"[dim]{_tf('filtered_per_topic', kept=len(msgs), dropped=before - len(msgs))}[/]")
+            console.print(
+                f"[grey70]{_tf('filtered_per_topic', kept=len(msgs), dropped=before - len(msgs))}[/]"
+            )
 
     # Channel + comments: pull the linked discussion group's messages
     # from the same date range and merge them in BEFORE enrichment, so
@@ -473,7 +475,7 @@ async def prepare_chat_run(
         )
         summary = enrich_stats.summary()
         if summary:
-            console.print(f"[dim]→ {summary}[/]")
+            console.print(f"[grey70]→ {summary}[/]")
 
     if not skip_filter:
         f_opts = FilterOpts(
@@ -551,7 +553,7 @@ async def prepare_chat_runs_per_topic(
 
     log = get_logger(__name__)
 
-    console.print(f"[dim]{_t('listing_forum_topics')}[/]")
+    console.print(f"[grey70]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     explicit_period = bool(since_dt or until_dt or from_msg_id is not None or full_history)
     targets = topics if explicit_period else [t for t in topics if t.unread_count > 0]
@@ -560,10 +562,12 @@ async def prepare_chat_runs_per_topic(
         return
 
     if not yes:
+        from unread.util.prompt import confirm as _confirm
+
         total_unread = sum(t.unread_count for t in targets)
         extra = "" if explicit_period else _tf("process_topics_with_unread", total=total_unread)
-        if not typer.confirm(_tf("process_topics_q", n=len(targets), extra=extra), default=True):
-            console.print(f"[dim]{_t('aborted')}[/]")
+        if not _confirm(_tf("process_topics_q", n=len(targets), extra=extra), default=True):
+            console.print(f"[grey70]{_t('aborted')}[/]")
             return
 
     for t in targets:
@@ -665,16 +669,18 @@ async def prepare_all_unread_runs(
         unread = [d for d in unread if d.chat_id in ids]
         emoji = " " + matched.emoticon if matched.emoticon else ""
         console.print(
-            f"[dim]{_tf('folder_unread_chats', title=matched.title + emoji, n=len(unread), total=before)}[/]"
+            f"[grey70]{_tf('folder_unread_chats', title=matched.title + emoji, n=len(unread), total=before)}[/]"
         )
         if not unread:
             console.print(f"[yellow]{_t('no_chats_in_folder_unread')}[/]")
             return
 
     if not yes:
+        from unread.util.prompt import confirm as _confirm
+
         total = sum(d.unread_count for d in unread)
-        if not typer.confirm(_tf("process_chats_q", n=len(unread), total=total), default=False):
-            console.print(f"[dim]{_t('aborted')}[/]")
+        if not _confirm(_tf("process_chats_q", n=len(unread), total=total), default=False):
+            console.print(f"[grey70]{_t('aborted')}[/]")
             return
 
     for u in unread:

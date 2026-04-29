@@ -184,10 +184,10 @@ async def cmd_analyze_website(
     async with open_repo(settings.storage.data_path) as repo:
         cached = None if no_cache else await repo.get_website_page(pid)
         if cached and cached.get("paragraphs_json"):
-            console.print(f"[dim]{_tf('website_using_cached', url=url)}[/]")
+            console.print(f"[grey70]{_tf('website_using_cached', url=url)}[/]")
             page = _restore_page_from_row(cached)
         else:
-            console.print(f"[dim]{_tf('website_fetching', url=url)}[/]")
+            console.print(f"[grey70]{_tf('website_fetching', url=url)}[/]")
             try:
                 page = await fetch_page(url, settings=settings)
             except WebsiteFetchError as e:
@@ -252,7 +252,9 @@ async def cmd_analyze_website(
                 if yes:
                     console.print("[red]Aborting (--yes set).[/]")
                     raise typer.Exit(2)
-                if not typer.confirm("Run anyway?", default=False):
+                from unread.util.prompt import confirm as _confirm
+
+                if not _confirm("Run anyway?", default=False):
                     console.print("[yellow]Aborted.[/]")
                     raise typer.Exit(0)
 
@@ -273,7 +275,7 @@ async def cmd_analyze_website(
         # fragment — paragraph indices have no native HTML anchor).
         link_template = page.metadata.url
 
-        console.print(f"[dim]{_t('running_analysis')}[/]")
+        console.print(f"[grey70]{_t('running_analysis')}[/]")
         result = await run_analysis(
             repo=repo,
             chat_id=0,

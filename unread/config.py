@@ -139,6 +139,12 @@ class AnalyzeCfg(_StrictCfg):
     # at least this many reactions (sum across all kinds) gets the marker
     # so the LLM can lean on it for "what mattered" presets. 0 disables.
     high_impact_reactions: int = 3
+    # Console rendering: when True, transform `[#N](https://t.me/...)`
+    # citations into `#N (https://t.me/...)` so the URL is visible and
+    # copy-pasteable. The saved markdown file is unaffected — keep it
+    # OSC 8-friendly for terminals that support it. Flip on if you're on
+    # macOS Terminal.app or any other terminal without OSC 8 hyperlinks.
+    plain_citations: bool = False
 
 
 class AskCfg(_StrictCfg):

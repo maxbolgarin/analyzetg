@@ -88,27 +88,73 @@ any working directory.
   are handled by `pypdf` / `python-docx` / `httpx` / `beautifulsoup4`,
   all installed automatically.
 
+  Install `ffmpeg` per platform:
+
+  | OS | Command |
+  |---|---|
+  | macOS (Homebrew) | `brew install ffmpeg` |
+  | Linux (Debian/Ubuntu) | `sudo apt install ffmpeg` |
+  | Linux (Fedora/RHEL) | `sudo dnf install ffmpeg` |
+  | Linux (Arch) | `sudo pacman -S ffmpeg` |
+  | Windows (Scoop) | `scoop install ffmpeg` |
+  | Windows (Chocolatey) | `choco install ffmpeg` |
+
+  After install, `unread doctor` confirms the binary is found.
+
+> **Tested on:** macOS and Linux. Windows works for non-Telegram
+> features (file analysis, YouTube, websites) but signal handling and
+> a few file-path edge cases may differ — please file issues at
+> <https://github.com/maxbolgarin/unread/issues>.
+
 ### 2. Install the CLI
+
+#### As a user (recommended)
+
+Install the `unread` command on your PATH directly from PyPI:
+
+```bash
+uv tool install unread
+```
+
+Or pull the bleeding edge straight from GitHub (no clone needed):
+
+```bash
+uv tool install git+https://github.com/maxbolgarin/unread.git
+```
+
+Upgrade to the latest version with `uv tool upgrade unread`. This
+pinning is what most readers want — you get the CLI, you don't get a
+local working copy of the source. Confirm the version after install
+with `unread --version`.
+
+#### As a contributor (editable install)
+
+If you plan to modify the code, clone and install in editable mode so
+edits to `unread/*.py` are picked up without a reinstall:
 
 ```bash
 git clone https://github.com/maxbolgarin/unread.git
 cd unread
-uv tool install --editable .
+uv sync --extra dev          # dev deps for tests + ruff
+uv tool install --editable . # `unread` on PATH, source-linked
 ```
 
-That puts the **`unread`** command on your PATH. `--editable` picks up
-source changes automatically; pass `--reinstall` after a `git pull` if
-you want freshly added Python dependencies to land too.
+After a `git pull` that adds new Python dependencies, refresh with
+`uv tool install --editable . --reinstall`.
 
-> **Prefer not to install globally?** Skip `uv tool install`, run
-> `uv sync --extra dev` once, and prefix every command with
-> `uv run` (e.g. `uv run unread @somegroup`).
+> **Don't want anything global?** Skip both forms above and run via
+> `uv run unread @somegroup` from the cloned directory after
+> `uv sync --extra dev`.
 
 ### 3. First-time setup
 
 ```bash
-unread tg init
+unread init           # full wizard: install folder + AI provider + Telegram (optional)
+unread tg init        # Telegram-only: skip the AI provider step
 ```
+
+Or just type `unread` — when nothing's set up yet, it prompts to run
+the wizard for you.
 
 On a fresh install this is a four-step interactive wizard:
 
@@ -146,11 +192,11 @@ On a fresh install this is a four-step interactive wizard:
    `<install>/storage/data.sqlite::secrets` so you can blow away `.env`
    and the CLI keeps working.
 
-Re-run `unread tg init` to fill in any step you skipped — only the
-unsatisfied steps prompt. `unread tg init --force` re-runs Telethon
-auth (useful when switching accounts) without re-prompting for folder
-or keys; to re-pick the install folder, delete
-`~/.unread/install.toml` first.
+Re-run `unread init` to fill in any step you skipped — only the
+unsatisfied steps prompt. `unread init --force` (or `unread tg init
+--force`) re-runs Telethon auth (useful when switching accounts)
+without re-prompting for folder or keys; to re-pick the install folder,
+delete `~/.unread/install.toml` first.
 
 **Non-interactive setup** (CI, scripts): pre-populate `~/.unread/.env`:
 
@@ -202,7 +248,8 @@ Override the install root for tests / multi-profile setups via the
 |---|---|
 | `unread [<ref>] [flags]` | Analyze a chat (default action). No args → interactive wizard. |
 | `unread tg [<ref>] [flags]` / `unread telegram [<ref>] [flags]` | Same as the bare form, but auto-runs `tg init` if no Telegram session exists. |
-| `unread tg init [--force]` | First-time setup: log in to Telegram, OpenAI ping, seed `~/.unread/`. `--force` wipes the saved session before logging in. |
+| `unread init [--force]` | Full interactive setup: install folder, AI provider + key, optional Telegram login. |
+| `unread tg init [--force]` | Telegram-only setup: skip the AI step. `--force` wipes the saved session before logging in. |
 | `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help describe`, `unread help tg init`. |
 | `unread describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
 | `unread ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
@@ -947,8 +994,15 @@ pricing entries.
 ## Maintenance
 
 ```bash
+# Version info (use this when filing bug reports)
+unread --version                               # or `unread -V`
+
 # Health check — Telegram session, OpenAI key, ffmpeg, DB integrity, presets, disk, pricing
 unread doctor
+
+# Diagnostic bundle for GitHub issues — version, doctor, redacted config + .env
+unread bug-report                              # prints to stdout
+unread bug-report --out report.txt             # writes to a file
 
 # Backup the data DB (VACUUM INTO — atomic, compact)
 unread backup                                  # → storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite
@@ -1169,6 +1223,33 @@ map-reduce; the candidate pool is bounded by `--limit`.
 Before every network call, `analyze` and `dump` compare the local max
 `msg_id` against Telegram's read marker — if nothing new exists, the
 command exits without hitting the network.
+
+---
+
+## Troubleshooting
+
+When something breaks, **always start with `unread doctor`** — it
+surfaces 90% of the common issues with a fix hint inline. If you're
+filing a GitHub issue, run `unread bug-report` and paste the bundle:
+it gathers version, platform, doctor output, and your config with
+every secret masked.
+
+| Symptom | Fix |
+|---|---|
+| `Telegram session expired` / asks for code on every run | `unread tg init --force` (re-runs Telethon auth without re-prompting for keys) |
+| `yt-dlp DownloadError` (private / region-locked / format change) | `uv tool upgrade unread` — yt-dlp tracks YouTube changes; running an outdated wheel breaks first |
+| `ffmpeg not found` | Install per the platform table above; `unread doctor` confirms detection |
+| `OPENAI_API_KEY missing` but you set it elsewhere | The CLI reads `~/.unread/.env`, not `~/.zshrc`. Either edit `~/.unread/.env` or run `unread tg init` to persist via the wizard |
+| `attempt to write a readonly database` | `chmod -R 700 ~/.unread/storage` — the install dir lost write perms (sudo install, restored backup with wrong owner) |
+| `storage permissions overpermissive` (doctor warning) | Run the `chmod 700 … && chmod 600 …` line printed by doctor — older installs predate the 0o700 hardening |
+| Cost reports look truncated / `unread stats` shows zeros | `unread cache effectiveness` to confirm the prompt cache is hitting; if not, verify `[pricing]` covers your model in `~/.unread/config.toml` |
+| Cache directory is huge | `unread cache stats` then `unread cache trim --keep-days 30` (or smaller) |
+| Migrating to a new install dir / moved `~/.unread/` | Set `UNREAD_HOME=/new/path` or run `unread migrate` from the old folder |
+| Russian locale, English `--help` | Currently English help only; full localization is on the [roadmap](ROADMAP.md) |
+| Want to start fresh | Delete `~/.unread/storage/data.sqlite` and re-run `unread tg init` — credentials persist in `data.sqlite::secrets`, so this resets cache + analysis runs while keeping or refreshing keys |
+
+For anything else: `unread bug-report > report.txt` and paste into a
+new issue at <https://github.com/maxbolgarin/unread/issues>.
 
 ---
 

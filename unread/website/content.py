@@ -150,6 +150,10 @@ async def _http_get(
         async with httpx.AsyncClient(
             timeout=timeout_sec,
             follow_redirects=True,
+            # httpx default max_redirects=20 + TooManyRedirects exception
+            # already protect us from runaway chains. Caught below with a
+            # specific message so the user can tell a redirect loop apart
+            # from a generic fetch failure.
             headers={
                 "User-Agent": user_agent,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -157,6 +161,8 @@ async def _http_get(
             },
         ) as client:
             resp = await client.get(url)
+    except httpx.TooManyRedirects as e:
+        raise WebsiteFetchError(f"Too many redirects fetching {url!r} — site is in a redirect loop.") from e
     except (httpx.HTTPError, httpx.InvalidURL) as e:
         raise WebsiteFetchError(f"Fetch failed: {e}") from e
 

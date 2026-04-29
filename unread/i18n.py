@@ -185,6 +185,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Preflight check: Telegram session, OpenAI key, ffmpeg, DB integrity, presets, disk.",
         "ru": "Проверка готовности: сессия Telegram, ключ OpenAI, ffmpeg, целостность БД, пресеты, диск.",
     },
+    "cmd_bug_report": {
+        "en": "Print a redacted diagnostic bundle suitable for GitHub issues.",
+        "ru": "Сформировать диагностический отчёт с маскировкой секретов для GitHub-issue.",
+    },
     "cmd_backup": {
         "en": "Snapshot storage/data.sqlite to a single compact file (uses VACUUM INTO).",
         "ru": "Сделать снимок storage/data.sqlite в один компактный файл (через VACUUM INTO).",
@@ -258,20 +262,32 @@ _STRINGS: dict[str, dict[str, str]] = {
     "per_topic_unread_unsupported": {
         "en": (
             "Per-topic unread isn't exposed by Telegram for arbitrary threads.\n"
-            "Pass --last-days N, --from-msg <id>, or --full-history."
+            "Pass --last-days N, --last-msgs N, --from-msg <id>, or --full-history."
         ),
         "ru": (
             "Telegram не отдаёт маркер непрочитанных по произвольным топикам.\n"
-            "Передайте --last-days N, --from-msg <id> или --full-history."
+            "Передайте --last-days N, --last-msgs N, --from-msg <id> или --full-history."
         ),
     },
     "no_unread_in_chat": {
-        "en": "No unread messages in chat {chat_id}. Pass --last-days / --from-msg / --full-history to analyze anyway.",
-        "ru": "В чате {chat_id} нет непрочитанных. Передайте --last-days / --from-msg / --full-history, чтобы анализировать всё равно.",
+        "en": "No unread messages in chat {chat_id}. Pass --last-days / --last-msgs / --from-msg / --full-history to analyze anyway.",
+        "ru": "В чате {chat_id} нет непрочитанных. Передайте --last-days / --last-msgs / --from-msg / --full-history, чтобы анализировать всё равно.",
     },
     "no_unread_topics": {
-        "en": "No topics with unread messages. Pass --last-days / --full-history to analyze everything anyway.",
-        "ru": "Нет топиков с непрочитанными. Передайте --last-days / --full-history, чтобы анализировать все.",
+        "en": "No topics with unread messages. Pass --last-days / --last-msgs / --full-history to analyze everything anyway.",
+        "ru": "Нет топиков с непрочитанными. Передайте --last-days / --last-msgs / --full-history, чтобы анализировать все.",
+    },
+    "looking_up_last_n_msgs": {
+        "en": "→ Looking up the last {n} message(s)...",
+        "ru": "→ Запрашиваем последние {n} сообщений...",
+    },
+    "using_last_n_msgs": {
+        "en": "→ Using last {n} message(s) (from msg_id={msg_id})",
+        "ru": "→ Используем последние {n} сообщений (с msg_id={msg_id})",
+    },
+    "no_msgs_in_chat": {
+        "en": "No messages found in chat {chat_id}.",
+        "ru": "В чате {chat_id} нет сообщений.",
     },
     "topic_header_with_unread": {
         "en": ">> {title} (topic_id={tid}, {n} unread)",
@@ -439,6 +455,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     # Setting categories
     "settings_cat_languages": {"en": "Languages", "ru": "Языки"},
     "settings_cat_models": {"en": "Models", "ru": "Модели"},
+    "settings_cat_provider": {"en": "AI provider", "ru": "AI-провайдер"},
     "settings_cat_enrich": {"en": "Enrichment defaults", "ru": "Обогащение (по умолчанию)"},
     "settings_cat_analyze": {"en": "Analyze tuning", "ru": "Настройка анализа"},
     # Setting labels
@@ -475,6 +492,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "set_label_min_msg_chars": {
         "en": "Minimum message length (chars)",
         "ru": "Минимальная длина сообщения (символы)",
+    },
+    "set_label_plain_citations": {
+        "en": "Plain-text citation URLs in console",
+        "ru": "Цитаты как обычный текст в консоли",
     },
     # Setting descriptions
     "set_desc_locale_language": {
@@ -520,6 +541,47 @@ _STRINGS: dict[str, dict[str, str]] = {
     "set_desc_min_msg_chars": {
         "en": "Drop messages whose effective body is shorter than N chars.",
         "ru": "Отбрасывать сообщения короче N символов в эффективном теле.",
+    },
+    "set_desc_plain_citations": {
+        "en": (
+            "Render `[#N](url)` citations as `#N (url)` so URLs stay visible in "
+            "terminals without OSC 8 hyperlink support (e.g. macOS Terminal.app). "
+            "Saved markdown files are unaffected."
+        ),
+        "ru": (
+            "Цитаты `[#N](url)` отображаются как `#N (url)`, чтобы URL были "
+            "видны и копируемы в терминалах без поддержки OSC 8 (например, "
+            "macOS Terminal.app). Сохранённые markdown-файлы не затрагиваются."
+        ),
+    },
+    # AI provider routing — exposed in `unread settings` so a multi-key
+    # user can switch between OpenAI / Anthropic / Google / OpenRouter /
+    # local without re-running `unread tg init`.
+    "set_label_ai_provider": {"en": "Active chat provider", "ru": "Активный chat-провайдер"},
+    "set_desc_ai_provider": {
+        "en": "openai | openrouter | anthropic | google | local. Each provider's key lives in its own block.",
+        "ru": "openai | openrouter | anthropic | google | local. Ключ каждого провайдера хранится отдельно.",
+    },
+    "set_label_ai_chat_model": {
+        "en": "Chat model override",
+        "ru": "Переопределение chat-модели",
+    },
+    "set_desc_ai_chat_model": {
+        "en": "Empty = each provider's default. Use to pin a specific model on the active provider.",
+        "ru": "Пусто = модель по умолчанию провайдера. Используйте, чтобы зафиксировать конкретную модель.",
+    },
+    "set_label_ai_filter_model": {
+        "en": "Filter / cheap-model override",
+        "ru": "Переопределение фильтр-модели",
+    },
+    "set_desc_ai_filter_model": {
+        "en": "Empty = each provider's default cheap model. Used by the map / rerank / enricher cheap-passes.",
+        "ru": "Пусто = дешёвая модель провайдера по умолчанию. Используется для map / rerank / обогащений.",
+    },
+    "set_label_ai_base_url": {"en": "AI base URL override", "ru": "Переопределение AI base URL"},
+    "set_desc_ai_base_url": {
+        "en": "Point the active provider at a private gateway / proxy. Empty = SDK default.",
+        "ru": "Перенаправить активного провайдера на приватный шлюз / прокси. Пусто = по умолчанию SDK.",
     },
     # ---- Wizard banner / tips ------------------------------------------
     "wiz_banner": {
@@ -823,6 +885,19 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "from {raw} raw, −{dropped} after filter/dedupe",
         "ru": "из {raw} (−{dropped} после фильтра/дедупа)",
     },
+    "report_meta_breakdown": {"en": "**Breakdown:**", "ru": "**Состав:**"},
+    "report_meta_breakdown_links": {
+        "en": "{n} with links",
+        "ru": "{n} со ссылками",
+    },
+    # Per-kind labels used in the breakdown line. Keep them short — rendered
+    # as comma-separated `text 5, voice 2, photo 3`.
+    "report_meta_kind_text": {"en": "text", "ru": "текст"},
+    "report_meta_kind_voice": {"en": "voice", "ru": "аудио"},
+    "report_meta_kind_videonote": {"en": "videonote", "ru": "видеосообщ."},
+    "report_meta_kind_video": {"en": "video", "ru": "видео"},
+    "report_meta_kind_photo": {"en": "photo", "ru": "фото"},
+    "report_meta_kind_doc": {"en": "doc", "ru": "док."},
     "report_meta_preset": {"en": "**Preset:**", "ru": "**Пресет:**"},
     "report_meta_model": {"en": "**Model:**", "ru": "**Модель:**"},
     "report_meta_model_map_phase": {
@@ -845,8 +920,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     # ---- Wizard pickers (output/preset/enrich/period custom/msg-ref) ----
     "wiz_filter_instruction": {
-        "en": "(arrow keys, type to filter)",
-        "ru": "(стрелки ↑↓, вводите для фильтра)",
+        "en": "(↑/↓ navigate · / search · Enter select · Esc cancel)",
+        "ru": "(↑/↓ навигация · / поиск · Enter выбор · Esc отмена)",
     },
     "wiz_search_all_dialogs": {
         "en": "🔍  Search all dialogs (not just unread)",
@@ -1300,8 +1375,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cli_cleanup_preview_scope_chat": {"en": "chat={chat}", "ru": "чат={chat}"},
     "cli_cleanup_preview_scope_all": {"en": "all chats", "ru": "все чаты"},
     "cli_cleanup_preview_lines": {
-        "en": "  messages matched:        {messages}\n  [red]rows to redact[/]:          {to_redact}\n  [red]text to null-out[/]:        {with_text}\n  transcripts to null-out: {transcripts}\n[dim]Row metadata (ids, dates, authors) is preserved.[/]",
-        "ru": "  совпавших сообщений:        {messages}\n  [red]строк к обезличиванию[/]:    {to_redact}\n  [red]текста к обнулению[/]:        {with_text}\n  транскриптов к обнулению: {transcripts}\n[dim]Метаданные (ids, даты, авторы) сохраняются.[/]",
+        "en": "  messages matched:        {messages}\n  [red]rows to redact[/]:          {to_redact}\n  [red]text to null-out[/]:        {with_text}\n  transcripts to null-out: {transcripts}\n[grey70]Row metadata (ids, dates, authors) is preserved.[/]",
+        "ru": "  совпавших сообщений:        {messages}\n  [red]строк к обезличиванию[/]:    {to_redact}\n  [red]текста к обнулению[/]:        {with_text}\n  транскриптов к обнулению: {transcripts}\n[grey70]Метаданные (ids, даты, авторы) сохраняются.[/]",
     },
     "cli_cleanup_kept_label": {"en": "(kept)", "ru": "(сохранено)"},
     "cli_cleanup_proceed_q": {
@@ -1565,6 +1640,104 @@ _STRINGS: dict[str, dict[str, str]] = {
     "wiz_n_topics_in_forum": {
         "en": "{n} topic(s) in this forum",
         "ru": "топиков в форуме: {n}",
+    },
+    # ---- File / stdin analysis -----------------------------------------
+    "files_no_stdin_input": {
+        "en": "No input on stdin — pipe a file or pass `unread <path>`.",
+        "ru": "Нет данных на stdin — передайте файл через pipe или укажите `unread <путь>`.",
+    },
+    "files_stdin_truncated": {
+        "en": "stdin truncated at {cap_mb} MB — analyzing the head only.",
+        "ru": "stdin обрезан на {cap_mb} МБ — анализируем только начало.",
+    },
+    "files_not_found": {
+        "en": "Couldn't read {ref} — file not found or not a regular file.",
+        "ru": "Не удалось прочитать {ref} — файл не найден или не является обычным файлом.",
+    },
+    "files_unsupported_kind": {
+        "en": "Unsupported file type {ext}. Supported: text/code/markup, .pdf, .docx, audio, video, image.",
+        "ru": "Неподдерживаемый тип файла {ext}. Поддерживаются: текст/код/разметка, .pdf, .docx, аудио, видео, картинки.",
+    },
+    "files_empty_file": {
+        "en": "Empty file — nothing to analyze.",
+        "ru": "Пустой файл — анализировать нечего.",
+    },
+    # ---- Extractor / enrichment errors --------------------------------
+    "error_pdf_scanned": {
+        "en": "PDF has no extractable text — likely scanned. Run an OCR tool (e.g. `ocrmypdf input.pdf output.pdf`) and re-run on the OCR'd copy.",
+        "ru": "PDF не содержит текст — похоже, это скан. Прогоните через OCR (например, `ocrmypdf input.pdf output.pdf`) и повторите анализ на распознанной копии.",
+    },
+    "error_docx_empty": {
+        "en": "DOCX has no extractable text (empty document?).",
+        "ru": "В DOCX нет извлекаемого текста (пустой документ?).",
+    },
+    "error_audio_no_openai": {
+        "en": "Audio transcription requires an OpenAI key (Whisper). Run `unread tg init` to add one — your chat provider can stay non-OpenAI.",
+        "ru": "Транскрибация аудио требует ключ OpenAI (Whisper). Запустите `unread tg init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
+    },
+    "error_audio_silent": {
+        "en": "Transcription produced no text — file may be silent or unreadable.",
+        "ru": "Транскрибация вернула пустой текст — возможно, файл молчит или повреждён.",
+    },
+    "error_video_no_openai": {
+        "en": "Video transcription requires an OpenAI key (Whisper). Run `unread tg init` to add one — your chat provider can stay non-OpenAI.",
+        "ru": "Транскрибация видео требует ключ OpenAI (Whisper). Запустите `unread tg init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
+    },
+    "error_video_silent": {
+        "en": "Transcription produced no text — video may have no audio track. ffmpeg required for video files; install via `brew install ffmpeg` (macOS) or your distro's package manager.",
+        "ru": "Транскрибация вернула пустой текст — возможно, у видео нет звуковой дорожки. Для видео нужен ffmpeg; установите через `brew install ffmpeg` (macOS) или менеджер пакетов вашей системы.",
+    },
+    "error_image_no_openai": {
+        "en": "Image description requires an OpenAI key (vision). Run `unread tg init` to add one — your chat provider can stay non-OpenAI.",
+        "ru": "Описание изображения требует ключ OpenAI (vision). Запустите `unread tg init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
+    },
+    "error_image_empty": {
+        "en": "Vision model returned no description — try a different image.",
+        "ru": "Vision-модель не вернула описание — попробуйте другое изображение.",
+    },
+    # ---- Telegram session expired --------------------------------------
+    "tg_session_expired_title": {
+        "en": "Telegram session expired or invalid",
+        "ru": "Сессия Telegram истекла или повреждена",
+    },
+    "tg_session_expired_hint": {
+        "en": "Re-authenticate with `unread tg init --force`. This will delete the local session file and start a fresh login.",
+        "ru": "Авторизуйтесь заново через `unread tg init --force`. Команда удалит локальный файл сессии и проведёт новый вход.",
+    },
+    # ---- YouTube ------------------------------------------------------
+    "youtube_fetch_failed": {
+        "en": "Couldn't fetch YouTube video: {err}",
+        "ru": "Не удалось получить видео YouTube: {err}",
+    },
+    "youtube_fetch_failed_hint": {
+        "en": "If YouTube downloads consistently fail, run `uv tool upgrade unread` — yt-dlp tracks YouTube format changes and breaks frequently.",
+        "ru": "Если загрузки с YouTube стабильно падают, выполните `uv tool upgrade unread` — yt-dlp следит за изменениями форматов YouTube и часто требует обновления.",
+    },
+    # ---- Cost estimate banner ----------------------------------------
+    "cost_estimate_banner": {
+        "en": "Estimated cost: ${lo:.4f}–${hi:.4f} (rough; pre-cache, full enrichment).",
+        "ru": "Оценка стоимости: ${lo:.4f}–${hi:.4f} (грубая; до кэша, с полным обогащением).",
+    },
+    "cost_estimate_unavailable": {
+        "en": "Cost estimate unavailable — pricing missing for one of the run's models. Use `unread settings set pricing.chat.<model>.input <price>` to add an entry.",
+        "ru": "Оценка стоимости недоступна — нет данных по одной из моделей запуска. Добавьте через `unread settings set pricing.chat.<model>.input <price>`.",
+    },
+    "cost_dry_run_label": {
+        "en": "Dry-run cost estimate (no LLM call):",
+        "ru": "Сухая оценка стоимости (без вызова LLM):",
+    },
+    # ---- YouTube Whisper / ffmpeg / audio errors ----------------------
+    "youtube_whisper_no_openai": {
+        "en": "YouTube Whisper transcription needs an OpenAI key (your chat provider can stay non-OpenAI). Run `unread tg init` to add one, or pick `--youtube-source captions` to use the video's own captions only.",
+        "ru": "Транскрибация YouTube через Whisper требует ключ OpenAI (основной провайдер чата может оставаться не-OpenAI). Запустите `unread tg init`, чтобы добавить его, или используйте `--youtube-source captions` для работы только по субтитрам.",
+    },
+    "error_ffmpeg_missing_youtube": {
+        "en": "ffmpeg required to transcribe YouTube audio; install ffmpeg or update [media] ffmpeg_path.",
+        "ru": "Для транскрибации YouTube нужен ffmpeg; установите его или обновите [media] ffmpeg_path.",
+    },
+    "youtube_no_audio_track": {
+        "en": "YouTube video {video_id} has no audio track.",
+        "ru": "У видео YouTube {video_id} нет звуковой дорожки.",
     },
 }
 

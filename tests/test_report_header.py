@@ -124,3 +124,50 @@ def test_fmt_period_none():
 def test_fmt_period_concrete():
     got = _fmt_period_header((datetime(2026, 4, 20), datetime(2026, 4, 24)))
     assert "2026-04-20" in got and "2026-04-24" in got
+
+
+def test_breakdown_omitted_for_text_only_run():
+    # No media, no links → no Breakdown line. Showing "Breakdown: text 5"
+    # alone would be noise — the message count above already says so.
+    h = _render_report_header(
+        _result(media_counts={"text": 5}, link_count=0),
+        title="x",
+    )
+    assert "Breakdown" not in h
+
+
+def test_breakdown_present_when_media_or_links_exist():
+    h = _render_report_header(
+        _result(media_counts={"text": 3, "voice": 2, "photo": 1}, link_count=4),
+        title="x",
+    )
+    assert "**Breakdown:**" in h
+    assert "text 3" in h and "voice 2" in h and "photo 1" in h
+    assert "4 with links" in h
+
+
+def test_breakdown_only_links_no_media():
+    # A pure-text chat where some messages have URLs still gets the line —
+    # link count alone is informative.
+    h = _render_report_header(
+        _result(media_counts={"text": 5}, link_count=2),
+        title="x",
+    )
+    assert "**Breakdown:**" in h
+    assert "2 with links" in h
+
+
+def test_breakdown_kind_order_stable():
+    # Order is text → voice → videonote → video → photo → doc, regardless
+    # of dict insertion order — so the header reads consistently.
+    h = _render_report_header(
+        _result(
+            media_counts={"doc": 1, "voice": 2, "text": 3, "photo": 1},
+            link_count=0,
+        ),
+        title="x",
+    )
+    breakdown = next(line for line in h.splitlines() if "Breakdown" in line)
+    assert breakdown.index("text") < breakdown.index("voice")
+    assert breakdown.index("voice") < breakdown.index("photo")
+    assert breakdown.index("photo") < breakdown.index("doc")

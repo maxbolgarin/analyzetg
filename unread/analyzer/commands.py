@@ -55,6 +55,17 @@ _ENRICH_KINDS = ("voice", "videonote", "video", "image", "doc", "link")
 _CITATION_RE = __import__("re").compile(r"\[#(\d+)\]\(([^)]+)\)")
 
 
+def _flatten_citations(text: str) -> str:
+    """Render `[#N](url)` as `#N (url)` for terminals without OSC 8.
+
+    Used by `_print_and_write` when ``analyze.plain_citations`` is set
+    (CLI flag `--plain-citations` or persisted setting). Keeps the URL
+    visible and copy-pasteable in terminals that style markdown links
+    but don't make them clickable (e.g. macOS Terminal.app).
+    """
+    return _CITATION_RE.sub(lambda m: f"#{m.group(1)} ({m.group(2)})", text)
+
+
 _VERIFY_SYSTEM: dict[str, str] = {
     "en": (
         "You are a reviewer of a Telegram-chat analysis. You are given: (a) the "
@@ -324,6 +335,8 @@ async def cmd_analyze(
     until: str | None,
     last_days: int | None,
     last_hours: int | None = None,
+    last_minutes: int | None = None,
+    last_msgs: int | None = None,
     preset: str | None = None,
     prompt_file: Path | None,
     model: str | None,
@@ -368,6 +381,28 @@ async def cmd_analyze(
     # of the pipeline only deals with `console_out`.
     if no_save:
         console_out = True
+    if last_msgs is not None:
+        if last_msgs <= 0:
+            raise typer.BadParameter("--last-msgs must be a positive integer.")
+        _conflicting = []
+        if since:
+            _conflicting.append("--since")
+        if until:
+            _conflicting.append("--until")
+        if last_days is not None:
+            _conflicting.append("--last-days")
+        if last_hours is not None:
+            _conflicting.append("--last-hours")
+        if last_minutes is not None:
+            _conflicting.append("--last-minutes")
+        if full_history:
+            _conflicting.append("--full-history")
+        if from_msg:
+            _conflicting.append("--from-msg")
+        if msg:
+            _conflicting.append("--msg")
+        if _conflicting:
+            raise typer.BadParameter(f"--last-msgs is mutually exclusive with {', '.join(_conflicting)}.")
     settings_for_lang = get_settings()
     effective_language = (language or settings_for_lang.locale.language or "en").lower()
     effective_content_language = (
@@ -406,6 +441,10 @@ async def cmd_analyze(
             rejected.append("--last-days")
         if last_hours is not None:
             rejected.append("--last-hours")
+        if last_minutes is not None:
+            rejected.append("--last-minutes")
+        if last_msgs is not None:
+            rejected.append("--last-msgs")
         if from_msg:
             rejected.append("--from-msg")
         if rejected:
@@ -466,7 +505,7 @@ async def cmd_analyze(
     mark_read_bool = bool(mark_read)
 
     settings = get_settings()
-    since_dt, until_dt = _compute_window(since, until, last_days, last_hours)
+    since_dt, until_dt = _compute_window(since, until, last_days, last_hours, last_minutes)
     from_msg_id = _parse_from_msg(from_msg)
     msg_id = _parse_from_msg(msg)
 
@@ -479,7 +518,7 @@ async def cmd_analyze(
         msg_parsed = _parse_link(msg)
         if msg_parsed.chat_id is not None or msg_parsed.username:
             if ref and ref != msg:
-                console.print(f"[dim]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
+                console.print(f"[grey70]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
             effective_ref = msg
 
     # File / stdin branch: detect first so paths and the explicit stdin
@@ -501,6 +540,8 @@ async def cmd_analyze(
             ("--until", until),
             ("--last-days", last_days),
             ("--last-hours", last_hours),
+            ("--last-minutes", last_minutes),
+            ("--last-msgs", last_msgs),
             ("--msg", msg),
             ("--repeat-last", repeat_last),
         ):
@@ -564,6 +605,10 @@ async def cmd_analyze(
             _rejected_yt.append("--last-days")
         if last_hours is not None:
             _rejected_yt.append("--last-hours")
+        if last_minutes is not None:
+            _rejected_yt.append("--last-minutes")
+        if last_msgs is not None:
+            _rejected_yt.append("--last-msgs")
         if msg:
             _rejected_yt.append("--msg")
         if repeat_last:
@@ -635,6 +680,10 @@ async def cmd_analyze(
             _rejected_web.append("--last-days")
         if last_hours is not None:
             _rejected_web.append("--last-hours")
+        if last_minutes is not None:
+            _rejected_web.append("--last-minutes")
+        if last_msgs is not None:
+            _rejected_web.append("--last-msgs")
         if msg:
             _rejected_web.append("--msg")
         if repeat_last:
@@ -672,14 +721,14 @@ async def cmd_analyze(
         return
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]{_tf('resolving', ref=effective_ref)}[/]")
+        console.print(f"[grey70]{_tf('resolving', ref=effective_ref)}[/]")
         resolved = await resolve(client, repo, effective_ref)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
         title = resolved.title
         console.print(
-            f"[dim]→ Resolved[/] {title or chat_id} "
-            f"[dim](id={chat_id}, kind={resolved.kind}"
+            f"[grey70]→ Resolved[/] {title or chat_id} "
+            f"[grey70](id={chat_id}, kind={resolved.kind}"
             f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
         )
 
@@ -696,7 +745,7 @@ async def cmd_analyze(
                     "Run `unread analyze <ref>` once normally first."
                 )
                 raise typer.Exit(0)
-            console.print(f"[dim]{_tf('repeating_last_run', ts=saved.get('__updated_at'))}[/]")
+            console.print(f"[grey70]{_tf('repeating_last_run', ts=saved.get('__updated_at'))}[/]")
             # Map saved keys → local vars (only fill defaults).
             if not preset and saved.get("preset"):
                 effective_preset = saved["preset"]
@@ -735,6 +784,26 @@ async def cmd_analyze(
                 model = saved["model"]
             if not filter_model and saved.get("filter_model"):
                 filter_model = saved["filter_model"]
+
+        # --last-msgs N: ask Telegram for the most recent N message ids in
+        # this chat (or topic) and set from_msg_id to the smallest. The
+        # pipeline then backfills from there forward, bypassing the unread
+        # check. Result includes roughly the last N messages — gaps from
+        # deletions / service messages may surface a few extras.
+        if last_msgs is not None and last_msgs > 0:
+            if all_per_topic:
+                raise typer.BadParameter(
+                    "--last-msgs cannot combine with --all-per-topic. "
+                    "Use --thread <id> --last-msgs N for a single topic instead."
+                )
+            thread_kw: dict = {"reply_to": thread_id} if thread_id and thread_id > 0 else {}
+            console.print(f"[grey70]{_tf('looking_up_last_n_msgs', n=last_msgs)}[/]")
+            recent = await client.get_messages(chat_id, limit=last_msgs, **thread_kw)
+            if not recent:
+                console.print(f"[yellow]{_tf('no_msgs_in_chat', chat_id=chat_id)}[/]")
+                raise typer.Exit(0)
+            from_msg_id = min(int(m.id) for m in recent)
+            console.print(f"[grey70]{_tf('using_last_n_msgs', n=len(recent), msg_id=from_msg_id)}[/]")
 
         # A link like /group/100/5000 carries a msg_id. When no other period
         # flags were given, default to single-msg mode. Pass --from-msg /
@@ -833,7 +902,7 @@ async def cmd_analyze(
             # API call used by _run_forum_per_topic.
             from unread.tg.topics import list_forum_topics
 
-            console.print(f"[dim]{_t('listing_forum_topics_for_flat')}[/]")
+            console.print(f"[grey70]{_t('listing_forum_topics_for_flat')}[/]")
             topics_for_flat = await list_forum_topics(client, chat_id)
             topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
             topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
@@ -854,7 +923,7 @@ async def cmd_analyze(
                     from_msg_id = min(non_zero)
                     unread_across = sum(t.unread_count for t in topics_for_flat)
                     console.print(
-                        f"[dim]→ Forum unread: {unread_across} across "
+                        f"[grey70]→ Forum unread: {unread_across} across "
                         f"{len(topic_markers)} topics "
                         f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
                     )
@@ -873,7 +942,7 @@ async def cmd_analyze(
 
             unread_default = not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
             if unread_default:
-                console.print(f"[dim]{_t('looking_up_topic_marker')}[/]")
+                console.print(f"[grey70]{_t('looking_up_topic_marker')}[/]")
             topics = await list_forum_topics(client, chat_id)
             matched = next((t for t in topics if t.topic_id == thread_id), None)
             if matched is None:
@@ -884,12 +953,12 @@ async def cmd_analyze(
                 if matched.unread_count == 0:
                     console.print(
                         f"[yellow]No unread messages in topic '{matched.title}'.[/] "
-                        "Pass --last-days / --full-history to analyze anyway."
+                        "Pass --last-days / --last-msgs / --full-history to analyze anyway."
                     )
                     raise typer.Exit(0)
                 from_msg_id = matched.read_inbox_max_id + 1
                 console.print(
-                    f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
+                    f"[grey70]→ {matched.unread_count} unread in '{matched.title}' "
                     f"after msg_id={matched.read_inbox_max_id}[/]"
                 )
 
@@ -970,7 +1039,7 @@ async def _run_single_msg(
     # Try local DB first (use thread_id=None so topic filter doesn't miss it).
     existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
     if not existing:
-        console.print(f"[dim]{_tf('fetching_message', msg_id=msg_id)}[/]")
+        console.print(f"[grey70]{_tf('fetching_message', msg_id=msg_id)}[/]")
         tel_msg = await client.get_messages(chat_id, ids=msg_id)
         if tel_msg is None:
             console.print(f"[red]{_tf('msg_not_found_in_chat', msg_id=msg_id, chat_id=chat_id)}[/]")
@@ -1023,7 +1092,7 @@ async def _run_single_msg(
         console.print(f"[yellow]{_tf('nothing_to_analyze_for_msg', msg_id=msg_id, hint=hint)}[/]")
         raise typer.Exit(0)
 
-    console.print(f"[dim]{_t('running_analysis')}[/]")
+    console.print(f"[grey70]{_t('running_analysis')}[/]")
     # When the single message is a video / videonote, mark the run as
     # `source_kind="video"` so the formatter renders `=== Video: <title> ===`
     # and the base prompt's video framing applies. Voice messages stay
@@ -1034,7 +1103,7 @@ async def _run_single_msg(
     if inferred_source_kind == "video" and preset == "single_msg":
         # Tiny UX touch — surface the auto-detected reframing so users
         # know why the report looks like a video summary.
-        console.print(f"[dim]Detected {loaded.media_type} — analyzing as a video transcript[/]")
+        console.print(f"[grey70]Detected {loaded.media_type} — analyzing as a video transcript[/]")
     opts = AnalysisOptions(
         preset=preset,
         prompt_file=prompt_file,
@@ -1163,16 +1232,21 @@ async def _run_single(
         )
         if hi is not None:
             console.print("  [bold]" + _tf("estimated_cost_band", lo=lo, hi=hi) + "[/]")
-            console.print(f"  [dim]{_t('estimate_enrich_note')}[/]")
+            console.print(f"  [grey70]{_t('estimate_enrich_note')}[/]")
         else:
             console.print(f"  [yellow]{_t('estimate_unavailable')}[/]")
         return
 
-    # Budget guard: refuse (or confirm) before any LLM call when the
-    # estimated upper-bound cost exceeds the user's --max-cost. The
-    # estimator only covers the analysis itself (map+reduce); enrichment
-    # spend is not folded in — caveat is in the help text.
-    if max_cost is not None and prepared.messages:
+    # Cost-banner + budget guard. Two responsibilities, one estimate:
+    #   1. Show every user a rough $-band for the run *before* we hit
+    #      the LLM (no opt-in needed). This is the headline production
+    #      fix — analyzing a busy chat used to surprise users with the
+    #      bill.
+    #   2. When `--max-cost` is set, refuse (or confirm) when the upper
+    #      bound exceeds the budget.
+    # The estimator covers analysis (map + reduce); enrichment spend is
+    # not folded in — that's noted in the help text.
+    if prepared.messages:
         loaded_preset = _load_preset_for_commands(preset, prompt_file, language=content_language)
         if loaded_preset is not None:
             from unread.analyzer.pipeline import estimate_cost as _estimate_cost
@@ -1182,29 +1256,39 @@ async def _run_single(
                 preset=loaded_preset,
                 settings=get_settings(),
             )
-            if hi is not None and hi > max_cost:
-                console.print(
-                    "[bold yellow]"
-                    + _tf(
-                        "max_cost_exceeded",
-                        lo=lo,
-                        hi=hi,
-                        max=max_cost,
-                        n=len(prepared.messages),
-                        preset=preset,
-                    )
-                    + "[/]"
-                )
-                if yes:
-                    console.print(f"[red]{_t('aborting_yes_set')}[/]")
-                    raise typer.Exit(2)
-                if not typer.confirm(_t("run_anyway_q"), default=False):
-                    console.print(f"[yellow]{_t('aborted')}[/]")
-                    raise typer.Exit(0)
-            elif hi is None:
-                console.print(f"[dim]{_t('max_cost_not_enforced')}[/]")
+            # 1. Always show the band (or pricing-missing note).
+            if hi is not None:
+                console.print("[bold]" + _t("cost_estimate_banner").format(lo=lo, hi=hi) + "[/]")
+            else:
+                console.print(f"[yellow]{_t('cost_estimate_unavailable')}[/]")
 
-    console.print(f"[dim]{_t('running_analysis')}[/]")
+            # 2. Hard gate when --max-cost is set.
+            if max_cost is not None:
+                if hi is not None and hi > max_cost:
+                    console.print(
+                        "[bold yellow]"
+                        + _tf(
+                            "max_cost_exceeded",
+                            lo=lo,
+                            hi=hi,
+                            max=max_cost,
+                            n=len(prepared.messages),
+                            preset=preset,
+                        )
+                        + "[/]"
+                    )
+                    if yes:
+                        console.print(f"[red]{_t('aborting_yes_set')}[/]")
+                        raise typer.Exit(2)
+                    from unread.util.prompt import confirm as _confirm
+
+                    if not _confirm(_t("run_anyway_q"), default=False):
+                        console.print(f"[yellow]{_t('aborted')}[/]")
+                        raise typer.Exit(0)
+                elif hi is None:
+                    console.print(f"[grey70]{_t('max_cost_not_enforced')}[/]")
+
+    console.print(f"[grey70]{_t('running_analysis')}[/]")
     sender_id_arg = int(by) if by and by.lstrip("-").isdigit() else None
     sender_substring_arg = by if by and sender_id_arg is None else None
     opts = AnalysisOptions(
@@ -1478,7 +1562,7 @@ async def _run_forum_per_topic(
 
 async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
     """Interactively pick a forum mode. Returns (all_flat, all_per_topic, thread_id)."""
-    console.print(f"[dim]{_t('listing_forum_topics')}[/]")
+    console.print(f"[grey70]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     if not topics:
         console.print(f"[yellow]{_t('no_topics_in_forum')}[/]")
@@ -1496,25 +1580,31 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
         raise typer.Exit(2)
 
     _print_topics_table(topics, with_unread=True)
-    prompt = "Pick topic id, [cyan]A[/]ll-flat, [cyan]P[/]er-topic, [cyan]Q[/]uit"
-    while True:
-        answer = typer.prompt(prompt.replace("[cyan]", "").replace("[/]", ""), default="P")
-        answer = answer.strip()
-        up = answer.upper()
-        if up == "Q":
-            console.print(f"[dim]{_t('aborted')}[/]")
-            raise typer.Exit(0)
-        if up == "A":
-            return True, False, 0
-        if up == "P":
-            return False, True, 0
-        if answer.isdigit():
-            tid = int(answer)
-            if any(t.topic_id == tid for t in topics):
-                return False, False, tid
-            console.print(f"[red]{_tf('no_topic_with_id', tid=tid)}[/]")
-            continue
-        console.print(f"[red]{_t('not_a_valid_choice')}[/]")
+    from unread.util.prompt import Choice as _Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
+
+    choices: list = [
+        _Choice(value="__per_topic__", label="Per-topic — one analysis per topic"),
+        _Choice(value="__all_flat__", label="All-flat — whole forum as a single chat"),
+        _sep("── Pick a single topic ──"),
+    ]
+    for t in topics:
+        unread_marker = f"  ({t.unread_count} unread)" if t.unread_count else ""
+        choices.append(_Choice(value=f"tid:{t.topic_id}", label=f"#{t.topic_id} · {t.title}{unread_marker}"))
+    choices.append(_sep())
+    choices.append(_Choice(value="__quit__", label="Quit"))
+    picked = _select("Forum mode", choices=choices, default_value="__per_topic__")
+    if picked is None or picked == "__quit__":
+        console.print(f"[grey70]{_t('aborted')}[/]")
+        raise typer.Exit(0)
+    if picked == "__all_flat__":
+        return True, False, 0
+    if picked == "__per_topic__":
+        return False, True, 0
+    if picked.startswith("tid:"):
+        return False, False, int(picked.removeprefix("tid:"))
+    raise typer.Exit(0)
 
 
 def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -> None:
@@ -1577,7 +1667,9 @@ async def _run_no_ref(
         if yes or not sys.stdin.isatty():
             mark_read_effective = False
         else:
-            mark_read_effective = typer.confirm(_t("mark_chats_read_after_analyze_q"), default=False)
+            from unread.util.prompt import confirm as _confirm
+
+            mark_read_effective = _confirm(_t("mark_chats_read_after_analyze_q"), default=False)
     else:
         mark_read_effective = mark_read
 
@@ -1761,11 +1853,11 @@ async def _run_multichat_batch(
             mark_fns.append(prepared.mark_read_fn)
 
     if not all_messages:
-        console.print(f"[dim]{_t('no_unread_across_chats')}[/]")
+        console.print(f"[grey70]{_t('no_unread_across_chats')}[/]")
         return
 
     console.print(
-        f"[dim]→ Cross-chat synthesis over {len(all_messages)} message(s) "
+        f"[grey70]→ Cross-chat synthesis over {len(all_messages)} message(s) "
         f"from {len(chat_groups)} chat(s)...[/]"
     )
     opts = AnalysisOptions(
@@ -1862,6 +1954,37 @@ def _fmt_period_header(period: tuple[datetime | None, datetime | None] | None) -
     return f"{a} → {b}"
 
 
+# Stable display order for the breakdown line — text first (the bulk),
+# then voice/videonote (most common media), then video/photo/doc.
+# `media_counts` from pipeline only contains kinds present in this run.
+_BREAKDOWN_ORDER = ("text", "voice", "videonote", "video", "photo", "doc")
+
+
+def _format_breakdown_line(result: AnalysisResult) -> str:
+    """Render the per-kind breakdown line for the report header.
+
+    Returns an empty string when nothing interesting to show — i.e. when
+    media_counts is missing (older callers / empty results) or when every
+    analyzed message is plain text and no link is present, since
+    "Breakdown: text 5" alone is just noise.
+    """
+    counts = result.media_counts or {}
+    if not counts:
+        return ""
+    has_media = any(k in counts for k in _BREAKDOWN_ORDER if k != "text")
+    if not has_media and not result.link_count:
+        return ""
+    parts: list[str] = []
+    for kind in _BREAKDOWN_ORDER:
+        n = counts.get(kind, 0)
+        if n:
+            parts.append(f"{_t(f'report_meta_kind_{kind}')} {n}")
+    line = f"{_t('report_meta_breakdown')} {', '.join(parts)}"
+    if result.link_count:
+        line += " — " + _tf("report_meta_breakdown_links", n=result.link_count)
+    return line
+
+
 def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
     """Build the fixed-format metadata block prepended to every saved report.
 
@@ -1882,6 +2005,10 @@ def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
             " (" + _tf("report_meta_messages_filtered", raw=result.raw_msg_count, dropped=dropped) + ")"
         )
     lines.append(msg_line)
+
+    breakdown_line = _format_breakdown_line(result)
+    if breakdown_line:
+        lines.append(breakdown_line)
 
     preset_line = f"{_t('report_meta_preset')} `{result.preset}`"
     if result.prompt_version:
@@ -1926,6 +2053,95 @@ def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
     return "\n".join(lines)
 
 
+def _strip_md_bold(label: str) -> str:
+    """Strip the `**...**` wrapper from i18n labels for Rich rendering.
+
+    Header labels are stored as Markdown (`**Chat:**`) so the saved file
+    renders correctly. The Rich console grid styles them via Rich markup
+    instead, so we drop the bold wrapper here.
+    """
+    if label.startswith("**") and label.endswith("**"):
+        return label[2:-2]
+    return label
+
+
+def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
+    """Build a Rich `Table` (key/value grid) that mirrors the markdown header.
+
+    Same content as `_render_report_header`, but laid out one field per
+    line with a bold cyan label column — without this, Rich's `Markdown`
+    renderer flattens the saved-report header's single-newline-separated
+    lines into a single wrapping paragraph, which is what made the
+    console summary look cramped.
+    """
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(justify="right", style="bold cyan", no_wrap=True)
+    grid.add_column(overflow="fold")
+
+    def row(key: str, value: str) -> None:
+        grid.add_row(_strip_md_bold(key), value)
+
+    row(_t("report_meta_chat"), title or str(result.chat_id))
+    if result.thread_id:
+        row(_t("report_meta_thread"), str(result.thread_id))
+    row(_t("report_meta_period"), _fmt_period_header(result.period))
+
+    msg_value = str(result.msg_count)
+    if result.raw_msg_count and result.raw_msg_count != result.msg_count:
+        dropped = result.raw_msg_count - result.msg_count
+        msg_value += (
+            " (" + _tf("report_meta_messages_filtered", raw=result.raw_msg_count, dropped=dropped) + ")"
+        )
+    row(_t("report_meta_messages"), msg_value)
+
+    breakdown_line = _format_breakdown_line(result)
+    if breakdown_line:
+        # `_format_breakdown_line` returns "**Breakdown:** text 5, voice 2 — 1 with links".
+        # Split off the bold label so the grid styles it like the others.
+        label, _, value = breakdown_line.partition(" ")
+        row(label, value)
+
+    preset_value = f"[cyan]{result.preset}[/]"
+    if result.prompt_version:
+        preset_value += f" (v={result.prompt_version})"
+    row(_t("report_meta_preset"), preset_value)
+
+    model_value = f"[cyan]{result.model}[/]"
+    if result.chunk_count > 1 and result.filter_model and result.filter_model != result.model:
+        model_value += f" (+ [cyan]{result.filter_model}[/] {_t('report_meta_model_map_phase')})"
+    row(_t("report_meta_model"), model_value)
+
+    if result.chunk_count:
+        row(_t("report_meta_chunks"), str(result.chunk_count))
+
+    total_calls = result.cache_hits + result.cache_misses
+    if total_calls:
+        row(
+            _t("report_meta_cache"),
+            _tf("report_meta_cache_hits_of", hits=result.cache_hits, total=total_calls),
+        )
+
+    if result.enrich_kinds:
+        row(_t("report_meta_enrichment"), ", ".join(result.enrich_kinds))
+    if result.enrich_summary:
+        row(_t("report_meta_enrichment_detail"), result.enrich_summary)
+
+    analysis_cost = result.total_cost_usd
+    if result.enrich_cost_usd:
+        total = analysis_cost + result.enrich_cost_usd
+        cost_value = (
+            f"{_fmt_cost_precise(total)} "
+            f"(analysis {_fmt_cost_precise(analysis_cost)} + "
+            f"enrichment {_fmt_cost_precise(result.enrich_cost_usd)})"
+        )
+    else:
+        cost_value = _fmt_cost_precise(analysis_cost)
+    row(_t("report_meta_cost"), cost_value)
+
+    row(_t("report_meta_generated"), datetime.now().strftime("%Y-%m-%d %H:%M"))
+    return grid
+
+
 def _print_and_write(
     result: AnalysisResult,
     *,
@@ -1951,6 +2167,9 @@ def _print_and_write(
         f"chunks={result.chunk_count} cache_hits={result.cache_hits}/"
         f"{result.cache_hits + result.cache_misses} cost=${result.total_cost_usd:.4f}"
     )
+    # The saved file gets the markdown header + body verbatim. The console
+    # renders the metadata as a Rich grid (proper line stacking) and only
+    # feeds the LLM body through Markdown so citation links stay clickable.
     body = _render_report_header(result, title=title) + _with_truncation_banner(result)
 
     if result.truncated:
@@ -1966,7 +2185,11 @@ def _print_and_write(
         from rich.rule import Rule
 
         console.print(Rule(title or "result", style="cyan"))
-        console.print(Markdown(body))
+        console.print(_render_console_meta(result, title=title))
+        console_body = _with_truncation_banner(result)
+        if get_settings().analyze.plain_citations:
+            console_body = _flatten_citations(console_body)
+        console.print(Markdown(console_body))
         console.print(Rule(style="cyan"))
 
     if no_save:

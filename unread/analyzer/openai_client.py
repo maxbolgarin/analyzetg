@@ -79,6 +79,9 @@ async def _one_call(
     log_context: dict[str, Any] = {**(context or {}), "provider": provider.name}
     if finish:
         log_context["finish_reason"] = finish
+    # `Repo.log_usage` is internally shielded against CancelledError so
+    # an in-flight Ctrl-C between this LLM response and the DB commit
+    # can't leak spend out of `unread stats`.
     await repo.log_usage(
         kind="chat",
         model=model,

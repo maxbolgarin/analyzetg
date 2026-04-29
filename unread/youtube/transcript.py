@@ -48,6 +48,18 @@ class NoTranscriptAvailable(RuntimeError):
     """Raised when `source='captions'` was requested but the video has none."""
 
 
+class YoutubeFetchError(RuntimeError):
+    """Raised when yt-dlp can't fetch the video / its captions / its audio.
+
+    Wraps `yt_dlp.utils.DownloadError` and any other exception coming
+    out of `ydl.download()`. The command-layer wrapper turns this into
+    a `typer.BadParameter`/`Exit` with a friendly banner; without this,
+    an out-of-the-blue `DownloadError` traceback hits the user's
+    terminal whenever YouTube changes a video format or a video is
+    deleted/private/region-locked.
+    """
+
+
 @dataclass(slots=True)
 class TranscriptResult:
     text: str
@@ -183,8 +195,20 @@ async def _fetch_captions(
                 "outtmpl": str(Path(td) / "%(id)s.%(ext)s"),
                 "noplaylist": True,
             }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([metadata.url])
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([metadata.url])
+            except yt_dlp.utils.DownloadError as e:
+                # Captions are best-effort — fall through so the audio
+                # path can still try. Logged as warn (not exception) so
+                # transient YouTube hiccups don't spam diagnostics.
+                log.warning(
+                    "youtube.captions.download_failed",
+                    video_id=metadata.video_id,
+                    lang=lang,
+                    err=str(e)[:200],
+                )
+                return None
             for f in Path(td).iterdir():
                 if f.suffix == ".vtt":
                     return f.read_text(encoding="utf-8", errors="ignore")
@@ -229,12 +253,20 @@ async def _download_audio(metadata: YoutubeMetadata, dest_dir: Path) -> Path:
                 }
             ],
         }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([metadata.url])
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([metadata.url])
+        except yt_dlp.utils.DownloadError as e:
+            # Re-raise as our typed error so the command layer can show a
+            # friendly banner instead of yt-dlp's internal traceback.
+            # Common triggers: deleted / private / region-locked / age-
+            # restricted video, transient network drop, yt-dlp lagging
+            # behind a YouTube format change.
+            raise YoutubeFetchError(str(e)) from e
         for f in dest_dir.iterdir():
             if f.suffix == ".mp3":
                 return f
-        raise RuntimeError(f"yt-dlp produced no mp3 in {dest_dir}")
+        raise YoutubeFetchError(f"yt-dlp produced no mp3 in {dest_dir}")
 
     return await asyncio.to_thread(_run)
 
@@ -252,10 +284,9 @@ async def _transcribe_audio(
     instead of letting the SDK throw a 401 mid-download.
     """
     if not settings.openai.api_key:
-        raise RuntimeError(
-            "YouTube Whisper transcription needs an OpenAI key (chat provider can stay non-OpenAI). "
-            "Run `unread tg init` to add one, or pick `--youtube-source captions` to use the video's captions only."
-        )
+        from unread.i18n import t as _t
+
+        raise RuntimeError(_t("youtube_whisper_no_openai"))
     audio_model = settings.openai.audio_model_default
     cfg_lang = settings.openai.audio_language or None
     duration = int(metadata.duration_sec or 0)
@@ -266,11 +297,13 @@ async def _transcribe_audio(
         try:
             parts = await transcode_for_openai(downloaded, "video", td)
         except FfmpegMissing as e:
-            raise FfmpegMissing(
-                "ffmpeg required to transcribe YouTube audio; install ffmpeg or update [media] ffmpeg_path."
-            ) from e
+            from unread.i18n import t as _t
+
+            raise FfmpegMissing(_t("error_ffmpeg_missing_youtube")) from e
         except NoAudioStream as e:
-            raise RuntimeError(f"YouTube video {metadata.video_id} has no audio track") from e
+            from unread.i18n import t as _t
+
+            raise RuntimeError(_t("youtube_no_audio_track").format(video_id=metadata.video_id)) from e
 
         oai = AsyncOpenAI(
             api_key=settings.openai.api_key,

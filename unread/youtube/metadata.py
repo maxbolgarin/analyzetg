@@ -74,8 +74,16 @@ def _import_ytdlp():
 
 def _extract_sync(url: str) -> dict[str, Any]:
     yt_dlp = _import_ytdlp()
-    with yt_dlp.YoutubeDL(_ydl_options()) as ydl:
-        return ydl.extract_info(url, download=False) or {}
+    try:
+        with yt_dlp.YoutubeDL(_ydl_options()) as ydl:
+            return ydl.extract_info(url, download=False) or {}
+    except yt_dlp.utils.DownloadError as e:
+        # Lift to our typed error so the command layer can show a
+        # friendly banner (deleted/private/region-locked video, network
+        # drop, format-change drift, etc.).
+        from unread.youtube.transcript import YoutubeFetchError
+
+        raise YoutubeFetchError(str(e)) from e
 
 
 async def fetch_metadata(video_id: str) -> YoutubeMetadata:

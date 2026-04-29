@@ -23,7 +23,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import typer
 from rich.console import Console
 
 from unread.config import get_settings, reset_settings
@@ -67,6 +66,39 @@ class SettingDef:
 
 
 _SETTINGS: tuple[SettingDef, ...] = (
+    # AI provider — exposed in the editor so multi-key users can
+    # switch providers without re-running `unread tg init`. Each row
+    # is a separate `app_settings::ai.*` override; the primary key
+    # blocks (`anthropic.api_key`, `google.api_key`, etc.) live in the
+    # secrets table and stay reachable via the wizard.
+    SettingDef(
+        "ai.provider",
+        "settings_cat_provider",
+        "provider",
+        "set_label_ai_provider",
+        "set_desc_ai_provider",
+    ),
+    SettingDef(
+        "ai.chat_model",
+        "settings_cat_provider",
+        "model",
+        "set_label_ai_chat_model",
+        "set_desc_ai_chat_model",
+    ),
+    SettingDef(
+        "ai.filter_model",
+        "settings_cat_provider",
+        "model",
+        "set_label_ai_filter_model",
+        "set_desc_ai_filter_model",
+    ),
+    SettingDef(
+        "ai.base_url",
+        "settings_cat_provider",
+        "string",
+        "set_label_ai_base_url",
+        "set_desc_ai_base_url",
+    ),
     # Languages
     SettingDef(
         "locale.language",
@@ -153,10 +185,43 @@ _SETTINGS: tuple[SettingDef, ...] = (
         "set_label_min_msg_chars",
         "set_desc_min_msg_chars",
     ),
+    SettingDef(
+        "analyze.plain_citations",
+        "settings_cat_analyze",
+        "bool",
+        "set_label_plain_citations",
+        "set_desc_plain_citations",
+    ),
 )
 
 
 _BY_KEY: dict[str, SettingDef] = {s.key: s for s in _SETTINGS}
+
+
+# Keys whose effect is silently dropped unless `ai.provider == 'openai'`.
+# `resolve_chat_model` (see `unread/ai/providers.py`) only honors
+# `settings.openai.chat_model_default` when the chat provider is OpenAI;
+# the same is true for `filter_model_default`. Showing them in the picker
+# under a different provider tricks users into thinking they took effect.
+_OPENAI_PROVIDER_ONLY_KEYS: frozenset[str] = frozenset(
+    {
+        "openai.chat_model_default",
+        "openai.filter_model_default",
+    }
+)
+
+
+def _visible_settings(active_provider: str) -> tuple[SettingDef, ...]:
+    """Filter `_SETTINGS` to those that actually take effect right now.
+
+    Hides provider-scoped rows whose provider isn't active. Audio /
+    vision / Whisper-language rows stay visible regardless of provider
+    because OpenAI backs those features even when chat goes elsewhere
+    (CLAUDE.md "OpenAI is special-cased").
+    """
+    if active_provider.lower() == "openai":
+        return _SETTINGS
+    return tuple(sd for sd in _SETTINGS if sd.key not in _OPENAI_PROVIDER_ONLY_KEYS)
 
 
 # ----------------------------- Sentinels ----------------------------------
@@ -215,7 +280,7 @@ async def _interactive(repo) -> None:
         console.print(f"[red]{_t('settings_no_questionary')}[/]")
         return
 
-    console.print(f"[bold cyan]{_t('settings_banner')}[/] [dim]{_t('settings_banner_hint')}[/]")
+    console.print(f"[bold cyan]{_t('settings_banner')}[/] [grey70]{_t('settings_banner_hint')}[/]")
 
     db_path = get_settings().storage.data_path
 
@@ -241,7 +306,7 @@ async def _interactive(repo) -> None:
         if choice == _SENTINEL_RESET:
             existing = await repo.get_all_app_settings()
             if not existing:
-                console.print(f"[dim]{_t('settings_nothing_to_reset')}[/]")
+                console.print(f"[grey70]{_t('settings_nothing_to_reset')}[/]")
                 continue
             confirmed = await _confirm_reset(len(existing))
             if confirmed:
@@ -281,7 +346,7 @@ async def _interactive(repo) -> None:
     if saved_anything:
         console.print(f"\n[green]{_t('settings_done_with_changes')}[/]")
     else:
-        console.print(f"\n[dim]{_t('settings_done_no_changes')}[/]")
+        console.print(f"\n[grey70]{_t('settings_done_no_changes')}[/]")
     # Refresh the in-process singleton so a follow-up call in the same
     # shell session picks up new values.
     reset_settings()
@@ -292,15 +357,20 @@ async def _interactive(repo) -> None:
 
 async def _pick_setting_to_edit(overrides: dict[str, str], s: Any) -> str | None:
     """Build the categorized picker; return the selected sentinel/key."""
-    import questionary
+    from unread.util.prompt import Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
 
-    from unread.interactive import LIST_STYLE, _bind_escape
-
+    # Visible-only set: hides provider-scoped rows whose provider isn't
+    # active. The full _SETTINGS list still drives _BY_KEY so any
+    # already-set override stays editable via direct key lookup.
+    active_provider = str(getattr(s.ai, "provider", "openai") or "openai")
+    visible = _visible_settings(active_provider)
     # Compute display widths once so values + descriptions line up.
-    label_w = max(len(sd.label) for sd in _SETTINGS)
+    label_w = max(len(sd.label) for sd in visible)
     val_w = 0
     rows: list[tuple[SettingDef, str, bool]] = []
-    for sd in _SETTINGS:
+    for sd in visible:
         cur = _current_display(sd, overrides, s)
         rows.append((sd, cur, sd.key in overrides))
         val_w = max(val_w, len(cur))
@@ -313,34 +383,22 @@ async def _pick_setting_to_edit(overrides: dict[str, str], s: Any) -> str | None
     for sd, cur, has_override in rows:
         if sd.category != cur_category:
             cur_category = sd.category
-            items.append(questionary.Separator(f"── {cur_category} ──"))
+            items.append(_sep(f"── {cur_category} ──"))
         marker = " ★" if has_override else "  "
         cur_clipped = cur if len(cur) <= val_w else cur[: val_w - 1] + "…"
-        # questionary doesn't render Rich markup in choice titles —
-        # `[dim]…[/dim]` would print literally. Use plain whitespace.
         items.append(
-            questionary.Choice(
-                title=f"{sd.label:<{label_w}}  {cur_clipped:<{val_w}}{marker}    {sd.desc}",
+            Choice(
                 value=sd.key,
+                label=f"{sd.label:<{label_w}}  {cur_clipped:<{val_w}}{marker}    {sd.desc}",
             )
         )
-    items.append(questionary.Separator())
-    items.append(questionary.Choice(title=_t("settings_reset_row"), value=_SENTINEL_RESET))
-    items.append(questionary.Separator())
-    items.append(questionary.Choice(title=_t("settings_done_row"), value=_SENTINEL_DONE))
+    items.append(_sep())
+    items.append(Choice(value=_SENTINEL_RESET, label=_t("settings_reset_row")))
+    items.append(_sep())
+    items.append(Choice(value=_SENTINEL_DONE, label=_t("settings_done_row")))
 
-    picked = await _bind_escape(
-        questionary.select(
-            _t("settings_pick_prompt"),
-            choices=items,
-            use_search_filter=True,
-            use_jk_keys=False,
-            instruction=_t("wiz_filter_instruction"),
-            style=LIST_STYLE,
-        ),
-        _SENTINEL_DONE,
-    ).ask_async()
-    return picked
+    picked = _select(_t("settings_pick_prompt"), choices=items)
+    return picked if picked is not None else _SENTINEL_DONE
 
 
 def _current_display(sd: SettingDef, overrides: dict[str, str], s: Any) -> str:
@@ -360,6 +418,10 @@ def _current_display(sd: SettingDef, overrides: dict[str, str], s: Any) -> str:
     if sd.kind == "int":
         section, attr = sd.key.split(".", 1)
         return str(getattr(getattr(s, section), attr))
+    if sd.kind in {"provider", "string"}:
+        section, attr = sd.key.split(".", 1)
+        cur = getattr(getattr(s, section), attr)
+        return str(cur) if cur else _t("settings_value_unset")
     return overrides.get(sd.key, "")
 
 
@@ -396,6 +458,12 @@ async def _edit_one(sd: SettingDef, overrides: dict[str, str], s: Any) -> str | 
     if sd.kind == "int":
         cur_int = int(_read_attr(s, sd.key))
         return await _pick_int(sd, cur_int)
+    if sd.kind == "provider":
+        cur = str(overrides.get(sd.key) or _read_attr(s, sd.key) or "openai")
+        return await _pick_provider(sd, cur)
+    if sd.kind == "string":
+        cur = str(overrides.get(sd.key) or _read_attr(s, sd.key) or "")
+        return await _pick_string(sd, cur)
     return None
 
 
@@ -412,10 +480,10 @@ async def _pick_language(
     clear_label: str = "",
     audio_pool: bool = False,
 ) -> str | None:
-    import questionary
-
     from unread.i18n import LANGUAGE_NAMES
-    from unread.interactive import LIST_STYLE, _bind_escape
+    from unread.util.prompt import Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
 
     pool = _supported_audio_languages() if audio_pool else _supported_locale_languages()
     if current and current not in pool:
@@ -425,30 +493,17 @@ async def _pick_language(
     for code in pool:
         name = LANGUAGE_NAMES.get(code, code.title())
         marker = "  ★" if code == current else ""
-        items.append(questionary.Choice(title=f"{code:<4} — {name}{marker}", value=code))
+        items.append(Choice(value=code, label=f"{code:<4} — {name}{marker}"))
     if allow_clear:
-        items.append(questionary.Separator())
-        items.append(questionary.Choice(title=clear_label, value=_SENTINEL_CLEAR))
-    items.append(questionary.Separator())
-    items.append(questionary.Choice(title=_t("settings_keep_current"), value=_SENTINEL_KEEP))
-    items.append(questionary.Choice(title=_t("settings_exit_row"), value=_SENTINEL_EXIT))
+        items.append(_sep())
+        items.append(Choice(value=_SENTINEL_CLEAR, label=clear_label))
+    items.append(_sep())
+    items.append(Choice(value=_SENTINEL_KEEP, label=_t("settings_keep_current")))
+    items.append(Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")))
 
     default = current if current in pool else _SENTINEL_KEEP
-    # questionary doesn't render Rich markup; print the desc on a separate
-    # line via console.print() then ask a plain prompt.
-    console.print(f"[dim]{sd.desc}[/dim]")
-    picked = await _bind_escape(
-        questionary.select(
-            sd.label,
-            choices=items,
-            default=default,
-            use_search_filter=True,
-            use_jk_keys=False,
-            instruction=_t("wiz_filter_instruction"),
-            style=LIST_STYLE,
-        ),
-        _SENTINEL_KEEP,
-    ).ask_async()
+    console.print(f"[grey70]{sd.desc}[/grey70]")
+    picked = _select(sd.label, choices=items, default_value=default)
     if picked is None:
         return _SENTINEL_EXIT
     if picked == _SENTINEL_KEEP:
@@ -470,10 +525,10 @@ async def _pick_model(sd: SettingDef, current: str, *, kind: str) -> str | None:
     `--max-cost` won't enforce, and `unread doctor` warns. We expose the
     table's keys + a "Custom…" text-input for power users.
     """
-    import questionary
-
     from unread.config import get_settings as _get_settings
-    from unread.interactive import LIST_STYLE, _bind_escape
+    from unread.util.prompt import Choice, ask_text
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
 
     s = _get_settings()
     pool: list[str]
@@ -487,34 +542,23 @@ async def _pick_model(sd: SettingDef, current: str, *, kind: str) -> str | None:
     items: list = []
     for name in pool:
         marker = "  ★" if name == current else ""
-        items.append(questionary.Choice(title=f"{name}{marker}", value=name))
+        items.append(Choice(value=name, label=f"{name}{marker}"))
     if pool:
-        items.append(questionary.Separator())
-    items.append(questionary.Choice(title=_t("settings_custom_model_row"), value="__custom__"))
-    items.append(questionary.Separator())
-    items.append(questionary.Choice(title=_t("settings_keep_current"), value=_SENTINEL_KEEP))
-    items.append(questionary.Choice(title=_t("settings_exit_row"), value=_SENTINEL_EXIT))
+        items.append(_sep())
+    items.append(Choice(value="__custom__", label=_t("settings_custom_model_row")))
+    items.append(_sep())
+    items.append(Choice(value=_SENTINEL_KEEP, label=_t("settings_keep_current")))
+    items.append(Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")))
 
     default = current if current in pool else _SENTINEL_KEEP
-    console.print(f"[dim]{sd.desc} — current: {current}[/dim]")
-    picked = await _bind_escape(
-        questionary.select(
-            sd.label,
-            choices=items,
-            default=default,
-            use_search_filter=True,
-            use_jk_keys=False,
-            instruction=_t("wiz_filter_instruction"),
-            style=LIST_STYLE,
-        ),
-        _SENTINEL_KEEP,
-    ).ask_async()
+    console.print(f"[grey70]{sd.desc} — current: {current}[/grey70]")
+    picked = _select(sd.label, choices=items, default_value=default)
     if picked is None or picked == _SENTINEL_KEEP:
         return None
     if picked == _SENTINEL_EXIT:
         return _SENTINEL_EXIT
     if picked == "__custom__":
-        raw = await questionary.text(_tf("settings_custom_model_prompt", key=sd.key), default="").ask_async()
+        raw = ask_text(_tf("settings_custom_model_prompt", key=sd.key), default="")
         if not raw:
             return None
         return raw.strip()
@@ -525,29 +569,21 @@ async def _pick_model(sd: SettingDef, current: str, *, kind: str) -> str | None:
 
 async def _pick_bool(sd: SettingDef, current: bool) -> str | None:
     """Render a 3-option toggle: On / Off / Keep current."""
-    import questionary
-
-    from unread.interactive import LIST_STYLE, _bind_escape
+    from unread.util.prompt import Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
 
     on_label = _t("settings_state_on")
     off_label = _t("settings_state_off")
     items = [
-        questionary.Choice(title=f"{on_label}{'  ★' if current else ''}", value="1"),
-        questionary.Choice(title=f"{off_label}{'  ★' if not current else ''}", value="0"),
-        questionary.Separator(),
-        questionary.Choice(title=_t("settings_keep_current"), value=_SENTINEL_KEEP),
-        questionary.Choice(title=_t("settings_exit_row"), value=_SENTINEL_EXIT),
+        Choice(value="1", label=f"{on_label}{'  ★' if current else ''}"),
+        Choice(value="0", label=f"{off_label}{'  ★' if not current else ''}"),
+        _sep(),
+        Choice(value=_SENTINEL_KEEP, label=_t("settings_keep_current")),
+        Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")),
     ]
-    console.print(f"[dim]{sd.desc}[/dim]")
-    picked = await _bind_escape(
-        questionary.select(
-            sd.label,
-            choices=items,
-            default="1" if current else "0",
-            style=LIST_STYLE,
-        ),
-        _SENTINEL_KEEP,
-    ).ask_async()
+    console.print(f"[grey70]{sd.desc}[/grey70]")
+    picked = _select(sd.label, choices=items, default_value="1" if current else "0")
     if picked is None or picked == _SENTINEL_KEEP:
         return None
     if picked == _SENTINEL_EXIT:
@@ -558,15 +594,66 @@ async def _pick_bool(sd: SettingDef, current: bool) -> str | None:
     return picked
 
 
+async def _pick_provider(sd: SettingDef, current: str) -> str | None:
+    """Pick from the closed set of supported chat providers.
+
+    Mirrors the wizard's provider step. Includes a "Keep current" /
+    "Exit" tail so the user can back out without committing.
+    """
+    from unread.util.prompt import Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
+
+    options = ("openai", "openrouter", "anthropic", "google", "local")
+    items: list = []
+    for opt in options:
+        marker = "  ★" if opt == current else ""
+        items.append(Choice(value=opt, label=f"{opt}{marker}"))
+    items.append(_sep())
+    items.append(Choice(value=_SENTINEL_KEEP, label=_t("settings_keep_current")))
+    items.append(Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")))
+
+    default = current if current in options else _SENTINEL_KEEP
+    console.print(f"[grey70]{sd.desc} — current: {current}[/grey70]")
+    picked = _select(sd.label, choices=items, default_value=default)
+    if picked is None or picked == _SENTINEL_KEEP:
+        return None
+    if picked == _SENTINEL_EXIT:
+        return _SENTINEL_EXIT
+    if picked == current:
+        return None
+    return picked
+
+
+async def _pick_string(sd: SettingDef, current: str) -> str | None:
+    """Free-text string input. Empty input clears the override."""
+    from unread.util.prompt import ask_text
+
+    raw = ask_text(
+        f"{sd.label} — current: {current or '(unset)'}\n{sd.desc}\n",
+        default=current,
+    )
+    if raw is None:
+        return _SENTINEL_EXIT
+    raw = raw.strip()
+    if raw.lower() in {"q", "quit", "exit"}:
+        return _SENTINEL_EXIT
+    if not raw:
+        return _SENTINEL_CLEAR
+    if raw == current:
+        return None
+    return raw
+
+
 async def _pick_int(sd: SettingDef, current: int) -> str | None:
     """Free-text integer input with validation. Re-prompts on garbage."""
-    import questionary
+    from unread.util.prompt import ask_text
 
     while True:
-        raw = await questionary.text(
+        raw = ask_text(
             _tf("settings_int_prompt", label=sd.label, desc=sd.desc, current=current),
             default="",
-        ).ask_async()
+        )
         if raw is None:
             return _SENTINEL_EXIT
         raw = raw.strip()
@@ -592,13 +679,9 @@ async def _pick_int(sd: SettingDef, current: int) -> str | None:
 
 async def _confirm_reset(n: int) -> bool:
     """Modal confirm before wiping every override."""
-    prompt = _tf("settings_drop_n_q", n=n)
-    try:
-        import questionary
+    from unread.util.prompt import confirm as _confirm
 
-        return bool(await questionary.confirm(prompt, default=False).ask_async())
-    except ImportError:
-        return typer.confirm(prompt, default=False)
+    return _confirm(_tf("settings_drop_n_q", n=n), default=False)
 
 
 # ----------------------------- Language pools ------------------------------

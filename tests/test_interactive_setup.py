@@ -185,13 +185,70 @@ def test_wizard_exit_writes_nothing(isolated_home: Path, mock_telethon) -> None:
     mock_telethon.connect.assert_not_called()
 
 
+def test_tg_init_skips_ai_provider_step(isolated_home: Path, mock_telethon) -> None:
+    """`unread tg init` (scope='telegram_only') jumps straight from folder
+    pick to the Telegram-credentials step — no provider menu, no key prompt."""
+    from unread.tg.commands import cmd_init
+
+    # Folder=1, then Telegram api_id=12345, api_hash=abcdef. Note: NO
+    # provider-pick prompt, NO key prompt — those would be the 2nd/3rd
+    # entries in `prompt_inputs` if the AI step fired. If it does fire
+    # the iter raises StopIteration and the test fails loudly.
+    prompt_inputs = iter(["1", "12345", "abcdef"])
+    with (
+        patch("typer.prompt", side_effect=lambda *a, **kw: next(prompt_inputs)),
+        patch("typer.confirm", return_value=True),  # yes to Telegram setup
+    ):
+        asyncio.run(cmd_init(scope="telegram_only"))
+
+    secrets = _read_secrets(isolated_home)
+    # Only Telegram creds were saved — AI step was skipped entirely.
+    assert "openai.api_key" not in secrets
+    assert secrets.get("telegram.api_id") == "12345"
+    assert secrets.get("telegram.api_hash") == "abcdef"
+
+
+def test_init_full_runs_ai_provider_step(isolated_home: Path, mock_telethon) -> None:
+    """`unread init` (default scope='full') asks the provider step too."""
+    from unread.tg.commands import cmd_init
+
+    # Folder=1, provider=1 (openai), key=sk-test, Telegram=n
+    prompt_inputs = iter(["1", "1", "sk-test"])
+    with (
+        patch("typer.prompt", side_effect=lambda *a, **kw: next(prompt_inputs)),
+        patch("typer.confirm", return_value=False),  # decline Telegram
+    ):
+        asyncio.run(cmd_init(scope="full"))
+
+    secrets = _read_secrets(isolated_home)
+    assert secrets == {"openai.api_key": "sk-test"}
+
+
+def test_init_top_level_command_routes_to_full_scope(isolated_home: Path, mock_telethon) -> None:
+    """`unread init` (the new top-level command) ↔ `cmd_init(scope='full')`."""
+    from typer.testing import CliRunner
+
+    from unread.cli import app
+
+    runner = CliRunner()
+    prompt_inputs = iter(["1", "1", "sk-via-cli"])
+    with (
+        patch("typer.prompt", side_effect=lambda *a, **kw: next(prompt_inputs)),
+        patch("typer.confirm", return_value=False),
+    ):
+        result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0, result.output
+    assert _read_secrets(isolated_home) == {"openai.api_key": "sk-via-cli"}
+
+
 def test_wizard_short_circuits_when_already_configured(
     isolated_home: Path, mock_telethon, monkeypatch
 ) -> None:
-    """install.toml + populated env → no folder/OpenAI/Telegram prompt fires.
-
-    Only Telethon auth runs. We assert by mocking `typer.prompt` to
-    raise on any unexpected call.
+    """install.toml + populated env → folder & Telegram-creds steps stay
+    silent; the AI provider step now fires unconditionally on full-scope
+    re-runs (the menu offers "Keep current" so the user can press Enter
+    through it). Only Telethon auth runs after that, no Telegram-creds
+    prompt because creds are already set.
     """
     _seed_pointer_at_default(isolated_home)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-set")
@@ -203,15 +260,17 @@ def test_wizard_short_circuits_when_already_configured(
 
     from unread.tg.commands import cmd_init
 
-    boom = MagicMock(side_effect=AssertionError("wizard should not prompt"))
+    # AI menu fallback (non-TTY) renders a numeric prompt; "1" picks the
+    # "Keep current" row that was prepended because the active provider
+    # already has a key. That's the only typer.prompt() call the wizard
+    # should make. typer.confirm must not fire (Telegram creds are set).
     confirm_boom = MagicMock(side_effect=AssertionError("wizard should not confirm"))
     with (
-        patch("typer.prompt", boom),
+        patch("typer.prompt", return_value="1"),
         patch("typer.confirm", confirm_boom),
     ):
         asyncio.run(cmd_init())
 
-    boom.assert_not_called()
     confirm_boom.assert_not_called()
-    # Telethon auth still runs (it's the only step that fires post-init).
+    # Telethon auth still runs (the only step that fires post-init).
     mock_telethon.connect.assert_awaited()

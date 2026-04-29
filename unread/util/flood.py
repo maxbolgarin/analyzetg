@@ -14,12 +14,35 @@ log = get_logger(__name__)
 T = TypeVar("T")
 
 
+def _user_visible_retry_status(message: str) -> None:
+    """Surface a one-line retry status to the terminal, when interactive.
+
+    A long run that hits a 429 / FloodWait used to look frozen — the
+    log line went to disk but never reached stdout. This emits a single
+    yellow line via Rich when stderr is a TTY; in a non-interactive run
+    (CI, scripted) we stay silent and rely on the structured log.
+    """
+    try:
+        import sys as _sys
+
+        from rich.console import Console as _Console
+
+        if not _sys.stderr.isatty():
+            return
+        _Console(stderr=True).print(f"[yellow]{message}[/]")
+    except Exception:
+        # Display is best-effort; never let a UI hiccup change retry semantics.
+        pass
+
+
 def retry_on_flood(
     max_retries: int = 10,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Decorator that catches Telethon FloodWaitError and sleeps the requested time + 1s.
 
-    Other exceptions propagate immediately.
+    Other exceptions propagate immediately. Users see a one-line
+    "FloodWait — sleeping {n}s" status on each retry so a 30-second
+    pause doesn't look like a frozen process.
     """
 
     def wrap(fn: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
@@ -33,6 +56,9 @@ def retry_on_flood(
                 except FloodWaitError as e:
                     delay = int(getattr(e, "seconds", 1)) + 1
                     log.warning("tg.flood_wait", delay=delay, attempt=attempt + 1)
+                    _user_visible_retry_status(
+                        f"Telegram FloodWait — sleeping {delay}s (attempt {attempt + 1}/{max_retries})…"
+                    )
                     await asyncio.sleep(delay)
             # Final attempt, no catch
             return await fn(*args, **kwargs)
@@ -45,7 +71,12 @@ def retry_on_flood(
 def retry_on_429(
     max_retries: int = 5, base: float = 1.5, cap: float = 30.0
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
-    """Exponential-backoff decorator for OpenAI rate limit / transient 5xx."""
+    """Exponential-backoff decorator for OpenAI rate limit / transient 5xx.
+
+    On a retry-eligible failure, sleep with jitter and emit a one-line
+    "Rate limited — retrying in Ns" status to stderr (TTY only) so the
+    user knows the CLI is alive during long sleeps.
+    """
 
     def wrap(fn: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
         @functools.wraps(fn)
@@ -72,6 +103,10 @@ def retry_on_429(
                         attempt=attempt + 1,
                         delay=round(delay, 2),
                         err=type(e).__name__,
+                    )
+                    label = "Rate limited" if is_rate_limit else type(e).__name__
+                    _user_visible_retry_status(
+                        f"{label} — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})…"
                     )
                     await asyncio.sleep(delay)
             return await fn(*args, **kwargs)
