@@ -82,6 +82,47 @@ def write_install_pointer(home: Path | None) -> None:
     pointer.write_text(body, encoding="utf-8")
 
 
+def install_pointer_drift() -> tuple[bool, str]:
+    """Detect when the install-pointer points to a directory that doesn't exist.
+
+    Returns ``(has_drift, hint)``. ``has_drift`` is True when the
+    pointer file lists a custom ``home`` and that directory is gone
+    (user moved their install without updating ``install.toml``). The
+    hint suggests the fix.
+
+    A missing pointer file (no setup yet) and an empty ``home`` (default
+    install) both return ``(False, "")``.
+
+    Used by `unread doctor` to surface "your config is in one place,
+    your DB is in another" before it manifests as silent data
+    duplication on next analyze.
+    """
+    pointer = install_pointer_path()
+    if not pointer.is_file():
+        return (False, "")
+    try:
+        import tomllib
+
+        data = tomllib.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (
+            True,
+            f"{pointer} is unreadable / not valid TOML — delete it and re-run `unread tg init` to recreate.",
+        )
+    home = data.get("home")
+    if not home:
+        return (False, "")  # default install
+    target = Path(str(home)).expanduser()
+    if target.is_dir():
+        return (False, "")
+    return (
+        True,
+        f"{pointer} points at {target}, which doesn't exist. "
+        "Either restore that directory or edit the pointer (or delete it "
+        "to fall back to the default `~/.unread/`).",
+    )
+
+
 def storage_dir() -> Path:
     return unread_home() / "storage"
 
@@ -219,20 +260,26 @@ def compute_window(
     until: str | None,
     last_days: int | None,
     last_hours: int | None = None,
+    last_minutes: int | None = None,
 ) -> tuple[datetime | None, datetime | None]:
     """Return a UTC-aware (since, until) window.
 
-    `--last-hours N` → (now-UTC - N hours, now-UTC); `--last-days N` →
-    (now-UTC - N days, now-UTC); `--since/--until` are parsed as
-    UTC-midnight by `parse_ymd`. Telethon's `offset_date` and SQLite
-    `messages.date` column are both UTC, so staying UTC end-to-end
-    avoids off-by-timezone window edges.
+    `--last-minutes N` → (now-UTC - N min, now-UTC); `--last-hours N` →
+    (now-UTC - N hours, now-UTC); `--last-days N` → (now-UTC - N days,
+    now-UTC); `--since/--until` are parsed as UTC-midnight by
+    `parse_ymd`. Telethon's `offset_date` and SQLite `messages.date`
+    column are both UTC, so staying UTC end-to-end avoids off-by-
+    timezone window edges.
 
-    Precedence within this helper: `last_hours` > `last_days` >
-    `since/until`. The hour-granular flag is the more specific one,
-    so when both are passed it wins. Caller-side flag mutex still
-    holds — this helper is the *resolver*, not the validator.
+    Precedence within this helper: `last_minutes` > `last_hours` >
+    `last_days` > `since/until`. The finer-grained flag is the more
+    specific one, so when several are passed it wins. Caller-side flag
+    mutex still holds — this helper is the *resolver*, not the
+    validator.
     """
+    if last_minutes:
+        until_dt = datetime.now(UTC)
+        return until_dt - timedelta(minutes=last_minutes), until_dt
     if last_hours:
         until_dt = datetime.now(UTC)
         return until_dt - timedelta(hours=last_hours), until_dt

@@ -570,6 +570,31 @@ def test_citation_regex_matches_telegram_urls() -> None:
     assert msg_ids == ["1", "2"]
 
 
+def test_flatten_citations_renders_url_inline() -> None:
+    """`--plain-citations` mode rewrites markdown links → text + URL.
+
+    macOS Terminal.app (and similar terminals without OSC 8 hyperlink
+    support) only style the markdown link without making it clickable.
+    The flattened form `#N (url)` keeps the URL visible and copy-able.
+    """
+    from unread.analyzer.commands import _flatten_citations
+
+    out = _flatten_citations("see [#42](https://t.me/x/42) and [#7](https://t.me/c/1/7)")
+    assert "[#42](" not in out  # original markdown link is gone
+    assert "#42 (https://t.me/x/42)" in out
+    assert "#7 (https://t.me/c/1/7)" in out
+
+    # Non-citation markdown links are untouched (the regex requires the
+    # `[#N](...)` shape, not arbitrary link text).
+    body = "see [the docs](https://example.com) for details"
+    assert _flatten_citations(body) == body
+
+    # Idempotent: running it twice on already-flattened text leaves it
+    # alone (the second pass has no `[#N](...)` matches).
+    once = _flatten_citations("[#1](https://t.me/x/1)")
+    assert _flatten_citations(once) == once
+
+
 def test_rerank_total_failure_returns_keyword_sorted_pool() -> None:
     """When all rerank batches fail, the fallback must keep the *best*
     keyword hits (sorted by score), not an arbitrary slice."""

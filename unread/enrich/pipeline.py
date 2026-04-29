@@ -203,7 +203,7 @@ async def enrich_messages(
 
     with Progress(
         SpinnerColumn(),
-        TextColumn("[dim]{task.description}[/]"),
+        TextColumn("[grey70]{task.description}[/]"),
         BarColumn(),
         MofNCompleteColumn(),
         TimeElapsedColumn(),

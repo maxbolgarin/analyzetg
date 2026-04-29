@@ -39,7 +39,7 @@ def test_bare_unread_with_no_openai_shows_banner(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "OpenAI key missing" in result.output
-    assert "unread tg init" in result.output
+    assert "unread init" in result.output
     mock.assert_not_called()
 
 
@@ -97,3 +97,81 @@ def test_first_run_banner_renders_each_variant(missing: str) -> None:
     # that it doesn't raise. The exact copy is asserted in the gating
     # tests above.
     _print_first_run_banner(missing)
+
+
+# --- bare `unread` setup prompt ----------------------------------------
+
+
+def test_bare_unread_offers_init_when_uninitialized(monkeypatch, tmp_path) -> None:
+    """`unread` with no install.toml asks 'Run setup now?' before falling
+    through to the quickstart panel."""
+    from unread.cli import app
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    _drop_openai(monkeypatch)
+
+    runner = CliRunner()
+    # `_stdin_has_data` reads `sys.stdin.isatty()`; runner.invoke with
+    # no `input=` puts a TTY-like stream behind it, so the prompt fires.
+    # We say "no" → wizard doesn't run; quickstart prints; exit 0.
+    with patch("typer.confirm", return_value=False) as confirm:
+        result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.output
+    confirm.assert_called_once()
+    assert "isn't set up yet" in result.output or "AI provider key" in result.output
+    # Help overview still prints after the user declines.
+    # Bare `unread` shows the status panel + a hint to run `unread help`;
+    # the command list moved behind `unread help` so this stays a quick
+    # health check.
+    assert "Status" in result.output
+    assert "unread help" in result.output
+
+
+def test_bare_unread_offers_init_runs_wizard_on_yes(monkeypatch, tmp_path) -> None:
+    """Saying 'Yes' kicks off `cmd_init` (full scope)."""
+    from unread.cli import app
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    _drop_openai(monkeypatch)
+
+    runner = CliRunner()
+    fake_init = AsyncMock()
+    with (
+        patch("typer.confirm", return_value=True),
+        patch("unread.tg.commands.cmd_init", new=fake_init),
+    ):
+        result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.output
+    fake_init.assert_awaited_once()
+    # The wizard kwargs should pin scope="full" — sanity-check.
+    assert fake_init.await_args.kwargs.get("scope") == "full"
+
+
+def test_bare_unread_skips_prompt_when_already_initialized(monkeypatch, tmp_path) -> None:
+    """install.toml + populated key → no prompt, just the quickstart panel."""
+    from unread.cli import app
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    # Seed install.toml so `_is_uninitialized()` returns False.
+    pointer = tmp_path / "fakehome" / ".unread"
+    pointer.mkdir(parents=True, exist_ok=True)
+    (pointer / "install.toml").write_text('home = ""\n', encoding="utf-8")
+    # Conftest's fake `OPENAI_API_KEY` is intact, so the credential
+    # check returns True → no prompt.
+    from unread.config import reset_settings
+
+    reset_settings()
+
+    runner = CliRunner()
+    with patch("typer.confirm") as confirm:
+        result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.output
+    confirm.assert_not_called()
+    # Bare `unread` shows the status panel + a hint to run `unread help`;
+    # the command list moved behind `unread help` so this stays a quick
+    # health check.
+    assert "Status" in result.output
+    assert "unread help" in result.output

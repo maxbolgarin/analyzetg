@@ -62,9 +62,15 @@ class AnthropicProvider:
                 "Anthropic provider selected but `anthropic.api_key` is empty. "
                 "Run `unread tg init` to add one."
             )
+        # `max_retries` makes the SDK transparently re-issue the call on
+        # `RateLimitError` / `APIConnectionError` / 5xx with exponential
+        # backoff. We share the single `openai.max_retries` setting so a
+        # user moving between providers gets the same retry budget — no
+        # need to know which knob to flip.
         self._client = AsyncAnthropic(
             api_key=settings.anthropic.api_key,
             timeout=settings.openai.request_timeout_sec,
+            max_retries=settings.openai.max_retries,
         )
         self._settings = settings
 

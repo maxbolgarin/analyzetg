@@ -34,6 +34,7 @@ from unread.youtube.paths import youtube_report_path
 from unread.youtube.transcript import (
     NoTranscriptAvailable,
     TranscriptSource,
+    YoutubeFetchError,
     get_transcript,
 )
 from unread.youtube.urls import extract_video_id
@@ -248,7 +249,7 @@ def _render_metadata_panel(meta: YoutubeMetadata, *, audio_estimate: float) -> P
     if meta.description:
         desc = meta.description.strip().splitlines()[0][:200]
         rows.append("")
-        rows.append(f"[dim]{desc}…[/]" if len(meta.description) > 200 else f"[dim]{desc}[/]")
+        rows.append(f"[grey70]{desc}…[/]" if len(meta.description) > 200 else f"[grey70]{desc}[/]")
     return Panel("\n".join(rows), title="YouTube video", border_style="cyan")
 
 
@@ -270,35 +271,29 @@ async def _interactive_pick_source(
     Returns the chosen TranscriptSource ("auto" / "captions" / "audio")
     or `None` to signal cancel.
     """
-    import questionary
+    from unread.util.prompt import Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
 
     has_captions = _has_any_captions(meta)
     audio_label = f"Audio + Whisper — ~${audio_estimate:.4f}" if audio_estimate > 0 else "Audio + Whisper"
     choices: list = [
-        questionary.Choice(
-            "Auto — captions if available, otherwise Whisper (recommended)",
-            value="auto",
-        ),
+        Choice(value="auto", label="Auto — captions if available, otherwise Whisper (recommended)"),
     ]
     if has_captions:
-        choices.append(questionary.Choice("Captions only — free, fast", value="captions"))
-    else:
-        choices.append(
-            questionary.Choice(
-                "Captions only — [unavailable for this video]",
-                value="captions",
-                disabled="no captions",
-            )
-        )
-    choices.append(questionary.Choice(audio_label, value="audio"))
-    choices.append(questionary.Choice("Cancel", value=None))
+        choices.append(Choice(value="captions", label="Captions only — free, fast"))
+    choices.append(Choice(value="audio", label=audio_label))
+    choices.append(_sep())
+    choices.append(Choice(value="__cancel__", label="Cancel"))
 
-    answer = await questionary.select(
+    answer = _select(
         "Continue analysis? Pick the transcript source:",
         choices=choices,
-        default=choices[0],
-    ).ask_async()
-    return answer  # may be None on Ctrl-C / Cancel
+        default_value="auto",
+    )
+    if answer is None or answer == "__cancel__":
+        return None
+    return answer
 
 
 def _restore_metadata_from_row(row: dict) -> YoutubeMetadata:
@@ -373,7 +368,7 @@ async def cmd_analyze_youtube(
         cached = None if no_cache else await repo.get_youtube_video(video_id)
         timed_cues: list[tuple[int, str]] | None = None
         if cached and cached.get("transcript"):
-            console.print(f"[dim]Using cached YouTube metadata + transcript ({video_id})[/]")
+            console.print(f"[grey70]Using cached YouTube metadata + transcript ({video_id})[/]")
             metadata = _restore_metadata_from_row(cached)
             transcript_text = cached["transcript"] or ""
             transcript_source: str = cached.get("transcript_source") or "captions"
@@ -388,8 +383,16 @@ async def cmd_analyze_youtube(
                 except (TypeError, ValueError):
                     timed_cues = None
         else:
-            console.print(f"[dim]Fetching YouTube metadata for {video_id}…[/]")
-            metadata = await fetch_metadata(video_id)
+            console.print(f"[grey70]Fetching YouTube metadata for {video_id}…[/]")
+            try:
+                metadata = await fetch_metadata(video_id)
+            except YoutubeFetchError as e:
+                # yt-dlp couldn't reach the video at all — friendly banner
+                # plus an upgrade hint, since this is the most common
+                # symptom of yt-dlp lagging behind a YouTube format change.
+                console.print(f"[red]{_t('youtube_fetch_failed').format(err=str(e)[:300])}[/]")
+                console.print(f"[grey70]{_t('youtube_fetch_failed_hint')}[/]")
+                raise typer.Exit(1) from e
 
             audio_estimate = float(
                 audio_cost(settings.openai.audio_model_default, metadata.duration_sec) or 0.0
@@ -418,6 +421,10 @@ async def cmd_analyze_youtube(
                 )
             except NoTranscriptAvailable as e:
                 raise typer.BadParameter(str(e)) from e
+            except YoutubeFetchError as e:
+                console.print(f"[red]{_t('youtube_fetch_failed').format(err=str(e)[:300])}[/]")
+                console.print(f"[grey70]{_t('youtube_fetch_failed_hint')}[/]")
+                raise typer.Exit(1) from e
             transcript_text = tres.text
             transcript_source = tres.source
             transcript_cost = tres.cost_usd
@@ -503,7 +510,9 @@ async def cmd_analyze_youtube(
                     if yes:
                         console.print("[red]Aborting (--yes set).[/]")
                         raise typer.Exit(2)
-                    if not typer.confirm("Run anyway?", default=False):
+                    from unread.util.prompt import confirm as _confirm
+
+                    if not _confirm("Run anyway?", default=False):
                         console.print("[yellow]Aborted.[/]")
                         raise typer.Exit(0)
 
@@ -524,7 +533,7 @@ async def cmd_analyze_youtube(
         # video. Subbed in by the formatter via `link_template`.
         link_template = f"https://www.youtube.com/watch?v={video_id}&t={{msg_id}}s"
 
-        console.print(f"[dim]{_t('running_analysis')}[/]")
+        console.print(f"[grey70]{_t('running_analysis')}[/]")
         result = await run_analysis(
             repo=repo,
             chat_id=0,

@@ -12,6 +12,10 @@ canonical :class:`unread.ai.providers.ChatResult` shape. Translations:
     `"MAX_TOKENS"` when output is cut. Mapped to `truncated=True`.
   - **Cached tokens**: `usage_metadata.cached_content_token_count` —
     surfaced as `cached_tokens` so prompt-cache accounting matches.
+  - **Retries**: the `google-genai` client doesn't expose `max_retries`
+    on its constructor, so we wrap the chat call in a small inline
+    backoff loop that catches the SDK's typed `APIError` for 429 / 5xx
+    and surfaces a one-line retry status to the user.
 
 Vertex AI mode is intentionally out of scope for v1 — it would require
 project / location / ADC plumbing beyond the API-key flow most users
@@ -20,7 +24,14 @@ expect.
 
 from __future__ import annotations
 
+import asyncio
+import random
+
 from unread.ai.providers import ChatResult, ProviderUnavailableError
+from unread.util.flood import _user_visible_retry_status
+from unread.util.logging import get_logger
+
+log = get_logger(__name__)
 
 
 def _convert_messages(
@@ -76,6 +87,7 @@ class GoogleProvider:
         max_tokens: int,
         temperature: float,
     ) -> ChatResult:
+        from google.genai import errors as genai_errors
         from google.genai import types
 
         system_prompt, contents = _convert_messages(messages)
@@ -86,11 +98,37 @@ class GoogleProvider:
         if system_prompt:
             config_kwargs["system_instruction"] = system_prompt
 
-        resp = await self._client.aio.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(**config_kwargs),
-        )
+        max_retries = self._settings.openai.max_retries
+        resp = None
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+                break
+            except genai_errors.APIError as e:
+                # google-genai's APIError carries an integer `code`
+                # (HTTP-style). 429 = rate limit; 5xx = transient server
+                # error. Anything else (4xx) is a programmer / config
+                # bug — re-raise so the user sees it instead of waiting.
+                code = int(getattr(e, "code", 0) or 0)
+                retriable = code == 429 or 500 <= code < 600
+                if not retriable or attempt == max_retries - 1:
+                    raise
+                delay = min(1.5**attempt, 30.0) + random.uniform(0, 1)
+                log.warning(
+                    "google.retry",
+                    attempt=attempt + 1,
+                    delay=round(delay, 2),
+                    code=code,
+                )
+                _user_visible_retry_status(
+                    f"Gemini {code} — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})…"
+                )
+                await asyncio.sleep(delay)
+        assert resp is not None  # loop either returns or raises
 
         # `resp.text` is the convenience accessor; falls back to
         # walking candidates[0].content.parts when None.

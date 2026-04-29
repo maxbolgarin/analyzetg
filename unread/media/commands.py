@@ -191,7 +191,7 @@ async def save_raw_media(
                         stats["skipped"] += 1
                         progress.advance(task)
                         return
-                    progress.update(task, label=f"[dim]{filename}[/]")
+                    progress.update(task, label=f"[grey70]{filename}[/]")
                     await download_message(client, tel_msg, dest)
                     stats["done"] += 1
                 except Exception as e:
@@ -213,7 +213,7 @@ async def save_raw_media(
 
     console.print(
         f"[green]Saved[/] {stats['done']}/{len(candidates)}  "
-        f"[dim]skipped={stats['skipped']} "
+        f"[grey70]skipped={stats['skipped']} "
         f"unavailable={stats['no_media']} failed={stats['failed']}[/]  "
         f"→ [cyan]{output_dir}[/]"
     )
@@ -228,6 +228,8 @@ async def cmd_download_media(
     since: str | None = None,
     until: str | None = None,
     last_days: int | None = None,
+    last_hours: int | None = None,
+    last_minutes: int | None = None,
     output: Path | None = None,
     limit: int | None = None,
     overwrite: bool = False,
@@ -243,7 +245,7 @@ async def cmd_download_media(
     from unread.enrich.base import EnrichOpts
 
     settings = get_settings()
-    since_dt, until_dt = _compute_window(since, until, last_days)
+    since_dt, until_dt = _compute_window(since, until, last_days, last_hours, last_minutes)
 
     type_filter: set[str] | None = None
     if types:
@@ -256,7 +258,7 @@ async def cmd_download_media(
         type_filter = requested
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]{_t('media_resolving_label')}[/] {ref}")
+        console.print(f"[grey70]{_t('media_resolving_label')}[/] {ref}")
         resolved = await resolve(client, repo, ref)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
@@ -303,10 +305,10 @@ async def cmd_download_media(
             )
             sample = candidates[:10]
             for m in sample:
-                console.print(f"  [dim]{m.media_type:<10}[/] msg_id={m.msg_id}  {m.date}")
+                console.print(f"  [grey70]{m.media_type:<10}[/] msg_id={m.msg_id}  {m.date}")
             if len(candidates) > len(sample):
-                console.print(f"  [dim]{_tf('cli_prune_and_more', n=len(candidates) - len(sample))}[/]")
-            console.print(f"[dim]{_t('media_dry_run_no_files')}[/]")
+                console.print(f"  [grey70]{_tf('cli_prune_and_more', n=len(candidates) - len(sample))}[/]")
+            console.print(f"[grey70]{_t('media_dry_run_no_files')}[/]")
             return
 
         await save_raw_media(

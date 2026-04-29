@@ -85,6 +85,7 @@ async def cmd_dump(
     until: str | None,
     last_days: int | None,
     last_hours: int | None = None,
+    last_minutes: int | None = None,
     full_history: bool = False,
     thread: int | None = None,
     from_msg: str | None,
@@ -128,6 +129,7 @@ async def cmd_dump(
                 ("--until", bool(until)),
                 ("--last-days", last_days is not None),
                 ("--last-hours", last_hours is not None),
+                ("--last-minutes", last_minutes is not None),
                 ("--from-msg", bool(from_msg)),
             )
             if present
@@ -194,7 +196,7 @@ async def cmd_dump(
     )
 
     settings = get_settings()
-    since_dt, until_dt = _compute_window(since, until, last_days, last_hours)
+    since_dt, until_dt = _compute_window(since, until, last_days, last_hours, last_minutes)
     from_msg_id = _parse_from_msg(from_msg)
 
     # Parse save_media_types CSV once; None → all kinds.
@@ -205,13 +207,13 @@ async def cmd_dump(
     from unread.analyzer.commands import _derive_internal_id
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[dim]{_tf('resolving', ref=ref)}[/]")
+        console.print(f"[grey70]{_tf('resolving', ref=ref)}[/]")
         resolved = await resolve(client, repo, ref, join=join)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
         console.print(
-            f"[dim]→ Resolved[/] {resolved.title or chat_id} "
-            f"[dim](id={chat_id}, kind={resolved.kind}"
+            f"[grey70]→ Resolved[/] {resolved.title or chat_id} "
+            f"[grey70](id={chat_id}, kind={resolved.kind}"
             f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
         )
         if (
@@ -276,7 +278,7 @@ async def cmd_dump(
 
         if is_forum and all_flat:
             thread_id = None
-            console.print(f"[dim]{_t('listing_forum_topics_for_flat')}[/]")
+            console.print(f"[grey70]{_t('listing_forum_topics_for_flat')}[/]")
             topics_for_flat = await list_forum_topics(client, chat_id)
             topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
             topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
@@ -286,7 +288,7 @@ async def cmd_dump(
                     from_msg_id = min(non_zero)
                     unread_across = sum(t.unread_count for t in topics_for_flat)
                     console.print(
-                        f"[dim]→ Forum unread: {unread_across} across "
+                        f"[grey70]→ Forum unread: {unread_across} across "
                         f"{len(topic_markers)} topics "
                         f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
                     )
@@ -298,7 +300,7 @@ async def cmd_dump(
             and thread_id > 0
             and not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
         ):
-            console.print(f"[dim]{_t('looking_up_topic_marker')}[/]")
+            console.print(f"[grey70]{_t('looking_up_topic_marker')}[/]")
             topics = await list_forum_topics(client, chat_id)
             matched = next((t for t in topics if t.topic_id == thread_id), None)
             if matched is None:
@@ -313,7 +315,7 @@ async def cmd_dump(
             from_msg_id = matched.read_inbox_max_id + 1
             thread_title = matched.title
             console.print(
-                f"[dim]→ {matched.unread_count} unread in '{matched.title}' "
+                f"[grey70]→ {matched.unread_count} unread in '{matched.title}' "
                 f"after msg_id={matched.read_inbox_max_id}[/]"
             )
         elif is_forum and thread_id and thread_id > 0:
@@ -569,7 +571,7 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
     """Interactively pick a forum mode for dump. Returns (all_flat, all_per_topic, thread_id)."""
     import sys as _sys
 
-    console.print(f"[dim]{_t('listing_forum_topics')}[/]")
+    console.print(f"[grey70]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     if not topics:
         console.print(f"[yellow]{_t('no_topics_in_forum')}[/]")
@@ -586,23 +588,31 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
         raise typer.Exit(2)
 
     _print_topics_table(topics, with_unread=True)
-    while True:
-        answer = typer.prompt(_t("forum_pick_prompt"), default="P").strip()
-        up = answer.upper()
-        if up == "Q":
-            console.print(f"[dim]{_t('aborted')}[/]")
-            raise typer.Exit(0)
-        if up == "A":
-            return True, False, 0
-        if up == "P":
-            return False, True, 0
-        if answer.isdigit():
-            tid = int(answer)
-            if any(t.topic_id == tid for t in topics):
-                return False, False, tid
-            console.print(f"[red]{_tf('no_topic_with_id', tid=tid)}[/]")
-            continue
-        console.print(f"[red]{_t('not_a_valid_choice')}[/]")
+    from unread.util.prompt import Choice as _Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
+
+    choices: list = [
+        _Choice(value="__per_topic__", label="Per-topic — one file per topic"),
+        _Choice(value="__all_flat__", label="All-flat — whole forum as one dump"),
+        _sep("── Pick a single topic ──"),
+    ]
+    for t in topics:
+        unread_marker = f"  ({t.unread_count} unread)" if t.unread_count else ""
+        choices.append(_Choice(value=f"tid:{t.topic_id}", label=f"#{t.topic_id} · {t.title}{unread_marker}"))
+    choices.append(_sep())
+    choices.append(_Choice(value="__quit__", label="Quit"))
+    picked = _select(_t("forum_pick_prompt"), choices=choices, default_value="__per_topic__")
+    if picked is None or picked == "__quit__":
+        console.print(f"[grey70]{_t('aborted')}[/]")
+        raise typer.Exit(0)
+    if picked == "__all_flat__":
+        return True, False, 0
+    if picked == "__per_topic__":
+        return False, True, 0
+    if picked.startswith("tid:"):
+        return False, False, int(picked.removeprefix("tid:"))
+    raise typer.Exit(0)
 
 
 def _print_topics_table(topics: list[ForumTopic], *, with_unread: bool = True) -> None:
@@ -738,7 +748,9 @@ async def _dump_no_ref(
         if yes or not _sys.stdin.isatty():
             mark_read_effective = False
         else:
-            mark_read_effective = typer.confirm(_t("mark_chats_read_after_dump_q"), default=False)
+            from unread.util.prompt import confirm as _confirm
+
+            mark_read_effective = _confirm(_t("mark_chats_read_after_dump_q"), default=False)
     else:
         mark_read_effective = mark_read
 
@@ -919,7 +931,7 @@ def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: i
                 w.writerow([m.msg_id, m.date.isoformat(), m.sender_name, m.text, m.transcript])
         console.print(buf.getvalue(), highlight=False)
     console.print(Rule(style="cyan"))
-    console.print(f"[dim]{_tf('export_n_msgs', n=count)}[/]")
+    console.print(f"[grey70]{_tf('export_n_msgs', n=count)}[/]")
 
 
 def _transcribable(m: Message, settings) -> bool:

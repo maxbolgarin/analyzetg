@@ -77,6 +77,25 @@ async def test_app_settings_audio_empty_string_means_autodetect(tmp_path: Path) 
     reset_settings()
 
 
+async def test_app_settings_plain_citations_overlay(tmp_path: Path) -> None:
+    """`analyze.plain_citations` round-trips through the app_settings
+    overlay so users on terminals without OSC 8 can persist the flag
+    once via `unread settings set ...` instead of passing it every run."""
+    db = tmp_path / "t.sqlite"
+    setup = await Repo.open(db)
+    await setup.set_app_setting("analyze.plain_citations", "1")
+    await setup.close()
+
+    reset_settings()
+    pre = get_settings()
+    assert pre.analyze.plain_citations is False  # config default
+
+    async with open_repo(db):
+        s = get_settings()
+        assert s.analyze.plain_citations is True
+    reset_settings()
+
+
 async def test_app_settings_unknown_keys_ignored_by_overlay(tmp_path: Path) -> None:
     """Allow-list keeps the overlay tight: keys outside `_OVERRIDE_KEYS`
     are stored but don't mutate live settings."""

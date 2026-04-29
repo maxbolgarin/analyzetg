@@ -29,18 +29,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-# Allow-listed secret keys. Mirrors the `_SECRET_KEYS` allowlist in
-# `db/repo.py`; kept here too so the legacy session-DB reader can
-# filter without importing the repo module (cheaper + avoids a
-# circular import at startup).
-_SECRET_KEYS: tuple[str, ...] = (
-    "telegram.api_id",
-    "telegram.api_hash",
-    "openai.api_key",
-    "openrouter.api_key",
-    "anthropic.api_key",
-    "google.api_key",
-)
+from unread.db._keys import SECRET_KEYS as _SECRET_KEYS_SET
+
+# `_keys.SECRET_KEYS` is a frozenset (best for membership checks) but
+# this module needs an ordered, parameterizable form to splat into a
+# `WHERE key IN (?, ?, …)` query. Tuple-ize once at module load.
+_SECRET_KEYS: tuple[str, ...] = tuple(sorted(_SECRET_KEYS_SET))
 
 # Telethon historically wrote `<name>` and now writes `<name>.session`.
 # We accept either when locating the legacy on-disk file.
@@ -91,12 +85,23 @@ def _read_legacy_session_secrets(session_path: Path) -> dict[str, str]:
         conn.close()
 
 
+# Module-level once-flag so the deprecation warning fires at most once
+# per process even though `read_secrets` runs every time settings are
+# constructed (CLI bootstrap + per-test fixture reset).
+_LEGACY_FALLBACK_WARNED = False
+
+
 def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]
     """Return persisted secrets, looking in the data DB then the legacy session DB.
 
     Returns an empty dict when nothing is persisted anywhere. Caller
     decides which fields to overlay onto in-memory settings — typically
     only the ones that the higher-precedence layers left empty.
+
+    When the legacy ``session.sqlite::unread_secrets`` table is the only
+    source, log a once-per-process deprecation warning so users know to
+    re-run ``unread tg init`` (which writes to the new location) before
+    the next release removes the fallback.
     """
     # Late import: this module is read at `config.load_settings` time,
     # which itself runs at `unread.cli` module-import. Going through
@@ -107,4 +112,28 @@ def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]
     primary = read_data_db_secrets_sync(settings.storage.data_path)
     if primary:
         return primary
-    return _read_legacy_session_secrets(settings.telegram.session_path)
+    legacy = _read_legacy_session_secrets(settings.telegram.session_path)
+    if legacy:
+        global _LEGACY_FALLBACK_WARNED
+        if not _LEGACY_FALLBACK_WARNED:
+            _LEGACY_FALLBACK_WARNED = True
+            # Use the project's structured logger lazily to avoid a hard
+            # dep at import time (this module loads early via
+            # `config.load_settings`).
+            try:
+                from unread.util.logging import get_logger
+
+                get_logger(__name__).warning(
+                    "secrets.legacy_fallback",
+                    hint=(
+                        "Credentials are being read from the legacy "
+                        "session.sqlite::unread_secrets table. Re-run "
+                        "`unread tg init` to migrate them into "
+                        "data.sqlite::secrets — the legacy fallback will "
+                        "be removed in the next release."
+                    ),
+                )
+            except Exception:
+                # Never let a logging hiccup block startup.
+                pass
+    return legacy

@@ -28,6 +28,7 @@ from unread.analyzer.prompts import (
 from unread.config import get_settings
 from unread.db.repo import Repo
 from unread.enrich.base import EnrichOpts
+from unread.enrich.link import extract_urls
 from unread.enrich.pipeline import enrich_messages
 from unread.i18n import t as i18n_t
 from unread.util.logging import get_logger
@@ -160,7 +161,7 @@ async def _progress_single(*, label: str, coro):
 
     with Progress(
         SpinnerColumn(),
-        TextColumn(f"[dim]{label}[/]"),
+        TextColumn(f"[grey70]{label}[/]"),
         TimeElapsedColumn(),
         transient=True,
         console=_pipeline_console(),
@@ -193,6 +194,15 @@ class AnalysisResult:
     enrich_cost_usd: float = 0.0
     enrich_summary: str = ""
     raw_msg_count: int = 0  # before filter / dedupe / enrich — shows filtering loss
+    # Per-kind breakdown of the messages actually analyzed: {"text": n, "voice": n,
+    # "videonote": n, "video": n, "photo": n, "doc": n}. Drives the "what was
+    # in there?" header line so the user can see at a glance how many photos /
+    # voice notes / docs went into the run vs plain text.
+    media_counts: dict[str, int] = field(default_factory=dict)
+    # Count of analyzed messages that contain at least one non-Telegram URL
+    # in their text. Counted separately because a `link` is orthogonal to
+    # `media_type` (a photo with a URL in its caption ticks both).
+    link_count: int = 0
 
 
 @dataclass(slots=True)
@@ -539,6 +549,7 @@ async def run_analysis(
         )
 
     period = (opts.since, opts.until)
+    media_counts, link_count = _media_breakdown(msgs)
     if link_template_override is not None:
         link_template = link_template_override
     else:
@@ -692,6 +703,8 @@ async def run_analysis(
             enrich_cost_usd=enrich_cost,
             enrich_summary=enrich_summary_str,
             raw_msg_count=raw_count,
+            media_counts=media_counts,
+            link_count=link_count,
         )
 
     # --- Map-reduce branch
@@ -708,7 +721,7 @@ async def run_analysis(
 
     with Progress(
         SpinnerColumn(),
-        TextColumn("[dim]Analyzing chunks ({task.fields[model]})[/]"),
+        TextColumn("[grey70]Analyzing chunks ({task.fields[model]})[/]"),
         BarColumn(),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
@@ -846,7 +859,29 @@ async def run_analysis(
         enrich_cost_usd=enrich_cost,
         enrich_summary=enrich_summary_str,
         raw_msg_count=raw_count,
+        media_counts=media_counts,
+        link_count=link_count,
     )
+
+
+def _media_breakdown(msgs: list) -> tuple[dict[str, int], int]:
+    """Count messages by media kind and how many carry external URLs.
+
+    Returns ``(media_counts, link_count)`` where ``media_counts`` maps
+    "text" / "voice" / "videonote" / "video" / "photo" / "doc" → count
+    (only kinds with non-zero counts are returned), and ``link_count`` is
+    the number of messages containing at least one non-Telegram http(s)
+    URL in their text (uses ``enrich.link.extract_urls`` so the host
+    skip-list and t.me filtering match the link enricher's behavior).
+    """
+    counts: dict[str, int] = {}
+    link_count = 0
+    for m in msgs:
+        kind = m.media_type or "text"
+        counts[kind] = counts.get(kind, 0) + 1
+        if m.text and extract_urls(m.text):
+            link_count += 1
+    return counts, link_count
 
 
 def _fmt_period(period: tuple[datetime | None, datetime | None]) -> str:

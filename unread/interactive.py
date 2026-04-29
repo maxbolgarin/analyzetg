@@ -28,6 +28,7 @@ from unread.tg.client import tg_client
 from unread.tg.dialogs import list_unread_dialogs
 from unread.tg.topics import list_forum_topics
 from unread.util.logging import get_logger
+from unread.util.prompt import _SELECTED_STYLE as _SHARED_PROMPT_STYLE
 
 
 def _expand_printable_for_search() -> None:
@@ -66,22 +67,13 @@ _expand_printable_for_search()
 console = Console()
 log = get_logger(__name__)
 
-# Full-line highlight for the currently-hovered row. Default questionary
-# only colours the `»` pointer; this reverses the whole line so selection
-# is unmistakable.
-LIST_STYLE = questionary.Style(
-    [
-        # The row the arrow keys are on — full-line reverse for visibility.
-        ("highlighted", "reverse bold"),
-        # The default (pre-selected) row — just bold, no reverse, so it
-        # doesn't compete visually with the hovered one.
-        ("selected", "noreverse bold fg:ansigreen"),
-        ("pointer", "bold fg:ansicyan"),
-        ("qmark", "bold fg:ansicyan"),
-        ("question", "bold"),
-        ("answer", "fg:ansigreen bold"),
-    ]
-)
+# All wizards / pickers across the CLI share `unread.util.prompt`'s
+# style so the look-and-feel is identical between the init wizard
+# (which routes through `prompt.select`) and the analyze wizard
+# (which still calls `questionary.select` directly for the chat /
+# topic / preset / period table layouts). One source of truth: edit
+# `_SELECTED_STYLE` in `unread/util/prompt.py` to restyle everywhere.
+LIST_STYLE = questionary.Style(list(_SHARED_PROMPT_STYLE))
 
 
 # Sentinel returned by picker helpers when the user chooses "← Back".
@@ -517,10 +509,10 @@ async def run_interactive_describe() -> None:
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path):
         console.print(f"[bold cyan]{i18n_t('wiz_pick_chat_to_describe')}[/]")
-        console.print(f"[dim]{i18n_t('wiz_tips')}[/]\n")
+        console.print(f"[grey70]{i18n_t('wiz_tips')}[/]\n")
         chat = await _pick_chat(client, offer_all_unread=False)
         if chat is None or chat is ALL_UNREAD:
-            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            console.print(f"[grey70]{i18n_t('cancelled')}[/]")
             return
         chat_ref = str(chat["chat_id"])
 
@@ -595,10 +587,10 @@ async def run_interactive_ask(
         try:
             question = (await session.prompt_async(HTML("<ansicyan>?</ansicyan> "))).strip()
         except (EOFError, KeyboardInterrupt):
-            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            console.print(f"[grey70]{i18n_t('cancelled')}[/]")
             return
         if not question:
-            console.print(f"[dim]{i18n_t('cancelled')}[/]")
+            console.print(f"[grey70]{i18n_t('cancelled')}[/]")
             return
 
     answers = await _collect_answers(
@@ -711,10 +703,10 @@ async def _collect_answers(
                 if console_out
                 else (f"{output}" if output is not None else "reports/ (auto-named file)")
             )
-            console.print(f"  [dim]output (from CLI):[/]    [bold]{out_label}[/]")
+            console.print(f"  [grey70]output (from CLI):[/]    [bold]{out_label}[/]")
         if mark_read_forced:
-            console.print(f"  [dim]mark read (from CLI):[/] [bold]{'yes' if mark_read else 'no'}[/]")
-        console.print(f"[dim]{i18n_t('wiz_tips')}[/]\n")
+            console.print(f"  [grey70]mark read (from CLI):[/] [bold]{'yes' if mark_read else 'no'}[/]")
+        console.print(f"[grey70]{i18n_t('wiz_tips')}[/]\n")
 
         chat: dict | None = None
         thread_id: int | None = None
@@ -770,7 +762,7 @@ async def _collect_answers(
                     offer_all_local=(mode == "ask"),
                 )
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 if result is ALL_UNREAD:
                     run_on_all = True
@@ -853,7 +845,7 @@ async def _collect_answers(
                     step = "chat"
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 with_comments = bool(result)
                 step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
@@ -864,7 +856,7 @@ async def _collect_answers(
                     step = "chat"
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 thread_id, forum_all_flat, forum_all_per_topic = result
                 step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
@@ -883,10 +875,13 @@ async def _collect_answers(
                         step = "chat"
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 preset = result
-                step = _next_step_after_mark_read(output_forced, mark_read_forced) if run_on_all else "period"
+                # Analyze run-on-all skips period+enrich, and now also
+                # the output step (default = save+print). Go straight to
+                # mark_read or confirm.
+                step = ("confirm" if mark_read_forced else "mark_read") if run_on_all else "period"
 
             elif step == "period":
                 # Lazily fetch per-period counts once we know chat+thread.
@@ -918,7 +913,7 @@ async def _collect_answers(
                         step = "chat"
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 period, custom_since, custom_until, custom_from_msg = result
                 # For a custom date range, estimate the message count on
@@ -972,7 +967,7 @@ async def _collect_answers(
                         parts.append(i18n_tf("wiz_plan_with_urls", n=media_counts["links"]))
                     extras = ", " + ", ".join(parts) if parts else ""
                     console.print(
-                        f"[dim]"
+                        f"[grey70]"
                         f"{i18n_tf('wiz_plan_for_period_synced', total=media_counts['total'], extras=extras)}"
                         f"[/]"
                     )
@@ -981,7 +976,7 @@ async def _collect_answers(
                     step = "period"
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 enrich_kinds = list(result) if isinstance(result, list) else None
                 # Ask mode skips output but still asks about mark-read when
@@ -990,6 +985,15 @@ async def _collect_answers(
                 # --mark-read/--no-mark-read also suppresses the step).
                 if mode == "ask":
                     step = "confirm" if (run_on_all_local or mark_read_forced) else "mark_read"
+                elif mode == "analyze":
+                    # Analyze defaults to "save to reports/ + print to
+                    # terminal" — both happen unconditionally now, so the
+                    # wizard's output step is redundant. CLI flags
+                    # (--output / --no-save) still pre-fill via
+                    # output_forced and bypass any wizard prompting; their
+                    # values are already in chosen_console_out /
+                    # chosen_output_path from the initial assignment.
+                    step = "confirm" if mark_read_forced else "mark_read"
                 else:
                     step = "mark_read" if output_forced else "output"
 
@@ -1004,7 +1008,7 @@ async def _collect_answers(
                     step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 chosen_console_out, chosen_output_path = result
                 step = "confirm" if mark_read_forced else "mark_read"
@@ -1017,15 +1021,22 @@ async def _collect_answers(
                         # (skipping output entirely). BACK from mark_read
                         # returns to enrich.
                         step = "enrich"
+                    elif mode == "analyze":
+                        # Analyze also skips the output step now (default
+                        # is save+print). BACK from mark_read returns to
+                        # enrich (or preset for run-on-all where period+
+                        # enrich are skipped).
+                        step = "enrich" if not run_on_all else "preset"
                     elif output_forced:
-                        # No output step → go back to enrich (or preset/chat
-                        # for run-on-all where period+enrich are skipped).
-                        step = "enrich" if not run_on_all else ("preset" if mode == "analyze" else "chat")
+                        # Dump with CLI override → no output step → go back
+                        # to enrich (or chat for run-on-all where period+
+                        # enrich are skipped).
+                        step = "enrich" if not run_on_all else "chat"
                     else:
                         step = "output"
                     continue
                 if result is None:
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 chosen_mark_read = bool(result)
                 step = "confirm"
@@ -1125,15 +1136,15 @@ async def _collect_answers(
                             )
                         if cost_lo is None:
                             console.print(
-                                f"  [dim]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
-                                f"[dim]{i18n_t('wiz_plan_pricing_missing')}[/]"
+                                f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                                f"[grey70]{i18n_t('wiz_plan_pricing_missing')}[/]"
                             )
                         else:
                             console.print(
-                                f"  [dim]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
-                                f"[dim]{i18n_t('wiz_plan_cost_approx')}[/] "
+                                f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                                f"[grey70]{i18n_t('wiz_plan_cost_approx')}[/] "
                                 f"{_fmt_cost_range(cost_lo, cost_hi)}  "
-                                f"[dim]{i18n_t('wiz_plan_analysis_estimate')}[/]"
+                                f"[grey70]{i18n_t('wiz_plan_analysis_estimate')}[/]"
                             )
                         # The analysis estimate doesn't include enrichment
                         # costs — we don't know per-message media counts at
@@ -1144,9 +1155,9 @@ async def _collect_answers(
                             console.print(
                                 f"  [dim yellow]{i18n_t('wiz_plan_extra_enrich_label')}[/] "
                                 f"[yellow]{', '.join(extra_kinds)}[/] "
-                                f"[dim]{i18n_t('wiz_plan_extra_enrich_hint')}[/] "
+                                f"[grey70]{i18n_t('wiz_plan_extra_enrich_hint')}[/] "
                                 "[cyan]unread stats[/]"
-                                f"[dim]{i18n_t('wiz_plan_extra_enrich_hint_close')}[/]"
+                                f"[grey70]{i18n_t('wiz_plan_extra_enrich_hint_close')}[/]"
                             )
                     elif n_msgs == 0:
                         console.print(f"  [yellow]{i18n_t('wiz_plan_zero_msgs')}[/]")
@@ -1154,8 +1165,8 @@ async def _collect_answers(
                     n_msgs = _count_for_period(period, period_counts)
                     if n_msgs is not None:
                         console.print(
-                            f"  [dim]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
-                            f"[dim]{i18n_t('wiz_plan_dump_free')}[/]"
+                            f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                            f"[grey70]{i18n_t('wiz_plan_dump_free')}[/]"
                         )
 
                 choice = await _bind_escape(
@@ -1171,7 +1182,7 @@ async def _collect_answers(
                     BACK,
                 ).ask_async()
                 if choice is None or choice == "cancel":
-                    console.print(f"[dim]{i18n_t('cancelled')}[/]")
+                    console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 if choice is BACK:
                     if mode == "ask":
@@ -1727,12 +1738,12 @@ async def _pick_chat(
     if action == "all":
         _replace_last_line(
             f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: "
-            f"[dim]{i18n_t('wiz_summary_chat_searching_all')}[/]"
+            f"[grey70]{i18n_t('wiz_summary_chat_searching_all')}[/]"
         )
         return await _pick_from_all(client, subscribed_ids=sub_set)
     d = payload
     _replace_last_line(
-        f"[bold cyan]?[/] chat: [bold]{d.title or d.chat_id}[/] [dim]({d.kind}, {d.unread_count} unread)[/]"
+        f"[bold cyan]?[/] chat: [bold]{d.title or d.chat_id}[/] [grey70]({d.kind}, {d.unread_count} unread)[/]"
     )
     return {
         "chat_id": d.chat_id,
@@ -1870,7 +1881,9 @@ async def _pick_from_all(
     if picked is not None:
         _replace_last_line(
             f"[bold cyan]?[/] chat: [bold]{picked['title'] or picked['chat_id']}[/] "
-            f"[dim]({picked['kind']}" + (f", {picked['unread']} unread" if picked["unread"] else "") + ")[/]"
+            f"[grey70]({picked['kind']}"
+            + (f", {picked['unread']} unread" if picked["unread"] else "")
+            + ")[/]"
         )
     return picked
 
@@ -1927,19 +1940,19 @@ async def _pick_thread(client, chat_id: int):
         return None
     action, payload = result
     if action == "back":
-        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
+        _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     mode_label = i18n_t("wiz_summary_step_mode")
     if action == "per_topic":
         _replace_last_line(
             f"[bold cyan]?[/] {mode_label}: [bold]{i18n_t('wiz_summary_mode_per_topic')}[/] "
-            f"[dim]{i18n_t('wiz_summary_mode_per_topic_hint')}[/]"
+            f"[grey70]{i18n_t('wiz_summary_mode_per_topic_hint')}[/]"
         )
         return None, False, True
     if action == "flat":
         _replace_last_line(
             f"[bold cyan]?[/] {mode_label}: [bold]{i18n_t('wiz_summary_mode_all_flat')}[/] "
-            f"[dim]{i18n_t('wiz_summary_mode_all_flat_hint')}[/]"
+            f"[grey70]{i18n_t('wiz_summary_mode_all_flat_hint')}[/]"
         )
         return None, True, False
     picked_topic = next((t for t in topics_sorted if t.topic_id == payload), None)
@@ -2001,7 +2014,7 @@ async def _pick_preset():
     if picked is None:
         return None
     if picked is BACK:
-        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
+        _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_preset')}: [bold]{picked}[/]")
     return picked
@@ -2033,7 +2046,7 @@ async def _pick_output(*, default_path: Path | None):
         return None
     action, _ = picked
     if action is BACK:
-        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
+        _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     out_label = i18n_t("wiz_summary_step_output")
     if action == "console":
@@ -2042,7 +2055,7 @@ async def _pick_output(*, default_path: Path | None):
     if action == "file":
         _replace_last_line(
             f"[bold cyan]?[/] {out_label}: [bold]{i18n_t('wiz_summary_step_reports_dir')}[/] "
-            f"[dim]{i18n_t('wiz_summary_step_auto_named')}[/]"
+            f"[grey70]{i18n_t('wiz_summary_step_auto_named')}[/]"
         )
         return False, None
     # Custom path — prompt for the exact path.
@@ -2122,7 +2135,7 @@ async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[st
     if picked is None:
         return None
     if picked is BACK:
-        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
+        _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     summary = ",".join(picked) if picked else i18n_t("wiz_enrich_summary_none")
     _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_enrich')}: [bold]{summary}[/]")
@@ -2191,7 +2204,7 @@ async def _pick_mark_read(*, default: bool):
     if picked is None:
         return None
     if picked is BACK:
-        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
+        _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     yn = i18n_t("wiz_summary_yes") if picked else i18n_t("wiz_summary_no")
     _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_mark_read')}: [bold]{yn}[/]")
@@ -2256,7 +2269,7 @@ async def _pick_period(
     if key is None:
         return None
     if key is BACK:
-        _replace_last_line(f"[dim]{i18n_t('wiz_back')}[/]")
+        _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     _period_label_keys = {
         "unread": "wiz_summary_period_unread",

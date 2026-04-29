@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from unread.i18n import t as _t
+
 FileKind = Literal["text", "pdf", "docx", "audio", "video", "image", "unknown"]
 
 
@@ -156,10 +158,7 @@ def extract_pdf(path: Path, *, max_chars: int = 200_000) -> ExtractResult:
 
     text = _extract_pdf(path, max_chars=max_chars)
     if not text:
-        raise ValueError(
-            "PDF has no extractable text — likely scanned. Run an OCR tool "
-            "(e.g. `ocrmypdf input.pdf output.pdf`) and re-run on the OCR'd copy."
-        )
+        raise ValueError(_t("error_pdf_scanned"))
     return ExtractResult(text=text, extra={"chars": len(text)})
 
 
@@ -169,7 +168,7 @@ def extract_docx(path: Path) -> ExtractResult:
 
     text = _extract_docx(path)
     if not text:
-        raise ValueError("DOCX has no extractable text (empty document?)")
+        raise ValueError(_t("error_docx_empty"))
     return ExtractResult(text=text, extra={"chars": len(text)})
 
 
@@ -206,14 +205,11 @@ async def extract_audio(path: Path) -> ExtractResult:
 
     from unread.config import get_settings
     from unread.enrich.audio import _transcribe_file
-    from unread.media.transcode import transcode_for_openai
+    from unread.media.download import transcode_for_openai
 
     settings = get_settings()
     if not settings.openai.api_key:
-        raise RuntimeError(
-            "Audio transcription requires an OpenAI key (Whisper). "
-            "Run `unread tg init` to add one — your chat provider can stay non-OpenAI."
-        )
+        raise RuntimeError(_t("error_audio_no_openai"))
 
     tmp_dir = settings.media.tmp_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -227,7 +223,7 @@ async def extract_audio(path: Path) -> ExtractResult:
         pieces.append(text.strip())
     text = "\n".join(p for p in pieces if p)
     if not text:
-        raise ValueError("Transcription produced no text — file may be silent or unreadable.")
+        raise ValueError(_t("error_audio_silent"))
     return ExtractResult(text=text, extra={"audio_model": audio_model, "chars": len(text)})
 
 
@@ -243,14 +239,11 @@ async def extract_video(path: Path) -> ExtractResult:
 
     from unread.config import get_settings
     from unread.enrich.audio import _transcribe_file
-    from unread.media.transcode import transcode_for_openai
+    from unread.media.download import transcode_for_openai
 
     settings = get_settings()
     if not settings.openai.api_key:
-        raise RuntimeError(
-            "Video transcription requires an OpenAI key (Whisper). "
-            "Run `unread tg init` to add one — your chat provider can stay non-OpenAI."
-        )
+        raise RuntimeError(_t("error_video_no_openai"))
 
     tmp_dir = settings.media.tmp_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -264,11 +257,7 @@ async def extract_video(path: Path) -> ExtractResult:
         pieces.append(text.strip())
     text = "\n".join(p for p in pieces if p)
     if not text:
-        raise ValueError(
-            "Transcription produced no text — video may have no audio track. "
-            "ffmpeg required for video files; install via `brew install ffmpeg` (macOS) "
-            "or your distro's package manager."
-        )
+        raise ValueError(_t("error_video_silent"))
     return ExtractResult(text=text, extra={"audio_model": audio_model, "chars": len(text)})
 
 
@@ -289,10 +278,7 @@ async def extract_image(path: Path) -> ExtractResult:
 
     settings = get_settings()
     if not settings.openai.api_key:
-        raise RuntimeError(
-            "Image description requires an OpenAI key (vision). "
-            "Run `unread tg init` to add one — your chat provider can stay non-OpenAI."
-        )
+        raise RuntimeError(_t("error_image_no_openai"))
 
     lang = (settings.locale.content_language or settings.locale.language or "en").lower()
     sys_prompt, user_prompt = _resolve_prompts(lang)
@@ -314,5 +300,5 @@ async def extract_image(path: Path) -> ExtractResult:
     resp = await _vision_complete(oai, model, messages)
     description = (resp.choices[0].message.content or "").strip()
     if not description:
-        raise ValueError("Vision model returned no description — try a different image.")
+        raise ValueError(_t("error_image_empty"))
     return ExtractResult(text=description, extra={"vision_model": model, "chars": len(description)})

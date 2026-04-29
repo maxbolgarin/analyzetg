@@ -103,12 +103,36 @@ def _file_id_for_stdin(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()[:16]
 
 
-def _read_stdin_bytes() -> bytes:
-    """Slurp stdin. Used only when `cmd_analyze_file` was invoked with
-    the stdin sentinel — never opens a TTY (the cli-layer detector
-    guards against that).
+# Cap stdin input to keep `cat huge.bin | unread` from OOMing the process.
+# 100 MB covers any realistic transcript / log dump while still fitting in
+# memory on a constrained machine. A user feeding a larger file should
+# pre-extract the relevant slice (`head -c 100M file | unread`) — that's
+# more honest than us silently truncating *and* charging them to analyze
+# only the first chunk. Anything past the cap is dropped with a warning.
+_MAX_STDIN_BYTES = 100_000_000
+
+
+def _read_stdin_bytes() -> tuple[bytes, bool]:
+    """Slurp stdin, capped at `_MAX_STDIN_BYTES`. Used only when
+    `cmd_analyze_file` was invoked with the stdin sentinel — never opens
+    a TTY (the cli-layer detector guards against that).
+
+    Returns ``(data, truncated)``. When ``truncated`` is True, callers
+    must surface the cap in user-visible output so the LLM (and human)
+    aren't analyzing a silently-cut input.
     """
-    return sys.stdin.buffer.read()
+    # Read one extra byte so we can detect overflow without buffering
+    # gigabytes — if the read returns more than the cap, we know the
+    # source had more data even though we drop the tail.
+    data = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+    if len(data) > _MAX_STDIN_BYTES:
+        log.warning(
+            "stdin.truncated",
+            cap_bytes=_MAX_STDIN_BYTES,
+            received_bytes=len(data),
+        )
+        return data[:_MAX_STDIN_BYTES], True
+    return data, False
 
 
 def _file_uri(path: Path) -> str:
@@ -238,11 +262,15 @@ async def cmd_analyze_file(
     effective_preset = preset or "summary"
 
     is_stdin = ref == _STDIN_REF_SENTINEL
+    stdin_truncated = False
     if is_stdin:
-        raw = _read_stdin_bytes()
+        raw, stdin_truncated = _read_stdin_bytes()
         if not raw.strip():
-            console.print("[red]No input on stdin — pipe a file or pass `unread <path>`.[/]")
+            console.print(f"[red]{_t('files_no_stdin_input')}[/]")
             raise typer.Exit(2)
+        if stdin_truncated:
+            cap_mb = _MAX_STDIN_BYTES // 1_000_000
+            console.print(f"[yellow]{_t('files_stdin_truncated').format(cap_mb=cap_mb)}[/]")
         result_extract = extract_text_from_bytes(raw, label="stdin")
         kind: str = "stdin"
         name = "stdin"
@@ -253,14 +281,11 @@ async def cmd_analyze_file(
     else:
         path = _resolve_local_file_path(ref)
         if path is None:
-            console.print(f"[red]Couldn't read {ref!r} — file not found or not a regular file.[/]")
+            console.print(f"[red]{_t('files_not_found').format(ref=repr(ref))}[/]")
             raise typer.Exit(2)
         kind = detect_kind(path)
         if kind == "unknown":
-            console.print(
-                f"[red]Unsupported file type {path.suffix!r}.[/] "
-                "Supported: text/code/markup, .pdf, .docx, audio, video, image."
-            )
+            console.print(f"[red]{_t('files_unsupported_kind').format(ext=repr(path.suffix))}[/]")
             raise typer.Exit(2)
         name = path.name
         abs_path = str(path)
@@ -275,7 +300,7 @@ async def cmd_analyze_file(
 
     paragraphs = _segment_into_paragraphs(result_extract.text)
     if not paragraphs:
-        console.print("[red]Empty file — nothing to analyze.[/]")
+        console.print(f"[red]{_t('files_empty_file')}[/]")
         raise typer.Exit(2)
     content_hash = _hash_content("\n\n".join(paragraphs))
 
@@ -285,7 +310,7 @@ async def cmd_analyze_file(
         if not no_cache and not is_stdin:
             cached = await repo.get_local_file(file_id)
             if cached and cached.get("content_hash") == content_hash:
-                console.print(f"[dim]Using cached extraction for {name}[/]")
+                console.print(f"[grey70]Using cached extraction for {name}[/]")
                 # paragraphs already match — no re-write needed.
         await repo.put_local_file(
             file_id=file_id,
@@ -298,12 +323,17 @@ async def cmd_analyze_file(
             extract_size=result_extract.extra.get("bytes") if result_extract.extra else None,
         )
 
+        # Surface stdin truncation in the synthetic header — the LLM
+        # otherwise gets no signal that its input was clipped at the cap.
+        meta_extra = dict(result_extract.extra or {})
+        if stdin_truncated:
+            meta_extra["truncated_at_bytes"] = _MAX_STDIN_BYTES
         messages = _build_synthetic_messages(
             name=name,
             kind=kind,
             path_uri=path_uri,
             paragraphs=paragraphs,
-            extra=result_extract.extra,
+            extra=meta_extra,
         )
 
         loaded_preset = _load_preset_for_commands(effective_preset, prompt_file, language=content_language)
@@ -334,7 +364,9 @@ async def cmd_analyze_file(
                 if yes:
                     console.print("[red]Aborting (--yes set).[/]")
                     raise typer.Exit(2)
-                if not typer.confirm("Run anyway?", default=False):
+                from unread.util.prompt import confirm as _confirm
+
+                if not _confirm("Run anyway?", default=False):
                     console.print("[yellow]Aborted.[/]")
                     raise typer.Exit(0)
 
@@ -355,7 +387,7 @@ async def cmd_analyze_file(
         # Most editors ignore paragraph anchors but at least re-open the file.
         link_template = path_uri
 
-        console.print(f"[dim]{_t('running_analysis')}[/]")
+        console.print(f"[grey70]{_t('running_analysis')}[/]")
         result = await run_analysis(
             repo=repo,
             chat_id=0,
