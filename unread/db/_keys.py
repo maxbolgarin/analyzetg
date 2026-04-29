@@ -31,6 +31,13 @@ SECRET_KEYS: frozenset[str] = frozenset(
         "openrouter.api_key",
         "anthropic.api_key",
         "google.api_key",
+        # Telethon `StringSession.save()` payload, written ONLY when the
+        # passphrase backend is active. Replaces the on-disk
+        # `session.sqlite` so encrypted-mode users have no plaintext
+        # session blob to leak. Empty when the backend is `db` or
+        # `keychain`; the read path in `tg/client.py` falls back to
+        # the SQLiteSession file in those cases.
+        "telegram.session_string",
     }
 )
 
@@ -68,4 +75,18 @@ OVERRIDE_KEYS: tuple[str, ...] = (
     "analyze.dedupe_forwards",
     "analyze.min_msg_chars",
     "analyze.plain_citations",
+    # Internal — DB schema version stamp written by `Repo.open` so a
+    # downgrade can detect a future-version DB and refuse cleanly
+    # rather than crashing with obscure column-mismatch errors.
+    "_meta.schema_version",
+    # Active secrets backend: "db" (default), "keychain", or "passphrase".
+    # Selects which store `unread.secrets.read_secrets` consults at
+    # startup. Persisted in `app_settings`, NOT `secrets`, since the
+    # choice itself isn't sensitive — only the values it points at are.
+    "secrets.backend",
+    # Per-install KDF salt for the passphrase backend. 16 random bytes,
+    # base64. Public — defense relies on the passphrase, not on the
+    # salt being secret. Lets `unread security unlock` derive the key
+    # without first reading any ciphertext.
+    "security.kdf_salt",
 )

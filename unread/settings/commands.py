@@ -333,6 +333,22 @@ async def _interactive(repo) -> None:
                 _reload_singleton()
                 saved_anything = True
             continue
+        # Plain-HTTP `ai.base_url` would send the API key in cleartext.
+        # Warn before writing — a typo or copy-paste of a non-HTTPS
+        # internal URL is the most common shape we want to flag.
+        if sdef.key == "ai.base_url" and new_value:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(new_value)
+            host = (parsed.hostname or "").lower()
+            is_local = host in {"localhost", "127.0.0.1", "::1"} or host.endswith((".local", ".internal"))
+            if parsed.scheme == "http" and not is_local:
+                console.print(
+                    f"[yellow]Warning: `ai.base_url` is set to a non-HTTPS URL "
+                    f"({new_value}). Your API key will be transmitted in "
+                    f"cleartext. Use HTTPS, or pick the [cyan]local[/] "
+                    f"provider for self-hosted servers.[/]"
+                )
         await repo.set_app_setting(sdef.key, new_value)
         # Apply the new value onto the live singleton in-place so the
         # menu's value column refreshes immediately. Same coercion logic

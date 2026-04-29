@@ -231,6 +231,26 @@ File is ~1700 lines. Split:
 
 Already cohesive enough that the split is mostly mechanical.
 
+### Cursor close → async-with refactor  S
+
+Every `cur = await self._conn.execute(...); rows = await cur.fetchall(); await cur.close()`
+in `db/repo.py` is a potential cursor leak if the fetch raises. aiosqlite cursors
+already implement async context-manager protocol, so the migration is mechanical:
+
+```python
+# before:
+cur = await self._conn.execute("SELECT …", params)
+rows = await cur.fetchall()
+await cur.close()
+
+# after:
+async with self._conn.execute("SELECT …", params) as cur:
+    rows = await cur.fetchall()
+```
+
+Practical impact is small (the connection close on shutdown reaps any leaked
+cursors), but the new shape is also less code. ~30 sites in `repo.py`.
+
 ### Replace per-CLI-command lazy-import boilerplate  S
 
 Every `cli.py` handler does `from … import cmd_x`. A small registry

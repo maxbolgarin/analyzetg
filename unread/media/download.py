@@ -96,7 +96,9 @@ async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> lis
     """
     settings = get_settings()
     ffmpeg = settings.media.ffmpeg_path
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import ensure_private_dir
+
+    ensure_private_dir(tmp_dir)
 
     if media_type == "voice":
         # Telethon saves Telegram voice (Opus in OGG) as `.oga`; OpenAI

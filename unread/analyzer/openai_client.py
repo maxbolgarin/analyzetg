@@ -133,6 +133,32 @@ async def _one_call(
     )
 
 
+def _is_auth_error(provider_name: str, exc: BaseException) -> bool:
+    """Heuristically classify ``exc`` as an auth-shape error from any provider.
+
+    Each SDK has its own AuthenticationError class but they all share
+    the same fundamental shape (HTTP 401/403). Rather than import every
+    SDK's exception type at the top (and pay the import cost / version
+    skew), inspect the exception class name and any ``status_code``
+    attribute. False positives are tolerable here — the worst case is
+    we surface a "key invalid" hint when something else went wrong.
+    """
+    cls = type(exc).__name__
+    if cls in {"AuthenticationError", "PermissionDeniedError", "PermissionDenied"}:
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status in {401, 403}
+
+
+def _friendly_auth_message(provider_name: str) -> str:
+    """One-line "your key is bad" copy, with a recovery hint."""
+    return (
+        f"Your {provider_name} API key was rejected (invalid, revoked, or expired). "
+        f"Run `unread tg init` to update it, or set the matching env var "
+        f"in ~/.unread/.env."
+    )
+
+
 async def chat_complete(
     provider: ChatProvider,
     *,
@@ -150,17 +176,30 @@ async def chat_complete(
     both calls. Provider-agnostic: works the same for OpenAI, OpenRouter,
     Anthropic, Google, and Local since each adapter's `truncated` flag
     is normalized to the same semantics.
+
+    Authentication / authorization failures from any provider's SDK are
+    converted to :class:`ProviderUnavailableError` with a one-line
+    "your key was rejected" message. Without this, users see raw SDK
+    exceptions like ``openai.AuthenticationError`` which don't tell them
+    what to do next.
     """
+    from unread.ai.providers import ProviderUnavailableError
+
     settings = get_settings()
-    result = await _one_call(
-        provider,
-        repo=repo,
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=settings.openai.temperature,
-        context=context,
-    )
+    try:
+        result = await _one_call(
+            provider,
+            repo=repo,
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=settings.openai.temperature,
+            context=context,
+        )
+    except Exception as e:
+        if _is_auth_error(provider.name, e):
+            raise ProviderUnavailableError(_friendly_auth_message(provider.name)) from e
+        raise
     if result.truncated and max_tokens < _MAX_RETRY_TOKENS:
         bumped = min(max_tokens * 2, _MAX_RETRY_TOKENS)
         log.warning(

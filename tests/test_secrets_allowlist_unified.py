@@ -21,7 +21,13 @@ from unread.db._keys import SECRET_KEYS
 
 
 def test_secret_keys_include_every_chat_provider() -> None:
-    """Every provider whose key the wizard prompts for must be in the allowlist."""
+    """Every provider whose key the wizard prompts for must be in the allowlist.
+
+    `telegram.session_string` joined the allowlist in Phase 3 — it's
+    written only when the passphrase backend is active, but the
+    schema-allowlist check still runs through `put_secrets` and would
+    reject the row without the entry.
+    """
     expected = {
         "telegram.api_id",
         "telegram.api_hash",
@@ -29,6 +35,7 @@ def test_secret_keys_include_every_chat_provider() -> None:
         "openrouter.api_key",
         "anthropic.api_key",
         "google.api_key",
+        "telegram.session_string",
     }
     assert expected == SECRET_KEYS
 

@@ -701,6 +701,9 @@ async def _cmd_run_flat(
         body_lines.append("")
         body_lines.append(result.final_result)
         out_path.write_text("\n".join(body_lines), encoding="utf-8")
+        from unread.util.fsmode import tighten
+
+        tighten(out_path)
         console.print(f"[green]{_t('run_saved_label')}[/] {out_path}")
 
         # Optionally post to a chat.

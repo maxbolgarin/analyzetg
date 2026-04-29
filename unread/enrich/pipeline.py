@@ -82,6 +82,14 @@ async def enrich_messages(
     sem = asyncio.Semaphore(max(1, opts.concurrency))
     caps = _caps(opts)
     counted: dict[str, int] = {"image": 0, "link": 0}
+    # Guards the link-cap reservation. The link branch has an `await` between
+    # the cap check and the post-call increment, so without a lock multiple
+    # concurrent tasks can all observe `counted["link"] == 0`, all proceed,
+    # and only increment after their fetches complete — overshooting the cap
+    # the user set to bound spend. The image branch is single-shot under
+    # asyncio (no await between check and increment) so no lock is needed
+    # there.
+    link_lock = asyncio.Lock()
 
     # Per-doc_id locks prevent two concurrent handlers from independently
     # downloading/transcribing the same media when the same doc_id appears
@@ -154,12 +162,19 @@ async def enrich_messages(
         # Link enrichment is orthogonal — any message with text may have URLs.
         if opts.link and msg.text:
             try:
-                if counted["link"] >= caps["link"]:
-                    # Cap on *fetches* per run, not per message — but we
-                    # approximate by capping at message granularity to keep
-                    # this simple. Users hitting the cap should raise it.
-                    pass
-                else:
+                # Reserve a slot under the lock BEFORE the fetch await so two
+                # concurrent tasks can't both pass the cap check. We
+                # reserve one slot per `enrich_message_links` call (i.e.
+                # per message, not per URL) — granular per-URL accounting
+                # would require coordinating the cap inside `enrich_message_links`
+                # and isn't worth the complexity for a soft cap.
+                async with link_lock:
+                    if counted["link"] >= caps["link"]:
+                        proceed = False
+                    else:
+                        counted["link"] += 1
+                        proceed = True
+                if proceed:
                     async with sem:
                         pairs = await enrich_message_links(
                             msg,
@@ -169,13 +184,6 @@ async def enrich_messages(
                             skip_domains=opts.skip_link_domains or settings.enrich.skip_link_domains,
                             language=enrich_language,
                         )
-                    # Count one per unique URL fetched (cache hits excluded
-                    # doesn't matter here — we bound network calls, not
-                    # DB lookups).
-                    for _ in pairs:
-                        counted["link"] += 1
-                        if counted["link"] > caps["link"]:
-                            break
                     if pairs:
                         stats.counts["link"] = stats.counts.get("link", 0) + len(pairs)
             except Exception as e:
@@ -212,7 +220,23 @@ async def enrich_messages(
     ) as progress:
         task_id = progress.add_task("Enriching media", total=len(msgs))
 
+        # Per-item description so the user sees what's happening rather
+        # than just an advancing bar. We write the description before
+        # `handle()` does its work — concurrent tasks will overwrite
+        # each other's text, but Rich's overwrite semantics mean the
+        # latest one wins, which is the correct UX (you see progress
+        # ticking through items).
+        kind_label = {
+            "voice": "Voice",
+            "videonote": "Video note",
+            "video": "Video",
+            "photo": "Image",
+            "doc": "Document",
+        }
+
         async def handle_with_progress(m: Message) -> None:
+            label = kind_label.get(m.media_type or "", "Message") if m.media_type else "Links"
+            progress.update(task_id, description=f"{label} (msg #{m.msg_id})")
             try:
                 await handle(m)
             finally:

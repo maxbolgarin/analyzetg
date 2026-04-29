@@ -110,9 +110,43 @@ def exit_session_expired() -> None:
 
 
 def build_client(settings: Settings | None = None) -> TelegramClient:
+    """Construct a Telethon client using the active session backend.
+
+    Two paths:
+
+    * ``passphrase`` backend → :class:`telethon.sessions.StringSession`
+      loaded from the encrypted ``telegram.session_string`` row in
+      ``data.sqlite::secrets``. There is no plaintext on-disk session
+      file in this mode — the whole point.
+    * ``db`` / ``keychain`` (default) → on-disk
+      :class:`telethon.sessions.SQLiteSession` at ``session_path``.
+      Same as the pre-Phase-3 behavior.
+    """
     s = settings or get_settings()
     if not s.telegram.api_id or not s.telegram.api_hash:
         _exit_missing_telegram_credentials()
+
+    from unread.secrets_backend import BACKEND_PASSPHRASE, read_active_backend_sync
+
+    backend = read_active_backend_sync(s.storage.data_path)
+    if backend == BACKEND_PASSPHRASE:
+        from telethon.sessions import StringSession
+
+        from unread.security.passphrase import read_session_string_sync
+
+        session_str = read_session_string_sync(s.storage.data_path)
+        client = TelegramClient(
+            StringSession(session_str),
+            api_id=s.telegram.api_id,
+            api_hash=s.telegram.api_hash,
+        )
+        # Stash the original string so `tg_client` can detect a
+        # session-state change post-connect and re-encrypt only when
+        # something actually rotated. Telethon doesn't expose a clean
+        # "dirty" flag, so a snapshot diff is the simplest signal.
+        client._unread_session_str_at_load = session_str  # type: ignore[attr-defined]
+        return client
+
     s.telegram.session_path.parent.mkdir(parents=True, exist_ok=True)
     return TelegramClient(
         str(s.telegram.session_path),
@@ -133,9 +167,42 @@ async def tg_client(
     """
     client = build_client(settings)
     await client.connect()
+    # Telethon writes the session file on connect; it's auth-equivalent
+    # so the file mode matters as much as the DB. Telethon respects
+    # umask, so on a 022 system we'd land at 0o644 — readable by every
+    # other local user. Tighten on every connect (idempotent).
+    s = settings or get_settings()
+    from unread.util.fsmode import tighten
+
+    session_path = s.telegram.session_path
+    for candidate in (session_path, session_path.with_suffix(session_path.suffix + ".session")):
+        if candidate.exists():
+            tighten(candidate)
     try:
         if require_auth and not await client.is_user_authorized():
             raise TelegramSessionExpired("Telegram session is not authorized. Run `unread tg init --force`.")
         yield client
     finally:
+        # Encrypted-mode persistence: if Telethon rotated the auth
+        # key during the session, snapshot the new StringSession and
+        # store it back as ciphertext. We compare against the
+        # at-load snapshot to skip re-encrypt on the no-change path
+        # (which is most invocations — Telethon only rotates
+        # occasionally).
+        loaded_at_start = getattr(client, "_unread_session_str_at_load", None)
+        if loaded_at_start is not None:
+            try:
+                from telethon.sessions import StringSession
+
+                if isinstance(client.session, StringSession):
+                    current = client.session.save() or ""
+                    if current and current != loaded_at_start:
+                        from unread.security.passphrase import write_session_string_async
+
+                        await write_session_string_async(s.storage.data_path, current)
+            except Exception as e:
+                # Failing to persist a rotated session is a degraded
+                # state but not fatal — the next start will re-handshake
+                # off the previous session. Log and move on.
+                log.warning("tg.session_persist_failed", err=str(e)[:200])
         await client.disconnect()

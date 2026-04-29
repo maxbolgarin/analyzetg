@@ -32,6 +32,17 @@ dependencies = [
     # of install time. Each SDK is small (no heavyweight extras).
     "anthropic>=0.40",
     "google-genai>=0.5",
+    # OS-keychain access for the optional `keychain` secrets backend.
+    # Pure-Python; degrades to a `Null` backend on hosts without a
+    # native store (headless Linux without Secret Service running),
+    # in which case `unread` silently keeps using the DB backend.
+    "keyring>=24",
+    # Passphrase-derived encryption for the optional `passphrase`
+    # secrets backend (Scrypt + ChaCha20Poly1305 + encrypted Telethon
+    # StringSession). Already a transitive dep of openai / anthropic
+    # SDKs but pinned here so the encryption path doesn't suddenly
+    # break if those drop the requirement.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

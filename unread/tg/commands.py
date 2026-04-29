@@ -124,6 +124,12 @@ async def cmd_init(*, scope: str = "full") -> None:
     if settings.telegram.api_id and settings.telegram.api_hash:
         await _run_telethon_auth_step(settings)
 
+    # Step 5: optional credential-store hardening — offer to move
+    # already-saved keys into the OS keychain. Skipped silently when
+    # the host doesn't have a usable keychain (e.g. headless Linux),
+    # already-migrated installs, or installs with no secrets yet.
+    _run_keychain_step()
+
 
 # ----- wizard steps -----------------------------------------------------
 
@@ -429,6 +435,80 @@ async def _run_telegram_creds_step() -> bool:
     return True
 
 
+def _run_keychain_step() -> None:
+    """Offer to move saved credentials from data.sqlite into the OS keychain.
+
+    Default-yes on macOS / Windows (where the native store is reliable
+    and unlocked when the user logs in), default-no on Linux (Secret
+    Service requires a session bus and is missing on headless boxes).
+    Silent no-op when:
+      - we're not on a real TTY (tests, scripted invocations) — the
+        offer requires interactive consent and silently migrating is
+        worse UX than not offering;
+      - the active backend is already ``keychain`` (idempotent re-runs);
+      - the keychain backend is unavailable on this host;
+      - no slots are populated yet.
+    """
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        keychain_available,
+        keychain_describe,
+        read_active_backend_sync,
+    )
+    from unread.util.prompt import _can_interact
+
+    if not _can_interact():
+        return
+
+    settings = get_settings()
+    db_path = settings.storage.data_path
+    backend = read_active_backend_sync(db_path)
+    if backend == BACKEND_KEYCHAIN:
+        return
+    if not keychain_available():
+        return
+    # Probe for any populated secret. The function is sync and cheap,
+    # so don't open an aiosqlite connection just for the count.
+    from unread.db.repo import read_data_db_secrets_sync
+
+    rows = read_data_db_secrets_sync(db_path)
+    if not any((rows.get(k) or "") for k in rows):
+        return
+
+    from unread.util.prompt import confirm
+
+    console.print("\n[bold]Secure storage (optional).[/]")
+    console.print(
+        f"  [grey70]Your saved API keys can be moved into the {keychain_describe()} "
+        "(encrypted at rest, unlocked when you log in). The on-disk DB row gets blanked.[/]"
+    )
+    # We've already passed `keychain_available()`, which means the OS
+    # store responded to a probe call. Recommend it across every
+    # platform that gets this far — including Linux desktops with a
+    # running Secret Service. Headless Linux / containers don't reach
+    # this prompt at all (the gate above returns early).
+    if not confirm(
+        "Move credentials into the system keychain now?",
+        default=True,
+    ):
+        console.print(
+            "[grey70]Skipped — credentials stay in the data DB. "
+            "Run `unread security migrate --to keychain` later to change your mind.[/]"
+        )
+        return
+
+    from unread.security.commands import cmd_migrate
+
+    try:
+        cmd_migrate(BACKEND_KEYCHAIN)
+    except typer.Exit:
+        # `cmd_migrate` already printed a useful error message before
+        # raising; swallow the Exit so the wizard finishes cleanly
+        # rather than aborting the user's whole setup over one
+        # keychain hiccup.
+        return
+
+
 async def _run_telethon_auth_step(settings) -> None:  # type: ignore[no-untyped-def]
     """Run Telethon's interactive login if the session isn't already authorized."""
     from unread.util.prompt import ask_text as _ask_text
@@ -665,6 +745,88 @@ async def cmd_doctor() -> None:
                 _line(ok, "storage permissions", "0o700 / 0o600 (private)")
         except OSError as e:
             _line(warn, "storage permission check failed", str(e)[:100])
+
+    # 5d. Backup-path guard. The DB is plaintext; if `~/.unread/` is
+    # parented under a synced cloud directory (iCloud Drive, Dropbox,
+    # OneDrive, Google Drive) every saved API key and chat message
+    # ends up replicated off-device. Surface as a warn — some users
+    # genuinely want this (e.g. multi-machine personal use), so we
+    # don't fail.
+    try:
+        from unread.core.paths import unread_home
+
+        home_path = unread_home().resolve()
+        home_str = str(home_path)
+        sync_parents: list[tuple[str, str]] = [
+            ("iCloud Drive", str((_Path.home() / "Library/Mobile Documents/com~apple~CloudDocs").resolve())),
+            ("Dropbox", str((_Path.home() / "Dropbox").resolve())),
+            ("Google Drive", str((_Path.home() / "Google Drive").resolve())),
+            ("OneDrive", str((_Path.home() / "OneDrive").resolve())),
+        ]
+        hits = [
+            name
+            for name, prefix in sync_parents
+            if home_str.startswith(prefix + os.sep) or home_str == prefix
+        ]
+        if hits:
+            advice = (
+                f"under {', '.join(hits)} — plaintext secrets and chat cache will be replicated. "
+                "Move the install (`unread tg init` lets you pick a folder) "
+                "or exclude it from the sync app."
+            )
+            if sys.platform == "darwin":
+                advice += f" On macOS: `tmutil addexclusion {home_path}` keeps it out of Time Machine."
+            _line(warn, "install under cloud sync", advice)
+        else:
+            _line(ok, "install location", f"{home_path} (not under a known sync folder)")
+    except Exception as e:
+        _line(warn, "install-path check failed", str(e)[:100])
+
+    # 5e. Full-disk encryption hint. Best-effort, posix only — the
+    # signal isn't reliable across distros, so a missing FDE result
+    # is a warn, not a fail. The intent is to remind users that
+    # filesystem permissions don't help once a disk is read on
+    # another machine.
+    import subprocess as _subprocess
+
+    if sys.platform == "darwin":
+        try:
+            res = _subprocess.run(
+                ["fdesetup", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            out = (res.stdout or "").strip()
+            if "FileVault is On" in out:
+                _line(ok, "FileVault", "On (disk encrypted at rest)")
+            elif "FileVault is Off" in out:
+                _line(
+                    warn,
+                    "FileVault disabled",
+                    "disk is not encrypted — turn on in System Settings → Privacy & Security → FileVault",
+                )
+            else:
+                _line(warn, "FileVault status unknown", out[:80] or "fdesetup gave no output")
+        except (OSError, _subprocess.SubprocessError) as e:
+            _line(warn, "FileVault check failed", str(e)[:100])
+    elif sys.platform.startswith("linux"):
+        try:
+            crypttab = _Path("/etc/crypttab")
+            if crypttab.is_file() and any(
+                line.strip() and not line.strip().startswith("#")
+                for line in crypttab.read_text().splitlines()
+            ):
+                _line(ok, "disk encryption", "/etc/crypttab has entries (likely LUKS)")
+            else:
+                _line(
+                    warn,
+                    "disk encryption status unknown",
+                    "no /etc/crypttab entries found — confirm LUKS / dm-crypt is enabled if you carry this disk",
+                )
+        except OSError as e:
+            _line(warn, "disk encryption check failed", str(e)[:100])
 
     # 6. Telegram session liveness
     session_path = settings.telegram.session_path

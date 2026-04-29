@@ -359,6 +359,17 @@ async def cmd_analyze_youtube(
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
 
+    # `youtube_source="audio"` forces Whisper transcription, which needs
+    # ffmpeg to extract / transcode the audio. Catch the missing-binary
+    # case here instead of mid-pipeline after metadata fetch. ("auto"
+    # only uses ffmpeg if captions are unavailable; we let that fail
+    # naturally with the existing transcript-side error so a captions-
+    # only run on a machine without ffmpeg still works.)
+    if youtube_source == "audio":
+        from unread.util.preflight import require_ffmpeg
+
+        require_ffmpeg("download and transcribe YouTube audio")
+
     # YouTube videos default to the `video` preset (system prompt tuned
     # for transcripts, time-stamped citations, no chat semantics). User
     # `--preset summary` etc. still wins.

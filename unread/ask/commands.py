@@ -881,6 +881,9 @@ async def _run_single_turn(
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(body, encoding="utf-8")
+        from unread.util.fsmode import tighten
+
+        tighten(output)
         console.print(f"[green]{_tf('saved_to_path', path=output)}[/]")
     return answer, scored
 

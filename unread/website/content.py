@@ -146,23 +146,25 @@ async def _http_get(
     max_bytes: int,
 ) -> tuple[str, int]:
     """Fetch raw HTML or raise `WebsiteFetchError`. Returns (text, raw_size)."""
+    from unread.util.safe_fetch import BlockedURLError, safe_get
+
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout_sec,
-            follow_redirects=True,
-            # httpx default max_redirects=20 + TooManyRedirects exception
-            # already protect us from runaway chains. Caught below with a
-            # specific message so the user can tell a redirect loop apart
-            # from a generic fetch failure.
+        # SSRF guard: validate the initial URL and every redirect hop
+        # so a malicious page can't bounce us to AWS metadata, local
+        # admin panels, or LAN hosts. The fetched body is fed to the
+        # LLM and into the user's report; a leak there exfiltrates.
+        resp = await safe_get(
+            url,
+            timeout_sec=timeout_sec,
             headers={
                 "User-Agent": user_agent,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.7,ru;q=0.3",
             },
-        ) as client:
-            resp = await client.get(url)
-    except httpx.TooManyRedirects as e:
-        raise WebsiteFetchError(f"Too many redirects fetching {url!r} — site is in a redirect loop.") from e
+            max_redirects=10,
+        )
+    except BlockedURLError as e:
+        raise WebsiteFetchError(f"Refused to fetch {url!r}: {e}") from e
     except (httpx.HTTPError, httpx.InvalidURL) as e:
         raise WebsiteFetchError(f"Fetch failed: {e}") from e
 

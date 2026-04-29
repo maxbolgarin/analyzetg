@@ -96,17 +96,18 @@ async def test_app_settings_plain_citations_overlay(tmp_path: Path) -> None:
     reset_settings()
 
 
-async def test_app_settings_unknown_keys_ignored_by_overlay(tmp_path: Path) -> None:
-    """Allow-list keeps the overlay tight: keys outside `_OVERRIDE_KEYS`
-    are stored but don't mutate live settings."""
-    db = tmp_path / "t.sqlite"
-    setup = await Repo.open(db)
-    await setup.set_app_setting("not.a.real.key", "whatever")
-    await setup.close()
-
-    reset_settings()
-    async with open_repo(db):
-        s = get_settings()
-        # Default unchanged.
-        assert s.locale.language == "en"
-    reset_settings()
+async def test_app_settings_unknown_key_rejected(repo: Repo) -> None:
+    """Unknown keys raise ValueError at write time so a typo can't
+    silently store dead weight in app_settings (defensive write — the
+    overlay would ignore the row anyway, but a failed write tells the
+    user immediately)."""
+    with pytest.raises(ValueError, match="unknown setting key"):
+        await repo.set_app_setting("not.a.real.key", "whatever")
+    # And the error message lists the allowed keys, so the wizard can
+    # surface them as a "did you mean" hint.
+    try:
+        await repo.set_app_setting("ai.provder", "anthropic")  # typo
+    except ValueError as e:
+        assert "ai.provider" in str(e)
+    else:
+        pytest.fail("expected ValueError")

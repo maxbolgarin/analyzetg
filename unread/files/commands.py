@@ -96,7 +96,20 @@ def _hash_content(s: str) -> str:
 
 
 def _file_id_for_path(path: Path) -> str:
-    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+    """Stable 16-hex cache key for a filesystem path.
+
+    Resolves symlinks before hashing so two different symlinks pointing
+    at the same physical file share a cache row — re-running `unread`
+    against either symlink hits the cache instead of paying for the
+    extraction twice. `_resolve_local_file_path` already resolves, so
+    in the normal path this is a no-op; the resolve call here is a
+    defensive belt-and-suspenders for direct callers.
+    """
+    try:
+        canonical = path.resolve()
+    except OSError:
+        canonical = path
+    return hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
 
 
 def _file_id_for_stdin(content: bytes) -> str:
@@ -287,6 +300,13 @@ async def cmd_analyze_file(
         if kind == "unknown":
             console.print(f"[red]{_t('files_unsupported_kind').format(ext=repr(path.suffix))}[/]")
             raise typer.Exit(2)
+        # Audio / video files need ffmpeg for transcoding before Whisper.
+        # Catch the missing-binary case before extraction so the user
+        # gets the friendly install banner instead of a transcode error.
+        if kind in ("audio", "video"):
+            from unread.util.preflight import require_ffmpeg
+
+            require_ffmpeg(f"transcribe {kind} files")
         name = path.name
         abs_path = str(path)
         extension = path.suffix.lower()

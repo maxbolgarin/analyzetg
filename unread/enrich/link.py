@@ -127,33 +127,33 @@ def _clean_fetched_text(html: str) -> tuple[str | None, str]:
 
 
 async def _fetch(url: str, timeout_sec: int) -> str | None:
+    from unread.util.safe_fetch import BlockedURLError, safe_get
+
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout_sec,
-            follow_redirects=True,
-            # httpx caps redirect chains at 20 by default and raises
-            # TooManyRedirects (a HTTPError subclass) — caught below as
-            # `redirect_loop`. Don't bump the cap: a chain past 20 is
-            # almost always a misconfigured site, not legitimate traffic,
-            # and chasing it longer just blocks the enrich semaphore.
+        # `safe_get` validates the initial URL plus every redirect hop
+        # against the SSRF allowlist (no loopback / RFC1918 / link-local).
+        # A malicious page redirecting to AWS metadata or a local admin
+        # service is rejected with `BlockedURLError`, never reaches the
+        # LLM.
+        resp = await safe_get(
+            url,
+            timeout_sec=timeout_sec,
             headers={"User-Agent": "unread-link-enricher/0.1 (+https://github.com/maxbolgarin/unread)"},
-        ) as client:
-            resp = await client.get(url)
-            if resp.status_code >= 400:
-                log.debug("enrich.link.http_error", url=url, status=resp.status_code)
-                return None
-            ctype = resp.headers.get("content-type", "")
-            if "text/html" not in ctype and "text/plain" not in ctype:
-                log.debug("enrich.link.non_html", url=url, ctype=ctype)
-                return None
-            # Cap at 2 MB — bail on anything larger to avoid hanging on big pages.
-            if len(resp.content) > 2_000_000:
-                return resp.text[:2_000_000]
-            return resp.text
-    except httpx.TooManyRedirects as e:
-        # Distinct log key so a user with link-heavy chats can grep
-        # `enrich.link.redirect_loop` to spot the offending domain.
-        log.debug("enrich.link.redirect_loop", url=url, err=str(e)[:200])
+            max_redirects=10,
+        )
+        if resp.status_code >= 400:
+            log.debug("enrich.link.http_error", url=url, status=resp.status_code)
+            return None
+        ctype = resp.headers.get("content-type", "")
+        if "text/html" not in ctype and "text/plain" not in ctype:
+            log.debug("enrich.link.non_html", url=url, ctype=ctype)
+            return None
+        # Cap at 2 MB — bail on anything larger to avoid hanging on big pages.
+        if len(resp.content) > 2_000_000:
+            return resp.text[:2_000_000]
+        return resp.text
+    except BlockedURLError as e:
+        log.info("enrich.link.blocked_private_address", url=url, reason=str(e)[:200])
         return None
     except (httpx.HTTPError, httpx.InvalidURL) as e:
         log.debug("enrich.link.fetch_error", url=url, err=str(e)[:200])

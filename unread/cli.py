@@ -185,9 +185,16 @@ def _run(coro) -> None:
       - `KeyboardInterrupt` → friendly "Cancelled" line (partial state
         on disk is already safe — context managers and per-document
         enrichment persistence make Ctrl-C resume-friendly by design).
-    Anything else falls through to asyncio's default and surfaces as a
-    traceback — which is what we want for genuine bugs.
+      - Any other Exception → one-line "Error: …" message instead of
+        a multi-frame Rich traceback. The traceback is panic-inducing
+        for non-technical users and rarely actionable; users opt back
+        in with ``-v / --verbose`` (sets ``UNREAD_DEBUG=1`` upstream)
+        when they want the full thing for a bug report.
+    `typer.Exit` and `SystemExit` always re-raise unchanged so exit
+    codes stay correct for shell scripts.
     """
+    import os as _os
+
     from unread.tg.client import TelegramSessionExpired, exit_session_expired
 
     try:
@@ -199,9 +206,39 @@ def _run(coro) -> None:
         # waits for context managers to exit) before re-raising, so by
         # the time we land here the DB / sessions are flushed. The line
         # below is purely UX so the user sees a clean message instead
-        # of `^CTraceback (most recent call last)…`.
-        console.print("\n[yellow]Cancelled — partial work was saved.[/]")
+        # of `^CTraceback (most recent call last)…`. The "re-run to
+        # resume" hint matters for the enrichment path: media transcripts,
+        # link summaries, and YouTube/website extractions are all
+        # cached on stable keys (doc_id, URL hash, video_id), so a
+        # second run picks up where the first stopped without re-paying
+        # for the work already done.
+        console.print(
+            "\n[yellow]Cancelled — partial work was saved.[/]\n"
+            "[grey70]Re-run the same command to resume; cached enrichments "
+            "(transcripts / link summaries / YouTube transcripts) will be "
+            "reused.[/]"
+        )
         raise typer.Exit(130) from None  # 128 + SIGINT
+    except (typer.Exit, SystemExit):
+        # The command already produced its own user-facing message and
+        # picked an exit code. Pass through.
+        raise
+    except Exception as e:
+        # In verbose mode, re-raise so the developer / power user sees
+        # the full Rich traceback. Otherwise, render a one-liner that
+        # points at -v and bug-report.
+        if _os.environ.get("UNREAD_DEBUG") or _os.environ.get("UNREAD_VERBOSE"):
+            raise
+        # Strip the leading exception class qualname in the message —
+        # users care about WHAT happened, not whether it was a
+        # `ValueError` vs `RuntimeError`.
+        msg = str(e).strip() or type(e).__name__
+        console.print(f"\n[red]Error:[/] {msg}")
+        console.print(
+            "[grey70]Run with [cyan]-v[/] for the full traceback, "
+            "or [cyan]unread bug-report[/] to share with maintainers.[/]"
+        )
+        raise typer.Exit(1) from None
 
 
 # Names of every Typer command/group on the root app. Used by the root
@@ -387,8 +424,17 @@ def _seed_home_templates() -> None:
     cfg_template = repo_root / "config.toml.example"
     if not env_target.exists() and env_template.exists():
         copyfile(env_template, env_target)
-        with contextlib.suppress(OSError):
-            env_target.chmod(0o600)
+        # Use the shared tighten helper so a failure is logged (and
+        # surfaced to the user via the warning channel) instead of
+        # silently leaving a 0o644 .env containing fresh secrets.
+        from unread.util.fsmode import tighten
+
+        if not tighten(env_target):
+            console.print(
+                f"[yellow]Couldn't restrict permissions on {env_target} — "
+                f"set them manually with `chmod 600 {env_target}` so other "
+                f"users on this machine can't read your secrets.[/]"
+            )
     if not cfg_target.exists() and cfg_template.exists():
         copyfile(cfg_template, cfg_target)
 
@@ -2645,6 +2691,14 @@ def settings() -> None:
 
 reports_app = _UnreadTyper(help=_t("cmd_reports"), no_args_is_help=True, cls=_UnreadGroup)
 app.add_typer(reports_app, name="reports", rich_help_panel=PANEL_MAINT)
+
+
+# `unread security ...` — credential-store inspection / migration.
+# Registered here (not in a stub command body) because Typer needs the
+# subapp constructed at module-load time so `unread --help` lists it.
+from unread.security.commands import register as _register_security_commands  # noqa: E402
+
+_register_security_commands(app, PANEL_MAINT)
 
 
 @reports_app.command("prune")

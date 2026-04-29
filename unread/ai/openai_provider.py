@@ -21,6 +21,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from unread.ai.providers import ChatResult, ProviderUnavailableError
+from unread.ai.trust import enforce_base_url_trust
 from unread.util.flood import retry_on_429
 
 
@@ -107,6 +108,7 @@ class OpenAIProvider(_OpenAICompatBase):
             raise ProviderUnavailableError(
                 "OpenAI provider selected but `openai.api_key` is empty. Run `unread tg init` to add one."
             )
+        enforce_base_url_trust("openai", settings)
         kwargs: dict[str, Any] = {
             "api_key": settings.openai.api_key,
             "timeout": settings.openai.request_timeout_sec,
@@ -132,6 +134,7 @@ class OpenRouterProvider(_OpenAICompatBase):
                 "OpenRouter provider selected but `openrouter.api_key` is empty. "
                 "Run `unread tg init` to add one."
             )
+        enforce_base_url_trust("openrouter", settings)
         return AsyncOpenAI(
             api_key=settings.openrouter.api_key,
             base_url=settings.ai.base_url or settings.openrouter.base_url,
