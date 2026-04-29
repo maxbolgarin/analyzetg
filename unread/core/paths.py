@@ -79,7 +79,13 @@ def write_install_pointer(home: Path | None) -> None:
     # subtree never accidentally redirects somewhere weird.
     target = "" if home is None else str(Path(home).expanduser().resolve())
     body = f'# Written by `unread tg init`. Delete to re-pick the install folder.\nhome = "{target}"\n'
-    pointer.write_text(body, encoding="utf-8")
+    # Mode 0o600 from creation: the pointer doesn't carry secrets but
+    # routing every secret-adjacent writer through the same helper
+    # keeps the invariant uniform — no umask races anywhere in
+    # `~/.unread/`.
+    from unread.util.fsmode import secret_write_text
+
+    secret_write_text(pointer, body)
 
 
 def install_pointer_drift() -> tuple[bool, str]:

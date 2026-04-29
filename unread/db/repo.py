@@ -27,6 +27,19 @@ log = get_logger(__name__)
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+# Bumped whenever the schema gains additive changes the older code
+# can't tolerate (column with NOT NULL / no default, dropped column,
+# semantic table rewrite). Pure additive nullable columns DON'T need
+# a bump — older code just ignores them. The stamp lives in
+# `app_settings::_meta.schema_version` so a downgrade can detect a
+# future-version DB and refuse cleanly instead of crashing on a
+# missing column.
+SCHEMA_VERSION = 1
+
+
+class SchemaVersionError(RuntimeError):
+    """Raised when the on-disk DB was written by a future, incompatible version."""
+
 
 def _utcnow() -> str:
     return datetime.now(UTC).isoformat()
@@ -66,10 +79,71 @@ class Repo:
             # to signal a future after the loop ends.
             await conn.close()
             raise
+        # aiosqlite (via the stdlib sqlite3 connector) creates the file
+        # with the process umask — usually 0o644, world-readable. The DB
+        # holds cached chat content, enrichment results, secrets, and
+        # cost logs. Tighten to owner-only on every open (idempotent).
+        # Also tighten the WAL/SHM siblings if they exist.
+        from unread.util.fsmode import tighten
+
+        tighten(p)
+        for sibling in (p.with_suffix(p.suffix + "-wal"), p.with_suffix(p.suffix + "-shm")):
+            if sibling.exists():
+                tighten(sibling)
+        # Compare on-disk schema version with the code's expected version.
+        # If the DB was written by a newer version that introduced a
+        # change the current code can't read, refuse to use it instead
+        # of crashing later on a column-not-found.
+        try:
+            await repo._check_and_stamp_schema_version()
+        except SchemaVersionError:
+            await conn.close()
+            raise
         return repo
 
     async def close(self) -> None:
         await self._conn.close()
+
+    async def _check_and_stamp_schema_version(self) -> None:
+        """Read on-disk schema version, refuse if too new, otherwise stamp.
+
+        First-time DBs start at the current `SCHEMA_VERSION`. An older
+        DB whose stamp is missing or numeric-less than ours is silently
+        upgraded to ours (the additive-migration pass already ran).
+        A DB with a stamp greater than ours (a previously-installed
+        newer release wrote it) raises :class:`SchemaVersionError`
+        with copy that tells the user to upgrade.
+        """
+        cur = await self._conn.execute(
+            "SELECT value FROM app_settings WHERE key=?",
+            ("_meta.schema_version",),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        on_disk: int | None = None
+        if row is not None:
+            try:
+                on_disk = int(row["value"])
+            except (TypeError, ValueError):
+                on_disk = None
+        if on_disk is not None and on_disk > SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"Your storage DB at {self._path} was written by a newer "
+                f"unread (schema v{on_disk}); this build understands up to "
+                f"v{SCHEMA_VERSION}. Upgrade with `pip install -U unread`, "
+                f"or remove the DB to start fresh: rm {self._path}"
+            )
+        if on_disk != SCHEMA_VERSION:
+            await self._conn.execute(
+                """
+                INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                ("_meta.schema_version", str(SCHEMA_VERSION), _utcnow()),
+            )
+            await self._conn.commit()
 
     async def _apply_schema(self) -> None:
         """Idempotently apply `schema.sql`.
@@ -1353,7 +1427,17 @@ class Repo:
         return row["value"]
 
     async def set_app_setting(self, key: str, value: str) -> None:
-        """Upsert a setting override. `value=""` is allowed (means cleared)."""
+        """Upsert a setting override. `value=""` is allowed (means cleared).
+
+        Validates ``key`` against the allowlist defined in
+        :data:`unread.db._keys.OVERRIDE_KEYS` so a typo can't silently
+        store a never-read value (the bootstrap reads only allowlisted
+        keys, so an unknown key is dead weight). Unknown keys raise
+        ``ValueError``; the settings UI catches that and surfaces a
+        "did you mean…?" suggestion.
+        """
+        if key not in _OVERRIDE_KEYS:
+            raise ValueError(f"unknown setting key: {key!r}; allowed: {sorted(_OVERRIDE_KEYS)}")
         await self._conn.execute(
             """
             INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?)
@@ -1377,15 +1461,26 @@ class Repo:
         return deleted > 0
 
     async def get_all_app_settings(self) -> dict[str, str]:
-        """Return all saved overrides as a `{key: value}` dict."""
+        """Return all saved user overrides as a `{key: value}` dict.
+
+        Filters out internal `_meta.*` rows (e.g. the schema-version
+        stamp) so external consumers — settings UI, doctor, tests —
+        only see user-facing config knobs.
+        """
         cur = await self._conn.execute("SELECT key, value FROM app_settings")
         rows = await cur.fetchall()
         await cur.close()
-        return {row["key"]: row["value"] for row in rows}
+        return {row["key"]: row["value"] for row in rows if not row["key"].startswith("_meta.")}
 
     async def clear_all_app_settings(self) -> int:
-        """Remove every override. Returns the number of rows deleted."""
-        cur = await self._conn.execute("DELETE FROM app_settings")
+        """Remove every user override. Returns the number of rows deleted.
+
+        Preserves internal `_meta.*` rows (schema version stamp etc.)
+        so a user-driven "reset all settings" doesn't accidentally
+        wipe the version stamp and re-trigger a future-DB check the
+        next time the repo is opened.
+        """
+        cur = await self._conn.execute("DELETE FROM app_settings WHERE key NOT LIKE '\\_meta.%' ESCAPE '\\'")
         await self._conn.commit()
         deleted = cur.rowcount or 0
         await cur.close()

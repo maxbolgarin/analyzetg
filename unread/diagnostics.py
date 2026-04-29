@@ -29,16 +29,27 @@ _SECRET_SEGMENTS: frozenset[str] = frozenset({key.split(".")[-1] for key in SECR
 _REDACTED = "***redacted***"
 
 # Heuristic patterns for value-shaped secrets that may appear in logs
-# even when the key name doesn't include `api_*`.
+# even when the key name doesn't include `api_*`. Order matters — more
+# specific patterns first so they win against the looser ones.
 _VALUE_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),  # OpenAI / generic
     re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b"),  # Anthropic
-    re.compile(r"\bsk-or-[A-Za-z0-9_\-]{20,}\b"),  # OpenRouter
+    re.compile(r"\bsk-or-v\d+-[A-Za-z0-9_\-]{20,}\b"),  # OpenRouter (v1+)
+    re.compile(r"\bsk-or-[A-Za-z0-9_\-]{20,}\b"),  # OpenRouter (legacy)
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),  # OpenAI / generic
     re.compile(r"\bAIza[A-Za-z0-9_\-]{30,}\b"),  # Google
-    # Telegram api_hash (32 hex chars). Only redact when it looks
-    # like a bare hash so we don't eat git SHAs in error tracebacks.
-    re.compile(r"\b[a-f0-9]{32}\b"),
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}\b"),  # Hugging Face
+    re.compile(r"\bBearer\s+[A-Za-z0-9_\-\.=]{16,}", re.IGNORECASE),  # generic Bearer
+    # Telegram bot tokens: <numeric_id>:<35-46 base64-ish>. Anchored on the
+    # `:` separator so we don't eat ordinary numbers.
+    re.compile(r"\b\d{6,12}:[A-Za-z0-9_\-]{30,46}\b"),
 )
+
+# Key-name segments that should redact the *value* on any TOML / .env
+# line whose key contains them, even when the value isn't shaped like a
+# known token. Caught here in addition to `_SECRET_SEGMENTS` (declared
+# above from `SECRET_KEYS`) so generic fields like `password` and
+# `secret` are covered without depending on the typed-secret allowlist.
+_GENERIC_SECRET_NAME_TOKENS: frozenset[str] = frozenset({"password", "secret", "token", "credential", "auth"})
 
 
 def redact_text(raw: str) -> str:
@@ -77,7 +88,17 @@ def redact_config_file(path: Path) -> str:
             continue
         indent, key, sep, value = m.groups()
         leaf = key.split(".")[-1].lower()
-        if leaf in _SECRET_SEGMENTS:
+        # Match the leaf against the typed-secret allowlist OR the
+        # generic-name tokens. Substring containment so .env-style
+        # flat keys like `TELEGRAM_API_HASH=…` (whose leaf is
+        # `telegram_api_hash`, not `api_hash`) are still caught — same
+        # for custom `[smtp] password = …` lines in config.toml.
+        is_secret_key = (
+            leaf in _SECRET_SEGMENTS
+            or any(t in leaf for t in _SECRET_SEGMENTS)
+            or any(t in leaf for t in _GENERIC_SECRET_NAME_TOKENS)
+        )
+        if is_secret_key:
             # Preserve the original quoting style so the file still
             # parses if the user edits it after pasting.
             if value.startswith('"') and value.endswith('"'):

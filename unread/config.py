@@ -72,6 +72,14 @@ class AICfg(_StrictCfg):
     base_url: str = ""  # OpenAI-compatible endpoint override; auto-derived for openrouter
     chat_model: str = ""  # empty → provider's hard-coded default
     filter_model: str = ""  # ditto
+    # Safety: when `base_url` resolves to anything outside the per-provider
+    # trusted-host allowlist (api.openai.com, api.anthropic.com,
+    # generativelanguage.googleapis.com, openrouter.ai, plus localhost/RFC1918
+    # for self-hosted), refuse to send the upstream API key. A typo like
+    # `api.openai.com.attacker.tld` would otherwise silently exfiltrate the
+    # key. Set this to True to acknowledge that you really do mean to send
+    # your key to a custom host (corporate proxy, internal gateway, etc.).
+    base_url_trusted: bool = False
 
 
 class OpenRouterCfg(_StrictCfg):

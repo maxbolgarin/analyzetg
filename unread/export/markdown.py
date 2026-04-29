@@ -24,10 +24,15 @@ def export_md(msgs: list[Message], *, title: str | None, output: Path, language:
     rendered = render_md(msgs, title=title, language=language)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")
+    from unread.util.fsmode import tighten
+
+    tighten(output)
 
 
 def export_jsonl(msgs: list[Message], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import tighten as _tighten
+
     with output.open("w", encoding="utf-8") as f:
         for m in msgs:
             f.write(
@@ -62,10 +67,13 @@ def export_jsonl(msgs: list[Message], output: Path) -> None:
                 )
                 + "\n"
             )
+    _tighten(output)
 
 
 def export_csv(msgs: list[Message], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import tighten as _tighten
+
     with output.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(
@@ -117,3 +125,4 @@ def export_csv(msgs: list[Message], output: Path) -> None:
                     links_flat,
                 ]
             )
+    _tighten(output)

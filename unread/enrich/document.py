@@ -211,7 +211,9 @@ async def enrich_document(
         return None
 
     tmp_dir = settings.media.tmp_dir
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import ensure_private_dir
+
+    ensure_private_dir(tmp_dir)
     src = tmp_dir / f"doc_{msg.chat_id}_{msg.msg_id}.{ext}"
     downloaded: Path | None = None
     try:

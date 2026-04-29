@@ -424,6 +424,14 @@ async def cmd_analyze(
         preset=resolved_preset,
     )
 
+    # Preflight: if any AV enrichment kind is enabled, ffmpeg is required.
+    # Catch the missing-binary case BEFORE we sync messages / fetch metadata
+    # so the user doesn't wait minutes only to hit a transcode error.
+    if enrich_opts.voice or enrich_opts.videonote or enrich_opts.video:
+        from unread.util.preflight import require_ffmpeg
+
+        require_ffmpeg("transcribe voice / video media")
+
     # No ref but --folder → batch-analyze unread chats in that folder; skip wizard.
     if ref is None and folder:
         # Batch mode is unread-only today. Reject period flags explicitly —
@@ -2209,6 +2217,11 @@ def _print_and_write(
     # never silently overwrite a previous report.
     output = _unique_path(output)
     output.write_text(body, encoding="utf-8")
+    # Reports contain chat content (often private). Tighten to owner-only
+    # so other local users on a shared box can't read them.
+    from unread.util.fsmode import tighten
+
+    tighten(output)
     label = "also_saved" if console_out else "written_to"
     console.print(f"[green]{_tf(label, path=output)}[/]")
 

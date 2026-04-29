@@ -212,7 +212,9 @@ async def extract_audio(path: Path) -> ExtractResult:
         raise RuntimeError(_t("error_audio_no_openai"))
 
     tmp_dir = settings.media.tmp_dir
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import ensure_private_dir
+
+    ensure_private_dir(tmp_dir)
     parts = await transcode_for_openai(path, "voice", tmp_dir)
     audio_model = settings.openai.audio_model_default
     audio_lang = settings.openai.audio_language or None
@@ -246,7 +248,9 @@ async def extract_video(path: Path) -> ExtractResult:
         raise RuntimeError(_t("error_video_no_openai"))
 
     tmp_dir = settings.media.tmp_dir
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import ensure_private_dir
+
+    ensure_private_dir(tmp_dir)
     parts = await transcode_for_openai(path, "video", tmp_dir)
     audio_model = settings.openai.audio_model_default
     audio_lang = settings.openai.audio_language or None

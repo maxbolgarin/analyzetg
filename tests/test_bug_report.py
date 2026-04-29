@@ -23,14 +23,29 @@ def test_redact_text_replaces_known_shapes():
         "OpenAI: sk-proj-abc123def456ghi789jkl012mno345 "
         "Anthropic: sk-ant-AAA111BBB222CCC333DDD444EEE555 "
         "Google: AIzaSyA1234567890abcdefghijklmnopqrstuvw "
-        "TG hash: abcdef0123456789abcdef0123456789"
+        "OpenRouter: sk-or-v1-abcdef1234567890abcdef1234567890 "
+        "HF: hf_abcdef1234567890abcdef1234567890ABC "
+        "Bearer eyJabc.eyJdef.signaturepartherelong "
+        "Bot: 1234567890:AAEabcdef1234567890abcdef1234567890aZ"
     )
     cleaned = redact_text(leak)
     assert "sk-proj-abc" not in cleaned
     assert "sk-ant-AAA" not in cleaned
     assert "AIzaSyA12" not in cleaned
-    assert "abcdef0123456789abcdef0123456789" not in cleaned
+    assert "sk-or-v1-abcdef" not in cleaned
+    assert "hf_abcdef" not in cleaned
+    assert "eyJabc.eyJdef.signaturepartherelong" not in cleaned
+    assert "AAEabcdef" not in cleaned
     assert "redacted" in cleaned.lower()
+
+
+def test_redact_text_does_not_eat_git_shas_or_md5():
+    """Bare 32-hex strings (git SHAs, MD5 hashes, request IDs) used to be
+    redacted globally, removing diagnostic value from tracebacks. After
+    the narrowing fix, only `*api_hash*`-keyed lines have the value
+    masked — bare hex in free text passes through."""
+    safe = "Failure at commit abcdef0123456789abcdef0123456789 in foo()"
+    assert "abcdef0123456789abcdef0123456789" in redact_text(safe)
 
 
 def test_redact_config_file_masks_known_keys(tmp_path: Path):

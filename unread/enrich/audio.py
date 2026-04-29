@@ -124,7 +124,9 @@ async def enrich_audio(
     used_lang = language or cfg_lang
 
     tmp_dir = settings.media.tmp_dir
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    from unread.util.fsmode import ensure_private_dir
+
+    ensure_private_dir(tmp_dir)
     tel_msg = await client.get_messages(msg.chat_id, ids=msg.msg_id)
     if tel_msg is None or tel_msg.media is None:
         log.warning("enrich.audio.no_media", chat_id=msg.chat_id, msg_id=msg.msg_id)
