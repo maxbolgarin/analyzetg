@@ -123,7 +123,12 @@ def normalize_url(url: str) -> str:
 
 
 def page_id(normalized: str) -> str:
-    """Stable 16-char id over the normalized URL — primary key in `website_pages`."""
+    """Stable 16-char id over the normalized URL — primary key in `website_pages`.
+
+    16 hex chars = 64 bits. 50% birthday collision lands at ~4B distinct
+    URLs, well above any realistic single-user history; safe and short
+    enough to fit in the saved-report citations. Don't truncate further.
+    """
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 

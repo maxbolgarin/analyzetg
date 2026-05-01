@@ -353,6 +353,7 @@ async def cmd_analyze(
     save_default: bool = False,
     mark_read: bool | None = None,
     no_cache: bool = False,
+    redact: bool | None = None,
     include_transcripts: bool = True,
     min_msg_chars: int | None = None,
     enrich: str | None = None,
@@ -892,6 +893,7 @@ async def cmd_analyze(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 enrich_opts=enrich_opts,
+                dry_run=dry_run,
                 yes=yes,
                 language=effective_language,
                 content_language=effective_content_language,
@@ -1000,6 +1002,7 @@ async def cmd_analyze(
             by=by,
             post_to=post_to,
             with_comments=with_comments,
+            redact=redact,
             yes=yes,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -1177,6 +1180,7 @@ async def _run_single(
     by: str | None = None,
     post_to: str | None = None,
     with_comments: bool = False,
+    redact: bool | None = None,
     yes: bool = False,
     language: str = "en",
     content_language: str = "en",
@@ -1185,7 +1189,15 @@ async def _run_single(
     from unread.core.pipeline import prepare_chat_run
     from unread.enrich.base import EnrichOpts as _EnrichOpts
 
-    effective_enrich = enrich_opts if enrich_opts is not None else _EnrichOpts()
+    # --dry-run: zero out enrichment so we don't burn Whisper/vision/link
+    # spend on a "preview the cost" run. Without this, --dry-run --enrich-all
+    # on a busy chat triggers full media transcription before the early-exit
+    # cost-estimate prints. The downstream pipeline already short-circuits
+    # the LLM analyse step itself; this closes the enrichment loophole.
+    if dry_run:  # noqa: SIM108 — kept for readability with the long comment above.
+        effective_enrich = _EnrichOpts()
+    else:
+        effective_enrich = enrich_opts if enrich_opts is not None else _EnrichOpts()
 
     prepared = await prepare_chat_run(
         client=client,
@@ -1294,7 +1306,15 @@ async def _run_single(
                         console.print(f"[yellow]{_t('aborted')}[/]")
                         raise typer.Exit(0)
                 elif hi is None:
-                    console.print(f"[grey70]{_t('max_cost_not_enforced')}[/]")
+                    # Pricing missing for the run's models. The previous
+                    # behaviour silently skipped the guard, which let
+                    # users incur unbounded cost while believing they
+                    # were capped. Fail closed unless --yes overrides.
+                    if yes:
+                        console.print(f"[yellow]{_t('max_cost_pricing_missing_yes_override')}[/]")
+                    else:
+                        console.print(f"[red]{_t('max_cost_pricing_missing_abort')}[/]")
+                        raise typer.Exit(2)
 
     console.print(f"[grey70]{_t('running_analysis')}[/]")
     sender_id_arg = int(by) if by and by.lstrip("-").isdigit() else None
@@ -1314,6 +1334,7 @@ async def _run_single(
         sender_id=sender_id_arg,
         with_comments=with_comments and prepared.comments_chat_id is not None,
         comments_chat_id=prepared.comments_chat_id,
+        redact=redact,
     )
     # Build chat_groups when comments were included so the formatter
     # emits a per-chat header + link template per section. Each msg keeps
@@ -1467,6 +1488,7 @@ async def _run_forum_per_topic(
     include_transcripts: bool,
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
+    dry_run: bool = False,
     yes: bool = False,
     language: str = "en",
     content_language: str = "en",
@@ -1481,7 +1503,13 @@ async def _run_forum_per_topic(
     from unread.core.pipeline import prepare_chat_runs_per_topic
     from unread.enrich.base import EnrichOpts as _EnrichOpts
 
-    effective_enrich = enrich_opts if enrich_opts is not None else _EnrichOpts()
+    # --dry-run: zero out enrichment so a "preview" doesn't burn Whisper /
+    # vision / link spend. The per-topic analyse loop below also short-
+    # circuits in dry_run mode (prints message counts + cost estimate).
+    if dry_run:  # noqa: SIM108 — kept for readability with the long comment above.
+        effective_enrich = _EnrichOpts()
+    else:
+        effective_enrich = enrich_opts if enrich_opts is not None else _EnrichOpts()
 
     if console_out:
         base_dir: Path | None = None
@@ -1518,6 +1546,13 @@ async def _run_forum_per_topic(
         content_language=content_language,
     ):
         try:
+            # --dry-run for forum-per-topic: print per-topic count + skip
+            # the LLM analyse step. Enrichment was already zeroed above.
+            if dry_run:
+                console.print(
+                    f"[grey70]→ {prepared.thread_title or '(topic)'} ({len(prepared.messages)} msgs)[/]"
+                )
+                continue
             opts = AnalysisOptions(
                 preset=preset,
                 prompt_file=prompt_file,
@@ -2042,6 +2077,12 @@ def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
         lines.append(f"{_t('report_meta_enrichment')} {', '.join(result.enrich_kinds)}")
     if result.enrich_summary:
         lines.append(f"{_t('report_meta_enrichment_detail')} {result.enrich_summary}")
+    # Visibility for the user that PII was scrubbed before sending: shows
+    # what kinds (and how many of each) so an operator can sanity-check
+    # the redactor caught what they expected.
+    if result.redact_counts:
+        bits = ", ".join(f"{k}: {v}" for k, v in sorted(result.redact_counts.items()))
+        lines.append(f"{_t('report_meta_redact')} {bits}")
 
     analysis_cost = result.total_cost_usd
     if result.enrich_cost_usd:
@@ -2133,6 +2174,9 @@ def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
         row(_t("report_meta_enrichment"), ", ".join(result.enrich_kinds))
     if result.enrich_summary:
         row(_t("report_meta_enrichment_detail"), result.enrich_summary)
+    if result.redact_counts:
+        bits = ", ".join(f"{k}: {v}" for k, v in sorted(result.redact_counts.items()))
+        row(_t("report_meta_redact"), bits)
 
     analysis_cost = result.total_cost_usd
     if result.enrich_cost_usd:

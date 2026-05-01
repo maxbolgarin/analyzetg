@@ -163,9 +163,12 @@ async def cmd_dump(
         )
         return
 
-    # No ref → interactive wizard (pick chat → thread → enrich → period → run).
-    # Wizard opens its own tg_client; return before this function tries to.
-    if ref is None:
+    # `tg` magic ref → interactive Telegram chat picker (the wizard).
+    # `unread <ref>`, `unread ask <ref>`, and `unread dump <ref>` all
+    # treat "tg" as the explicit "let me pick a chat" token; nothing
+    # else opens the picker, so a missing/invalid ref errors instead
+    # of silently launching a session-touching wizard.
+    if ref == "tg":
         from unread.interactive import run_interactive_dump
 
         await run_interactive_dump(
@@ -180,6 +183,17 @@ async def cmd_dump(
             content_language=content_language,
         )
         return
+
+    if ref is None:
+        # No ref, no --folder, not "tg" — refuse to guess. Pre-fix
+        # this fell through to the wizard, which opened a Telegram
+        # client and surprised users with a session prompt for a
+        # command they thought was scoped to "the thing I just typed".
+        raise typer.BadParameter(
+            "Need a ref. Use `tg` for the interactive chat picker, "
+            "an @user / t.me link / numeric id for a specific Telegram chat, "
+            "or `--folder NAME` to batch-dump every unread chat in a folder."
+        )
 
     # Direct path: treat mark_read=None as False (CLI tri-state default).
     mark_read_bool = bool(mark_read)

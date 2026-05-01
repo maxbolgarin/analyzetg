@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -40,13 +41,13 @@ class _PreferSubcommandsGroup(TyperGroup):
 
     The root callback declares `ref: str | None = typer.Argument(None)`.
     Standard Click consumes the first non-option token into `ref` BEFORE
-    checking for subcommand matches — so `unread describe` ends up
-    invoking analyze with ref="describe" instead of dispatching to the
-    describe subcommand. We peel a leading subcommand token out of args
+    checking for subcommand matches — so `unread cleanup` ends up
+    invoking analyze with ref="cleanup" instead of dispatching to the
+    cleanup subcommand. We peel a leading subcommand token out of args
     so the positional sees nothing, then inject the token back into
     `ctx.protected_args` so Group's normal routing fires.
 
-    `unread -- describe` (or `unread tg describe`) explicitly forces
+    `unread -- cleanup` (or `unread tg cleanup`) explicitly forces
     the ref interpretation when a chat is literally titled like a
     subcommand.
     """
@@ -170,8 +171,19 @@ app = _UnreadTyper(
 
 chats_app = _UnreadTyper(help=_t("cmd_chats"), no_args_is_help=True, cls=_UnreadGroup)
 cache_app = _UnreadTyper(help=_t("cmd_cache"), no_args_is_help=True, cls=_UnreadGroup)
+backup_app = _UnreadTyper(help=_t("cmd_backup"), no_args_is_help=True, cls=_UnreadGroup)
+# Magic ref token: `unread tg`, `unread ask tg`, and `unread dump tg`
+# all route to the corresponding interactive Telegram chat picker
+# (analyze / ask / dump wizard). Treating "tg" as a ref instead of a
+# subcommand keeps the command surface flat — every entry point takes
+# `<ref>` and behaves identically when `<ref> == "tg"`. Setup-side
+# Telegram commands live at the top level (`unread login` / `logout`
+# / `describe` / `folders`).
+TG_INTERACTIVE_REF = "tg"
+
 app.add_typer(chats_app, name="chats", rich_help_panel=PANEL_SYNC)
 app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
+app.add_typer(backup_app, name="backup", rich_help_panel=PANEL_MAINT)
 
 console = Console()
 
@@ -244,24 +256,25 @@ def _run(coro) -> None:
 # Names of every Typer command/group on the root app. Used by the root
 # callback to warn when `unread <bare-word>` collides with a subcommand
 # name (Click resolves subcommands first; the user almost certainly
-# meant `unread tg <ref>` to disambiguate).
+# wanted to look up a chat by that title via the interactive picker).
 _RESERVED_TOP_LEVEL: set[str] = set()
 
 
 def _maybe_warn_subcommand_collision(ref: str | None) -> None:
     """Surface a one-line hint when `ref` shadows a real subcommand.
 
-    The user typed something like `unread describe` intending a chat
-    titled "describe" — Click already routed to the subcommand instead.
+    The user typed something like `unread cleanup` intending a chat
+    titled "cleanup" — Click already routed to the subcommand instead.
     They land here only when `ref` slipped through the parser (which
-    means they used a non-colliding form). This hook is a future-proof:
-    it warns when the value matches anyway, suggesting the `tg` form.
+    means they used a non-colliding form). The escape hatch for a chat
+    that genuinely is named after a subcommand is the interactive
+    picker (`unread tg`), which can find it by title.
     """
     if ref and ref in _RESERVED_TOP_LEVEL:
         console.print(
             f"[yellow]Note: `{ref}` is also a subcommand name. "
-            f"For a chat literally titled '{ref}', use `unread tg {ref}` "
-            f"or `unread -- {ref}`.[/]"
+            f"For a chat literally titled '{ref}', use `unread tg` "
+            f"and search for it in the picker.[/]"
         )
 
 
@@ -341,7 +354,7 @@ def _print_first_run_banner(missing: str = "both") -> None:
         path (YouTube / website / file) without any chat provider key.
       - ``"telegram"`` — only Telegram credentials are missing.
       - ``"telegram_session_only"`` — the user has a Telegram session
-        file but it's not authorized; points at ``unread tg init --force``.
+        file but it's not authorized; points at ``unread login --force``.
       - ``"both"`` — neither side is set up. Default.
 
     The banner always points at ``unread init`` first (the interactive
@@ -647,22 +660,60 @@ def _looks_like_telegram_ref(ref: str | None) -> bool:
     return not rl.startswith(("http://", "https://"))
 
 
-def _is_uninitialized() -> bool:
-    """True iff the install looks unconfigured for analyze.
+# Numeric Telegram chat ids, with optional `-100` channel prefix.
+_TELEGRAM_NUMERIC_RE = re.compile(r"^-?\d+$")
 
-    Two signals:
-      - `~/.unread/install.toml` is absent (the user has never run the
-        setup wizard).
-      - The active chat provider has no key (chat commands won't work).
 
-    Either one triggers the bare-`unread` "want to init?" prompt. We
-    intentionally don't check Telegram credentials — a YouTube-only
-    user with OpenAI configured is fully functional.
+def _is_explicit_telegram_ref(ref: str) -> bool:
+    """True for ``ref`` shapes that are unambiguously Telegram.
+
+    Used by the bare ``unread <ref>`` callback to decide whether the
+    user clearly meant "look this up on Telegram" — vs. a free-form
+    quoted string that might be a typo, a shell mishap, or a confused
+    new user. Bare quoted strings like ``unread "some text"`` no
+    longer fall through to fuzzy chat-title matching at the root —
+    that mode now lives only behind ``unread tg <ref>`` / the
+    Telegram-explicit subcommands. Helps remove a long-standing
+    "why does my random text try to log into Telegram?" surprise.
+
+    True for:
+      * ``@username``
+      * ``t.me/...`` / ``https://t.me/...`` / ``tg://...``
+      * numeric id (``-1001234567890`` or bare ``123``)
+      * the literal ``me`` (Saved Messages alias)
     """
-    from unread.core.paths import install_pointer_path
-
-    if not install_pointer_path().is_file():
+    rl = ref.strip().lower()
+    if not rl:
+        return False
+    if rl == "me":
         return True
+    if rl.startswith("@"):
+        return True
+    if rl.startswith(("https://t.me/", "http://t.me/", "tg://")):
+        return True
+    return bool(_TELEGRAM_NUMERIC_RE.match(rl))
+
+
+def _is_uninitialized() -> bool:
+    """True iff the install can't run chat / analyze commands.
+
+    The decisive signal is whether the active chat provider has a
+    resolvable API key — without it every analyze / ask call 401s and
+    the bare-`unread` quickstart can't help.
+
+    The wizard pointer file (``~/.unread/install.toml``) used to be
+    treated as a separate "setup happened" requirement. That produced
+    a false-positive setup prompt for users who configured `.env` /
+    secrets backend / env vars by hand (or via an older release that
+    pre-dates the pointer file) — they had a fully working install
+    but bare `unread` kept offering to re-run the wizard. The pointer
+    is now informational only: present iff the wizard was ever run,
+    absent does NOT mean "needs setup".
+
+    We intentionally don't check Telegram credentials — a YouTube /
+    website / file-only user with the AI provider configured is
+    fully functional.
+    """
     return not _active_provider_credentials_present()
 
 
@@ -700,11 +751,14 @@ def _print_config_status() -> None:
     """Show what's configured: install dir, AI providers, Telegram session.
 
     Cheap (no network): provider keys come straight from the resolved
-    settings, Telegram presence is just a session-file check. The
-    Telegram username isn't shown — it would require `client.get_me()`
-    which is what `unread doctor` is for.
+    settings, Telegram presence is checked by inspecting the local
+    session SQLite (or encrypted slot) for an actual ``auth_key`` —
+    file existence alone isn't enough since Telethon writes the file
+    on first connect, before login completes. The Telegram username
+    isn't shown — it would require ``client.get_me()`` which is what
+    ``unread doctor`` is for.
     """
-    from unread.core.paths import default_session_path, unread_home
+    from unread.core.paths import unread_home
 
     s = get_settings()
     home = unread_home()
@@ -742,32 +796,66 @@ def _print_config_status() -> None:
     if other_keys:
         rows.append(f"  [bold]Other AI keys:[/] [green]{', '.join(other_keys)}[/]")
 
-    sess = default_session_path()
-    sess_present = sess.exists() or sess.with_name(sess.name + ".session").exists()
+    # File presence alone isn't authorization — Telethon writes the
+    # SQLite session file on first `client.connect()` (DC info, server
+    # addresses, port — well before the user completes login). The
+    # authoritative signal is `is_user_authorized()`; `is_session_authorized_sync`
+    # is its no-network, no-decrypt twin so this status panel can trust
+    # the answer without reaching for telethon.
+    from unread.tg.session_state import is_session_authorized_sync
+
     creds_present = bool(s.telegram.api_id and s.telegram.api_hash)
-    if sess_present and creds_present:
+    authorized = creds_present and is_session_authorized_sync(s)
+    if authorized:
         tg_line = f"  [bold]Telegram:[/] {_mark(True)} session linked"
     elif creds_present:
-        tg_line = "  [bold]Telegram:[/] [yellow]creds set, no session[/]  [grey70](run `unread tg init`)[/]"
+        tg_line = (
+            "  [bold]Telegram:[/] [yellow]creds set, not logged in[/]  [grey70](run `unread login`)[/]"
+        )
     else:
         tg_line = f"  [bold]Telegram:[/] {_mark(False)} not configured"
     rows.append(tg_line)
+
+    # Active credential-storage backend. `read_active_backend_sync` is
+    # a cheap read-only SQLite query and falls through to "db" on any
+    # error, so it's safe to call from the no-args overview.
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        BACKEND_PASSPHRASE,
+        read_active_backend_sync,
+    )
+
+    backend = read_active_backend_sync(s.storage.data_path)
+    if backend == BACKEND_KEYCHAIN:
+        sec_line = f"  [bold]Security:[/] keystore {_mark(True)}  [grey70](OS keychain)[/]"
+    elif backend == BACKEND_PASSPHRASE:
+        sec_line = f"  [bold]Security:[/] pass {_mark(True)}  [grey70](passphrase-encrypted)[/]"
+    else:
+        sec_line = (
+            "  [bold]Security:[/] [yellow]plain[/]  "
+            "[grey70](run `unread security set keystore` to encrypt at rest)[/]"
+        )
+    rows.append(sec_line)
 
     console.print("[bold]Status[/]")
     for row in rows:
         console.print(row)
     console.print(
         "  [grey70]Add or change AI keys / providers:[/] [cyan]unread init[/]  "
-        "[grey70]·[/]  [grey70]Re-link Telegram:[/] [cyan]unread tg init --force[/]"
+        "[grey70]·[/]  [grey70]Re-link Telegram:[/] [cyan]unread login --force[/]"
     )
 
 
 # Single source of truth for the `<ref>` cheat-sheet shown in the help
-# overview AND in `unread help analyze`. Each row: (form, description).
+# overview AND in `unread help flags`. Each row: (form, description).
+# Fuzzy chat-title match is intentionally NOT in this table — the bare
+# `unread <ref>` form rejects free-form strings to avoid the
+# "why does my random text try to log into Telegram?" surprise. Users
+# who want the fuzzy lookup go through `unread tg "title"` (see
+# the matching `<ref>` table inside `unread tg --help`).
 _REF_TYPES: tuple[tuple[str, str], ...] = (
     ("@username", "Telegram handle"),
     ("t.me/c/<id>/<msg>", "Telegram link (channel post, topic, message)"),
-    ('"Fuzzy title"', "substring match on a chat title"),
     ("-1001234567890", "numeric Telegram chat id (use `--` to separate from flags)"),
     ("https://youtu.be/...", "YouTube video URL"),
     ("https://example.com/...", "web page URL"),
@@ -786,7 +874,7 @@ def _status_one_liner() -> str:
     """
     import os as _os
 
-    from unread.core.paths import default_session_path
+    from unread.tg.session_state import is_session_authorized_sync
 
     s = get_settings()
     active = (s.ai.provider or "openai").strip().lower()
@@ -797,10 +885,8 @@ def _status_one_liner() -> str:
         "google": bool(s.google.api_key),
         "local": True,  # local provider doesn't need a key
     }.get(active, False)
-    sess = default_session_path()
-    sess_present = sess.exists() or sess.with_name(sess.name + ".session").exists()
     creds_present = bool(s.telegram.api_id and s.telegram.api_hash)
-    tg_ok = sess_present and creds_present
+    tg_ok = creds_present and is_session_authorized_sync(s)
     ai_mark = "[green]✓[/]" if has_key else "[red]✗[/]"
     tg_mark = "[green]✓[/]" if tg_ok else "[red]✗[/]"
     return f"[grey70]unread · {active} {ai_mark} · Telegram {tg_mark}[/]"
@@ -865,7 +951,7 @@ def _print_help_overview() -> None:
     """Full help screen shown by `unread help` and `unread --help`.
 
     Order: header → status → usage → ref types → commands → footer.
-    No analyze flag dump — that lives behind `unread help analyze` and
+    No analyze flag dump — that lives behind `unread help flags` and
     `unread <cmd> --help` for individual commands.
     """
     console.print("[bold]unread[/] — Telegram / YouTube / web-page analyzer\n")
@@ -878,11 +964,16 @@ def _print_help_overview() -> None:
     # straight from the Typer app so adding a new command shows up here
     # automatically, no two-place edit.
     rows = _enumerate_commands(app)
+    # `init` is a top-of-mind command for new users (Main), but once setup is
+    # done it's just a re-link tool — demote it to Maintenance so the Main
+    # group stays focused on the analyze/ask/dump trio.
+    init_panel = PANEL_MAIN if _is_uninitialized() else PANEL_MAINT
     by_panel: dict[str, list[tuple[str, str]]] = {}
     for name, panel, help_str, hidden in rows:
         if hidden or not name:
             continue
-        by_panel.setdefault(panel or PANEL_MAIN, []).append((name, help_str))
+        effective_panel = init_panel if name == "init" else (panel or PANEL_MAIN)
+        by_panel.setdefault(effective_panel, []).append((name, help_str))
 
     console.print("[bold]Commands[/]")
     for panel in (PANEL_MAIN, PANEL_SYNC, PANEL_MAINT):
@@ -890,14 +981,16 @@ def _print_help_overview() -> None:
         if not items:
             continue
         console.print(f"  [bold]{panel}[/]")
-        items.sort(key=lambda r: r[0])
+        # Pin `init` to the top of Main when surfacing it to a fresh user —
+        # they need that command before any other one is even useful.
+        items.sort(key=lambda r: (0 if (panel == PANEL_MAIN and r[0] == "init") else 1, r[0]))
         console.print(_format_command_table(items, indent="    "))
         console.print("")
 
     console.print(
         "[grey70]Per-command help:[/] [cyan]unread <cmd> --help[/]  "
         "[grey70]·[/]  [cyan]unread help <cmd>[/]  "
-        "[grey70]·[/]  [cyan]unread help analyze[/] [grey70](analyze flags)[/]"
+        "[grey70]·[/]  [cyan]unread help flags[/] [grey70](flags accepted by `unread <ref>`)[/]"
     )
 
 
@@ -1059,9 +1152,10 @@ def _print_help_for_command(cmd: click.Command, ctx: click.Context, *, label: st
 
     Shared by `unread <cmd> --help` (via `_UnreadCommand.format_help`)
     and `unread help <cmd>` (via `help_cmd`). `label` overrides the
-    displayed command name — used for `unread help analyze` to render
-    the root callback's params under the friendly "analyze" label
-    rather than the literal "unread" group name.
+    displayed command name — used for `unread help flags` to render
+    the root callback's params under a `<ref>` label rather than the
+    literal "unread" group name (and to avoid suggesting an `analyze`
+    subcommand exists, since it doesn't).
     """
     # `_command_path(ctx)` produces a clean "unread <sub>" string,
     # bypassing Click's `command_path` (which splices the root
@@ -1071,7 +1165,12 @@ def _print_help_for_command(cmd: click.Command, ctx: click.Context, *, label: st
     console.print("")
     # Usage
     args = [p for p in cmd.params if isinstance(p, click.Argument)]
-    arg_parts = " ".join(_safe_metavar(p, ctx) for p in args)
+    # When `label` already names the positional (e.g. `<ref>` for the
+    # root callback's flag-listing page), don't append `[REF]` after
+    # the options — they refer to the same positional and the
+    # repetition reads like a typo.
+    suppress_args = label == "<ref>"
+    arg_parts = "" if suppress_args else " ".join(_safe_metavar(p, ctx) for p in args)
     options_part = (
         " [OPTIONS]" if any(isinstance(p, click.Option) and not p.hidden for p in cmd.params) else ""
     )
@@ -1086,7 +1185,7 @@ def _print_help_for_command(cmd: click.Command, ctx: click.Context, *, label: st
     if long_body:
         console.print(f"[grey70]{long_body}[/]\n")
     # `<ref>` cheat-sheet — only shown for the analyze (root callback) help.
-    if label == "analyze":
+    if label == "<ref>":
         console.print("[bold]<ref> can be[/]")
         ref_w = max(len(form) for form, _ in _REF_TYPES)
         for form, desc in _REF_TYPES:
@@ -1194,6 +1293,33 @@ def _exit_missing_provider_credentials() -> typer.Exit:
     raise typer.Exit(1)
 
 
+def _exit_unrecognized_ref(ref: str) -> None:
+    """Friendly banner + exit for the bare `unread <ref>` form when ``ref``
+    doesn't match any known input shape (file / URL / explicit Telegram).
+
+    Replaces the old "fall through to Telegram fuzzy match" behavior,
+    which was confusing — users typing arbitrary text would silently
+    end up trying to authenticate with Telegram. Now we reject up
+    front and point at the right entry point for each shape.
+    """
+    pretty = ref.strip()
+    console.print(f"[bold yellow]Couldn't route[/] [cyan]{pretty!r}[/] to a known input.\n")
+    console.print("[bold]For Telegram chats:[/]")
+    console.print("  [cyan]unread @username[/]               exact handle")
+    console.print("  [cyan]unread t.me/c/<id>/<msg>[/]       link")
+    console.print("  [cyan]unread -1001234567890[/]          numeric id")
+    console.print("  [cyan]unread tg[/]                       interactive chat picker")
+    console.print("\n[bold]For URLs:[/]")
+    console.print("  [cyan]unread https://youtu.be/<id>[/]")
+    console.print("  [cyan]unread https://example.com/article[/]")
+    console.print("\n[bold]For local files:[/]")
+    console.print("  [cyan]unread ./path/to/notes.pdf[/]")
+    console.print("\n[bold]For raw text via stdin:[/]")
+    console.print(f'  [cyan]echo "{pretty}" | unread[/]')
+    console.print(f'  [cyan]unread - <<< "{pretty}"[/]')
+    raise typer.Exit(1)
+
+
 def _print_provider_credentials_banner(provider: str) -> None:
     """One unified banner for any provider's missing chat credential."""
     from unread.core.paths import default_env_path, ensure_unread_home
@@ -1218,7 +1344,7 @@ def _print_provider_credentials_banner(provider: str) -> None:
     )
 
 
-@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_describe"))
+@app.command("describe", rich_help_panel=PANEL_MAIN, help=_t("cmd_describe"))
 def describe(
     ref: str | None = typer.Argument(
         None,
@@ -1262,7 +1388,7 @@ def describe(
     )
 
 
-@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_folders"))
+@app.command("folders", rich_help_panel=PANEL_MAIN, help=_t("cmd_folders"))
 def folders() -> None:
     """List your Telegram folders (for use with `analyze --folder NAME` / `dump --folder NAME`)."""
     _run(_list_folders())
@@ -1274,9 +1400,13 @@ def folders() -> None:
 
 @app.command(hidden=True)
 def dialogs(
-    search: str | None = typer.Option(None, "--search"),
-    kind: str | None = typer.Option(None, "--kind"),
-    limit: int = typer.Option(50, "--limit"),
+    search: str | None = typer.Option(None, "--search", help="Substring filter on chat title or @username."),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Filter by chat kind: user | group | supergroup | channel | forum.",
+    ),
+    limit: int = typer.Option(50, "--limit", help="Max rows to return."),
 ) -> None:
     """Deprecated: use `describe` instead."""
     from unread.tg.commands import cmd_dialogs
@@ -1287,7 +1417,11 @@ def dialogs(
 @app.command(hidden=True)
 def topics(
     chat_ref: str | None = typer.Argument(None),
-    chat: int | None = typer.Option(None, "--chat"),
+    chat: int | None = typer.Option(
+        None,
+        "--chat",
+        help="Numeric chat id (alternative to passing the chat ref positionally).",
+    ),
 ) -> None:
     """Deprecated: use `describe <ref>` instead."""
     from unread.tg.commands import cmd_topics
@@ -1458,9 +1592,21 @@ async def _list_folders() -> None:
 
 @app.command(rich_help_panel=PANEL_SYNC, help=_t("cmd_sync"))
 def sync(
-    chat: int | None = typer.Option(None, "--chat"),
-    thread: int | None = typer.Option(None, "--thread"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    chat: int | None = typer.Option(
+        None,
+        "--chat",
+        help="Numeric chat id to sync. Default: every enabled subscription.",
+    ),
+    thread: int | None = typer.Option(
+        None,
+        "--thread",
+        help="Forum-topic id (only meaningful when paired with `--chat` for a forum).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview the work (chat list + message counts) without writing to the DB.",
+    ),
 ) -> None:
     """Incrementally fetch new messages for all (or one) subscriptions."""
     from unread.tg.commands import cmd_sync
@@ -1575,8 +1721,12 @@ def chats_run(
 
 @app.command(hidden=True)
 def backfill(
-    chat: int = typer.Option(..., "--chat"),
-    from_msg: str = typer.Option(..., "--from-msg"),
+    chat: int = typer.Option(..., "--chat", help="Numeric chat id to backfill (required)."),
+    from_msg: str = typer.Option(
+        ...,
+        "--from-msg",
+        help="Anchor message id or t.me link. The backfill walks from here in `--direction`.",
+    ),
     direction: str = typer.Option("back", "--direction", help="back | forward"),
 ) -> None:
     """One-shot history backfill starting from a specific message.
@@ -1592,11 +1742,42 @@ def backfill(
 # =================================================================== 5.4 Analyze
 
 
+def _complete_root_ref(ctx, args, incomplete):  # type: ignore[no-untyped-def]
+    """Yield visible subcommand names for `unread <Tab>` completion.
+
+    Without this, Click's `_resolve_incomplete` picks the unfilled
+    optional `ref` positional as the completion target — and since
+    `ref` has no value enumerator (chat handles / URLs / file paths
+    are dynamic), the user gets no suggestions at all when pressing
+    Tab right after `unread`. Returning the catalogue here makes the
+    completion match what users expect: a quick look at what
+    subcommands exist. Hidden commands stay hidden.
+
+    Typer's `autocompletion=` callback signature: ``(ctx, args, incomplete)
+    → list[tuple[str, str] | str]``. Returning ``(name, help)`` tuples
+    so zsh's `_describe` shows the one-liner alongside the name.
+    """
+    out: list[tuple[str, str] | str] = []
+    root = ctx.command
+    # Sort alphabetically so the completion menu matches the order
+    # `unread help` prints. `list_commands` returns registration order
+    # (the order `@app.command` decorators ran), which is unpredictable
+    # to scan in a Tab popup.
+    for name in sorted(root.list_commands(ctx)):
+        cmd = root.get_command(ctx, name)
+        if cmd is None or getattr(cmd, "hidden", False):
+            continue
+        if name.startswith(incomplete):
+            out.append((name, cmd.help or ""))
+    return out
+
+
 @app.callback(invoke_without_command=True)
 def _root(
     ctx: typer.Context,
     ref: str | None = typer.Argument(
         None,
+        autocompletion=_complete_root_ref,
         help=(
             "Chat reference: @user, t.me link, title (fuzzy), or numeric id. "
             "A message link like t.me/c/ID/MSG is treated as single-message "
@@ -1708,6 +1889,15 @@ def _root(
         help="Forum only: one report per topic. Reports land in reports/{chat}/.",
     ),
     no_cache: bool = typer.Option(False, "--no-cache"),
+    redact: bool | None = typer.Option(
+        None,
+        "--redact/--no-redact",
+        help=(
+            "Scrub phone / email / IBAN / Luhn-valid card numbers from the prompt sent "
+            "to the LLM. The DB and saved report keep originals — only the API payload "
+            "is redacted. Defaults to `analyze.redact` in config (off by default)."
+        ),
+    ),
     include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
     min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
     enrich: str | None = typer.Option(
@@ -1769,7 +1959,8 @@ def _root(
         "--dry-run",
         help=(
             "Resolve the chat, run backfill, count messages, print the cost estimate, "
-            "and exit before any LLM call. Useful before --enrich-all / --full-history."
+            "and exit. Skips both LLM analysis AND media/link enrichment "
+            "(Whisper/vision/link summarisation), so it never spends LLM money."
         ),
     ),
     cite_context: int = typer.Option(
@@ -1868,24 +2059,44 @@ def _root(
     the forum as one chat (needs `--last-days` / `--full-history`),
     `--all-per-topic` runs one analysis per topic.
 
-    For Telegram-only setup, use `unread tg` (auto-runs login on first
-    use) or `unread tg init --force` to re-link.
+    For Telegram-only setup, use `unread login` (or `unread login --force`
+    to re-link). The interactive chat picker is `unread tg` — `tg` is a
+    magic ref token, not a command.
     """
     setup_logging(verbose=verbose)
     if ctx.invoked_subcommand is not None:
         # A subcommand was matched (describe, ask, sync, …); let it run.
         return
-    # Same callback is registered on the root app AND the `tg` /
-    # `telegram` sub-typer. `info_name` tells us which entrypoint Click
-    # resolved — used here to differentiate the no-args UX.
-    via_tg = ctx.info_name in ("tg", "telegram")
+    # `tg` is now a magic ref (not a subcommand): it routes the analyze
+    # flow into the interactive Telegram chat picker. Carrying it through
+    # `_ensure_ready_for_analyze` + `_dispatch_analyze(ref=None, ...)`
+    # mirrors the historical `unread tg` semantics — the picker opens
+    # a tg_client which transparently triggers the auto-init prompt
+    # when the session needs renewing. Track the intent separately so
+    # the stdin-auto-detect / quickstart-fallthrough branches below
+    # don't hijack a user who explicitly asked for the picker.
+    wants_tg_picker = ref == TG_INTERACTIVE_REF
+    if wants_tg_picker:
+        ref = None
     # Stdin auto-detect: `cat foo.txt | unread` (no ref, non-TTY stdin)
     # routes the piped bytes through the file analyzer. The explicit
     # form is `unread -`; both flow through `cmd_analyze_file` with a
     # sentinel that tells it to read stdin instead of opening a path.
-    if ref == "-" or (ref is None and not via_tg and _stdin_has_data()):
+    if not wants_tg_picker and (ref == "-" or (ref is None and _stdin_has_data())):
         ref = _STDIN_REF_SENTINEL
-    if ref is None and not via_tg:
+    # Bare `unread <ref>` no longer falls through to Telegram fuzzy
+    # chat-title match — that's a surprising path for users who meant
+    # "analyze this string of text". The escape hatch is `unread tg`
+    # (the magic ref above) which opens the chat picker.
+    if (
+        ref is not None
+        and ref != _STDIN_REF_SENTINEL
+        and not _looks_like_local_file(ref)
+        and not ref.lower().startswith(("http://", "https://", "tg://"))
+        and not _is_explicit_telegram_ref(ref)
+    ):
+        _exit_unrecognized_ref(ref)
+    if ref is None and not wants_tg_picker:
         # If the install isn't usable yet (no install.toml or no chat
         # provider key), prompt the user to run `unread init` instead
         # of silently dropping them on the quickstart panel — the panel
@@ -1976,7 +2187,11 @@ def download_media(
     ),
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
-    last_days: int | None = typer.Option(None, "--last-days"),
+    last_days: int | None = typer.Option(
+        None,
+        "--last-days",
+        help="Shortcut for --since now-N (day-granular).",
+    ),
     last_hours: int | None = typer.Option(
         None,
         "--last-hours",
@@ -2034,7 +2249,11 @@ def download_media(
 
 @app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_stats"))
 def stats(
-    since: str | None = typer.Option(None, "--since"),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Lower bound: YYYY-MM-DD or relative (e.g. `7d`, `2w`). Default: all-time.",
+    ),
     by: str = typer.Option("preset", "--by", help="chat | preset | model | day | kind"),
 ) -> None:
     """Aggregate API spend, cache hit rate and run counts."""
@@ -2045,9 +2264,17 @@ def stats(
 
 @cache_app.command("purge")
 def cache_purge(
-    older_than: str = typer.Option("30d", "--older-than", help="Nd"),
-    preset: str | None = typer.Option(None, "--preset"),
-    model: str | None = typer.Option(None, "--model"),
+    older_than: str = typer.Option("90d", "--older-than", help="Nd / Nw"),
+    preset: str | None = typer.Option(
+        None,
+        "--preset",
+        help="Restrict to one preset (e.g. summary, brief). Default: all presets.",
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Restrict to one model (e.g. gpt-4o-mini). Default: all models.",
+    ),
     vacuum: bool = typer.Option(False, "--vacuum", help="Run VACUUM after purge to reclaim disk."),
 ) -> None:
     """Delete cached analysis results by age and filters."""
@@ -2078,28 +2305,55 @@ async def _cache_purge(
             )
 
 
-@cache_app.command("effectiveness")
-def cache_effectiveness_cmd(
-    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
+@cache_app.command("stats")
+def cache_stats_cmd(
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Lower bound for the prompt-cache hit-rate breakdown: YYYY-MM-DD. Default: all-time.",
+    ),
 ) -> None:
-    """Per-(chat, preset) OpenAI prompt-cache hit rate from usage_log.
-
-    Surfaces "what's actually saving money": the server-side prompt cache
-    only kicks in when the stable prefix (system + static_context) is
-    1024+ tokens AND byte-identical across calls. Low hit rate on a
-    high-volume row → check the prompt for entropy in its prefix.
-    """
-    _run(_cache_effectiveness(since))
+    """Show analysis cache size, age range, per-(preset, model) breakdown, and OpenAI prompt-cache hit rate."""
+    _run(_cache_stats(since))
 
 
-async def _cache_effectiveness(since: str | None) -> None:
+async def _cache_stats(since: str | None) -> None:
     from rich.table import Table
 
     settings = get_settings()
     since_dt = parse_ymd(since) if since else None
     async with open_repo(settings.storage.data_path) as repo:
-        rows = await repo.cache_effectiveness(since=since_dt)
-    if not rows:
+        s = await repo.cache_stats()
+        eff_rows = await repo.cache_effectiveness(since=since_dt)
+    if s["rows"] == 0:
+        console.print(f"[yellow]{_t('cli_cache_empty')}[/]")
+    else:
+        summary = _tf(
+            "cli_cache_summary",
+            rows=s["rows"],
+            size=_fmt_bytes(s["result_bytes"]),
+            saved=f"{s['saved_cost_usd']:.4f}",
+            oldest=s["oldest"],
+            newest=s["newest"],
+        )
+        console.print(f"[bold]analysis_cache[/] — {summary}")
+        t = Table(title=_t("cli_cache_by_group_title"), show_lines=False)
+        t.add_column(_t("cli_cache_col_preset"))
+        t.add_column(_t("cli_cache_col_model"))
+        t.add_column(_t("cli_cache_col_rows"), justify="right")
+        t.add_column(_t("cli_cache_col_size"), justify="right")
+        t.add_column(_t("cli_cache_col_saved"), justify="right")
+        for r in s["by_group"]:
+            t.add_row(
+                str(r["preset"]),
+                str(r["model"]),
+                str(r["rows"]),
+                _fmt_bytes(int(r["result_bytes"])),
+                f"${float(r['saved_cost_usd']):.4f}",
+            )
+        console.print(t)
+
+    if not eff_rows:
         console.print(f"[yellow]{_t('cli_no_usage_label')}[/] — {_t('cli_no_usage_hint')}")
         return
     since_suffix = _tf("cli_cache_eff_since", date=since) if since else ""
@@ -2112,7 +2366,7 @@ async def _cache_effectiveness(since: str | None) -> None:
     t.add_column(_t("cli_cache_col_prompt_tok"), justify="right")
     t.add_column(_t("cli_cache_col_cached_tok"), justify="right")
     t.add_column(_t("cli_cache_col_cost"), justify="right")
-    for r in rows:
+    for r in eff_rows:
         prompt_tok = int(r["prompt_tokens"] or 0)
         cached_tok = int(r["cached_tokens"] or 0)
         rate_pct = (100.0 * cached_tok / prompt_tok) if prompt_tok else 0.0
@@ -2130,76 +2384,12 @@ async def _cache_effectiveness(since: str | None) -> None:
     console.print(f"[grey70]{_t('cli_cache_eff_hint')}[/]")
 
 
-@cache_app.command("trim")
-def cache_trim_cmd(
-    keep_days: int = typer.Option(
-        90,
-        "--keep-days",
-        "-k",
-        help="Delete analysis_cache rows older than this many days. Default 90.",
-    ),
-    vacuum: bool = typer.Option(
-        True,
-        "--vacuum/--no-vacuum",
-        help="Run VACUUM after the purge to actually shrink the file. On by default.",
-    ),
-) -> None:
-    """Quick way to reclaim cache disk: delete old rows + VACUUM in one step.
-
-    Equivalent to `unread cache purge --older-than {keep_days}d --vacuum` but
-    discoverable from `unread cache --help` and with friendlier defaults.
-    Designed to be run unattended (e.g. via `unread schedule`).
-    """
-    _run(_cache_purge(f"{keep_days}d", None, None, vacuum))
-
-
-@cache_app.command("stats")
-def cache_stats_cmd() -> None:
-    """Show analysis cache size, age range and per-(preset, model) breakdown."""
-    _run(_cache_stats())
-
-
-async def _cache_stats() -> None:
-    from rich.table import Table
-
-    settings = get_settings()
-    async with open_repo(settings.storage.data_path) as repo:
-        s = await repo.cache_stats()
-    if s["rows"] == 0:
-        console.print(f"[yellow]{_t('cli_cache_empty')}[/]")
-        return
-    summary = _tf(
-        "cli_cache_summary",
-        rows=s["rows"],
-        size=_fmt_bytes(s["result_bytes"]),
-        saved=f"{s['saved_cost_usd']:.4f}",
-        oldest=s["oldest"],
-        newest=s["newest"],
-    )
-    console.print(f"[bold]analysis_cache[/] — {summary}")
-    t = Table(title=_t("cli_cache_by_group_title"), show_lines=False)
-    t.add_column(_t("cli_cache_col_preset"))
-    t.add_column(_t("cli_cache_col_model"))
-    t.add_column(_t("cli_cache_col_rows"), justify="right")
-    t.add_column(_t("cli_cache_col_size"), justify="right")
-    t.add_column(_t("cli_cache_col_saved"), justify="right")
-    for r in s["by_group"]:
-        t.add_row(
-            str(r["preset"]),
-            str(r["model"]),
-            str(r["rows"]),
-            _fmt_bytes(int(r["result_bytes"])),
-            f"${float(r['saved_cost_usd']):.4f}",
-        )
-    console.print(t)
-
-
 @cache_app.command("ls")
 def cache_ls_cmd(
-    preset: str | None = typer.Option(None, "--preset"),
-    model: str | None = typer.Option(None, "--model"),
+    preset: str | None = typer.Option(None, "--preset", help="Filter by preset name."),
+    model: str | None = typer.Option(None, "--model", help="Filter by model name."),
     older_than: str | None = typer.Option(None, "--older-than", help="Nd / Nw"),
-    limit: int = typer.Option(50, "--limit"),
+    limit: int = typer.Option(50, "--limit", help="Max rows to return."),
 ) -> None:
     """List cache entries (newest first). No result body — use `show` for that."""
     _run(_cache_ls(preset, model, older_than, limit))
@@ -2283,8 +2473,8 @@ def cache_export_cmd(
         ..., "--output", "-o", help="File path. Extension picks format if --format omitted."
     ),
     fmt: str | None = typer.Option(None, "--format", help="jsonl | md"),
-    preset: str | None = typer.Option(None, "--preset"),
-    model: str | None = typer.Option(None, "--model"),
+    preset: str | None = typer.Option(None, "--preset", help="Filter by preset name."),
+    model: str | None = typer.Option(None, "--model", help="Filter by model name."),
     older_than: str | None = typer.Option(None, "--older-than", help="Export entries OLDER than this age."),
 ) -> None:
     """Export cached analyses to jsonl or md before (optionally) purging."""
@@ -2359,9 +2549,22 @@ def _parse_duration_days(s: str) -> int:
 
 @app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_cleanup"))
 def cleanup(
-    retention: str = typer.Option("90d", "--retention"),
-    chat: int | None = typer.Option(None, "--chat"),
-    keep_transcripts: bool = typer.Option(True, "--keep-transcripts/--no-keep-transcripts"),
+    retention: str = typer.Option(
+        "90d",
+        "--retention",
+        help="Age threshold (Nd / Nw, e.g. 30d, 12w). Messages older than this get their text blanked.",
+    ),
+    chat: int | None = typer.Option(
+        None,
+        "--chat",
+        help="Numeric chat id to scope the cleanup to. Default: every synced chat.",
+    ),
+    keep_transcripts: bool = typer.Option(
+        True,
+        "--keep-transcripts/--no-keep-transcripts",
+        help="Keep voice/video transcripts and image/document descriptions. "
+        "`--no-keep-transcripts` blanks those too — irreversible.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:
     """Null-out old message texts; keep transcripts/analysis cache."""
@@ -2432,15 +2635,20 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
 
 @app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_ask"))
 def ask(
-    question: str | None = typer.Argument(
-        None, help="Free-form question, in any language. Omit to enter the wizard."
-    ),
     ref: str | None = typer.Argument(
         None,
         help=(
-            "Optional chat reference: @user, t.me link (incl. topic links like "
-            "t.me/c/<id>/<topic>), fuzzy title, or numeric id. "
-            "Mutually exclusive with --chat / --folder / --global."
+            "Chat reference: @user, t.me link (incl. topic links like "
+            "t.me/c/<id>/<topic>), fuzzy title, or numeric id. Pass `tg` "
+            "to open the interactive chat picker. Mutually exclusive with "
+            "--chat / --folder / --global."
+        ),
+    ),
+    question: str | None = typer.Argument(
+        None,
+        help=(
+            "Free-form question, in any language. Omit when ref is `tg` and "
+            "the wizard will prompt for it."
         ),
     ),
     chat: str | None = typer.Option(
@@ -2460,7 +2668,11 @@ def ask(
     ),
     since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
-    last_days: int | None = typer.Option(None, "--last-days"),
+    last_days: int | None = typer.Option(
+        None,
+        "--last-days",
+        help="Restrict to messages from the last N days. Mutually exclusive with --since/--until.",
+    ),
     last_hours: int | None = typer.Option(
         None,
         "--last-hours",
@@ -2630,12 +2842,18 @@ def ask(
 ) -> None:
     """Answer a question about your synced Telegram archive.
 
+    Positional order: ref first, then question. Pass `tg` as the ref to
+    open the interactive chat picker (the wizard prompts for the question
+    if you didn't supply one). Without a ref or a scope flag, ask refuses
+    to guess — same rule as `unread <ref>` and `unread dump <ref>`.
+
     Examples:
-      unread ask "what did Bob say about migration?" @somegroup
-      unread ask "open Qs?" https://t.me/c/3865481227/4         # incl. topic
-      unread ask "..." --folder Work --last-days 7
-      unread ask                                                 # opens wizard
-      unread ask "..." --global                                  # all synced, no wizard
+      unread ask @somegroup "what did Bob say about migration?"
+      unread ask https://t.me/c/3865481227/4 "open Qs?"          # incl. topic
+      unread ask tg                                              # picker + prompts
+      unread ask tg "what did Bob say?"                          # picker, question pre-filled
+      unread ask --folder Work "..." --last-days 7
+      unread ask --global "..."                                  # all synced, no wizard
     """
     from unread.ask.commands import cmd_ask
 
@@ -2699,6 +2917,15 @@ app.add_typer(reports_app, name="reports", rich_help_panel=PANEL_MAINT)
 from unread.security.commands import register as _register_security_commands  # noqa: E402
 
 _register_security_commands(app, PANEL_MAINT)
+
+
+# `unread completion ...` — shell tab-completion install / show.
+# Wraps Typer's `--install-completion` / `--show-completion` flags as
+# a subcommand group so they don't show up on the root callback's
+# flag list (`unread help flags`).
+from unread.completion.commands import register as _register_completion_commands  # noqa: E402
+
+_register_completion_commands(app, PANEL_MAINT)
 
 
 @reports_app.command("prune")
@@ -2961,8 +3188,36 @@ def bug_report(
     _run(_run_bug_report())
 
 
-@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_backup"))
-def backup(
+@app.command(
+    name="killme",
+    rich_help_panel=PANEL_MAINT,
+    help="Fully uninstall unread: data, credentials, and binary. Irreversible.",
+)
+def killme_cmd(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the 'killme' type-in confirmation. Use only in scripted teardowns.",
+    ),
+) -> None:
+    """Permanently remove every artifact this CLI ever wrote.
+
+    Lists exactly what will be deleted (install dir, OS-keychain
+    secrets, cached encryption key, `uv tool`-installed binary), then
+    asks you to type ``killme`` to confirm. Pass ``--yes`` to skip the
+    type-in for scripted teardowns. Nothing goes to a trash — the
+    deletes are immediate and final.
+    """
+    from unread.killme import cmd_killme
+
+    code = cmd_killme(yes=yes)
+    if code != 0:
+        raise typer.Exit(code)
+
+
+@backup_app.command("up", help=_t("cmd_backup_up"))
+def backup_up(
     output: Path | None = typer.Argument(
         None,
         help="Destination file (default: storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite).",
@@ -2977,7 +3232,21 @@ def backup(
 
     Safe to run while unread is in the middle of a sync — SQLite makes the
     copy consistent without blocking the writer for more than a moment.
-    Restore with `unread restore <file>`.
+    Restore with `unread backup restore <file>`.
+
+    What the backup contains depends on the active credential-storage backend
+    (see `unread security status`):
+
+      • plain     — backup includes plaintext API keys + api_id / api_hash.
+                    Treat the file like a password; anyone with it has your keys.
+      • keystore  — backup does NOT include credentials. They live in the OS
+                    keychain, which the backup can't see. Restoring on the same
+                    machine still works (keychain is local). Restoring on a
+                    different machine boots into a "no credentials" state and
+                    you must re-run `unread login` to add keys.
+      • pass      — backup includes ciphertext + the install salt + the
+                    encrypted Telegram session. Restoring anywhere is fine, but
+                    you'll need the passphrase to use it.
     """
     _run(_backup(output, overwrite))
 
@@ -3003,9 +3272,36 @@ async def _backup(output: Path | None, overwrite: bool) -> None:
         size = await repo.backup_to(output)
     console.print(f"[green]{_t('cli_backup_done_label')}[/] {src} → {output} [grey70]({_fmt_bytes(size)})[/]")
 
+    # Per-backend reminder so the user finds out about the
+    # portability / sensitivity tradeoff at backup time, not when
+    # they try to restore on another machine.
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        BACKEND_PASSPHRASE,
+        read_active_backend_sync,
+    )
 
-@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_restore"))
-def restore(
+    backend = read_active_backend_sync(src)
+    if backend == BACKEND_KEYCHAIN:
+        console.print(
+            "[yellow]Note:[/] API keys live in your OS keychain — this backup does NOT "
+            "include them. Restoring on a different machine will need "
+            "[cyan]unread login[/] to re-add credentials."
+        )
+    elif backend == BACKEND_PASSPHRASE:
+        console.print(
+            "[grey70]Backup includes ciphertext + install salt; you'll need the "
+            "passphrase to use it after restore.[/]"
+        )
+    else:
+        console.print(
+            "[yellow]Note:[/] API keys are stored in plaintext — treat this backup "
+            "as sensitive. Run [cyan]unread security set keystore[/] to encrypt at rest."
+        )
+
+
+@backup_app.command("restore", help=_t("cmd_backup_restore"))
+def backup_restore(
     backup_file: Path = typer.Argument(..., help="Path to a previously-created backup file."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the destructive-action prompt."),
 ) -> None:
@@ -3051,11 +3347,15 @@ async def _restore(backup_file: Path, yes: bool) -> None:
 
 @app.command(hidden=True)
 def export(
-    chat: int = typer.Option(..., "--chat"),
+    chat: int = typer.Option(..., "--chat", help="Numeric chat id to export (required)."),
     fmt: str = typer.Option("md", "--format", help="jsonl | csv | md"),
-    output: Path = typer.Option(..., "--output"),
-    since: str | None = typer.Option(None, "--since"),
-    until: str | None = typer.Option(None, "--until"),
+    output: Path = typer.Option(..., "--output", help="Destination file path (required)."),
+    since: str | None = typer.Option(
+        None, "--since", help="Lower bound (YYYY-MM-DD). Default: no lower bound."
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="Upper bound (YYYY-MM-DD). Default: no upper bound."
+    ),
 ) -> None:
     """Export already-synced messages from the local DB to jsonl / csv / md."""
     from unread.export.commands import cmd_export
@@ -3343,29 +3643,12 @@ def _preprocess_argv(argv: list[str] | None = None) -> list[str]:
     return [argv[0], *kept, "--", *negs]
 
 
-# =============================================================== Telegram subgroup
-# `unread tg` and `unread telegram` mirror the root analyze entry point
-# but auto-run login on first use. The shared callback is `_root`
-# (registered above on the root app); we register the SAME function as
-# this typer's callback so `unread tg <ref>` accepts the full flag set
-# without duplicating 30+ option declarations. The branch on
-# `ctx.info_name` inside `_root` picks up the auto-init policy.
-
-tg_app = _UnreadTyper(
-    name="tg",
-    help="Analyze a Telegram chat (auto-runs `init` on first use). Same flags as `unread <ref>`.",
-    invoke_without_command=True,
-    add_completion=False,
-    rich_markup_mode="rich",
-    cls=_UnreadRootGroup,
-    context_settings={"allow_interspersed_args": True},
-)
-tg_app.registered_callback = app.registered_callback  # share the analyze callback
+# =============================================================== Telegram setup commands
 
 
 def _init_force_clear_session() -> None:
     """Delete both Telethon session-file variants. Shared by `init` /
-    `tg init` `--force` so the wipe behavior is identical."""
+    `login --force` so the wipe behavior is identical."""
     settings = get_settings()
     session_path = Path(settings.telegram.session_path)
     for p in (session_path, session_path.with_name(session_path.name + ".session")):
@@ -3376,6 +3659,10 @@ def _init_force_clear_session() -> None:
 
 @app.command(
     name="init",
+    # Panel is overridden at help-render time by `_print_help_overview`:
+    # uninitialized installs surface `init` under Main (the user needs to run
+    # it); initialized installs demote it to Maintenance (it's just a re-link
+    # tool at that point). Default here is Main as a safe fallback.
     rich_help_panel=PANEL_MAIN,
     help="Interactive setup — pick install folder, AI provider, optional Telegram login.",
 )
@@ -3391,7 +3678,7 @@ def init_cmd(
     Each step short-circuits when the value is already configured —
     re-running is safe and only prompts for what's missing. To re-pick
     the install folder, delete `~/.unread/install.toml` first. Use
-    `unread tg init` to re-link Telegram without touching the AI step.
+    `unread login` to re-link Telegram without touching the AI step.
     """
     from unread.tg.commands import cmd_init
 
@@ -3401,19 +3688,25 @@ def init_cmd(
     _run(cmd_init(scope="full"))
 
 
-@tg_app.command("init")
-def tg_init(
+@app.command(
+    name="login",
+    rich_help_panel=PANEL_MAIN,
+    help="Telegram log-in (and re-link with `--force`). Skips the AI-provider step.",
+)
+def login_cmd(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Delete the existing session file and run init from scratch.",
+        help="Delete the existing session file and run login from scratch.",
     ),
 ) -> None:
     """Telegram-only setup: log in (and re-link with `--force`).
 
     Skips the AI-provider step — useful when you just want to add or
     rotate Telegram credentials. Use `unread init` for the full wizard
-    that also asks about an AI provider.
+    that also asks about an AI provider. The auto-init prompt that
+    fires when a Telegram-needing command hits a missing/expired
+    session runs this same flow inline.
     """
     from unread.tg.commands import cmd_init
 
@@ -3423,12 +3716,34 @@ def tg_init(
     _run(cmd_init(scope="telegram_only"))
 
 
-# Register `tg` as the visible primary, `telegram` as a hidden alias
-# that resolves to the same callback. Two `add_typer` calls give Typer
-# two TyperInfo entries pointing at the same Typer instance — the
-# callback (`_root`) is shared, so flags stay in sync automatically.
-app.add_typer(tg_app, name="tg", rich_help_panel=PANEL_MAIN)
-app.add_typer(tg_app, name="telegram", rich_help_panel=PANEL_MAIN, hidden=True)
+@app.command(
+    name="logout",
+    rich_help_panel=PANEL_MAIN,
+    help="Clear the local Telegram session without touching credentials.",
+)
+def logout_cmd() -> None:
+    """Clear the local Telegram session without touching credentials.
+
+    Wipes the on-disk session file (or the encrypted `session_string`
+    in the secrets table for the passphrase backend) so the next
+    `unread login` starts a fresh login. Telegram api_id / api_hash
+    stay in place — use `unread security clear` for those.
+
+    Equivalent to `unread login --force` minus the immediate re-login
+    prompt: useful when you want to deauthorize this device and not
+    re-link right away.
+    """
+    from unread.tg.client import _wipe_local_session
+    from unread.tg.session_state import is_session_authorized_sync
+
+    s = get_settings()
+    had_session = is_session_authorized_sync(s) or _session_exists()
+    _wipe_local_session()
+    if had_session:
+        console.print("[green]Local Telegram session cleared.[/]")
+    else:
+        console.print("[grey70]No active session to clear.[/]")
+    console.print("[grey70]Run `unread login` to log in again.[/]")
 
 
 # =============================================================== migrate command
@@ -3545,14 +3860,14 @@ def migrate(
 
 @app.command(
     name="help",
-    rich_help_panel=PANEL_MAIN,
+    rich_help_panel=PANEL_MAINT,
     help="Show help. `unread help <cmd>` shows command-specific help.",
 )
 def help_cmd(
     command: list[str] | None = typer.Argument(
         None,
         help="Subcommand path. Example: `unread help chats add` shows chats-add help. "
-        "`unread help analyze` shows the flags accepted by `unread <ref>`.",
+        "`unread help flags` shows the flags accepted by `unread <ref>`.",
     ),
 ) -> None:
     """Show command-specific help in the friendly layout.
@@ -3563,22 +3878,22 @@ def help_cmd(
     (`unread help chats add`) work too. Hidden commands stay reachable
     via this path even though they don't appear in the main listing.
 
-    `unread help analyze` is special-cased: there's no `analyze`
+    `unread help flags` is special-cased: there's no `analyze`
     subcommand (the analyze logic IS the root callback), so this
-    renders the root callback's params under the "analyze" label so
-    users have one canonical place to discover analyze flags.
+    renders the root callback's params under a `<ref>` label so
+    users have one canonical place to discover the flags.
     """
     if not command:
         _print_help_overview()
         return
 
     root_click = typer.main.get_command(app)
-    # `unread help analyze` → render the root callback's params with
+    # `unread help flags` → render the root callback's params with
     # the per-command layout. There's no real `analyze` subcommand;
-    # this is the user-facing label for the root callback.
-    if command == ["analyze"]:
+    # the displayed label is `<ref>` since that's the actual usage.
+    if command == ["flags"]:
         root_ctx = click.Context(root_click, info_name="unread")
-        _print_help_for_command(root_click, root_ctx, label="analyze")
+        _print_help_for_command(root_click, root_ctx, label="<ref>")
         return
 
     cmd: click.Command = root_click
@@ -3620,7 +3935,8 @@ _RESERVED_TOP_LEVEL.update(
         "watch",
         "doctor",
         "backup",
-        "restore",
+        "completion",
+        "killme",
         # Hidden compat commands — still resolvable, still collide.
         "dialogs",
         "topics",

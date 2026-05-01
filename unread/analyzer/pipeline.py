@@ -102,9 +102,11 @@ def estimate_cost(
     avg_tok = _avg_tokens_per_msg(_resolve_content_lang(settings))
     total_input_body = max(1, int(n_messages * avg_tok))
 
+    from unread.util.pricing import chat_pricing_for
+
     filter_model = preset.filter_model
     final_model = preset.final_model
-    if settings.pricing.chat.get(filter_model) is None or settings.pricing.chat.get(final_model) is None:
+    if chat_pricing_for(filter_model, settings) is None or chat_pricing_for(final_model, settings) is None:
         return None, None
 
     system_tokens = _ct(preset.system, filter_model)
@@ -203,6 +205,11 @@ class AnalysisResult:
     # in their text. Counted separately because a `link` is orthogonal to
     # `media_type` (a photo with a URL in its caption ticks both).
     link_count: int = 0
+    # Per-kind PII redaction tally for the run. Empty dict when --redact
+    # was off; otherwise maps "phone"/"email"/"iban"/"card" → count of
+    # patterns scrubbed before sending to the LLM. Surfaced in the run
+    # summary so the user knows at a glance what was hidden.
+    redact_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -249,6 +256,11 @@ class AnalysisOptions:
     # options_payload so a cache row from a chat run can't be served to
     # a file / video / website run with the same msg_ids.
     source_kind: str = "chat"
+    # Tri-state: None defers to settings.analyze.redact. True forces
+    # PII redaction on the LLM-bound prompt; False forces it off. The
+    # actual boolean flowed through to formatter / hashing is resolved
+    # in `run_analysis` from this + settings.
+    redact: bool | None = None
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
         """Hash ingredients that must bust cache when toggled."""
@@ -290,6 +302,13 @@ class AnalysisOptions:
             "local_file_id": self.local_file_id,
             "local_file_content_hash": self.local_file_content_hash,
             "source_kind": self.source_kind,
+            # Resolve the tri-state to an explicit bool for the cache key
+            # so toggling --redact produces a different hash. `text_hash`
+            # of the dynamic prompt would catch this too (the redacted
+            # prompt differs from the original) but listing the flag
+            # explicitly makes cache-key drift obvious in `unread cache`
+            # tooling.
+            "redact": self.redact if self.redact is not None else s.analyze.redact,
         }
         if self.enrich:
             payload["enrich_options"] = {
@@ -605,6 +624,22 @@ async def run_analysis(
     )
     log.info("analyze.chunks", preset=preset.name, chunks=len(chunks), msgs=len(msgs))
 
+    # Resolve the redact flag once for the whole run. Tracked per-run
+    # so we can show the aggregate summary in the saved report header
+    # and the console without reaching back into settings each call.
+    redact_enabled = opts.redact if opts.redact is not None else settings.analyze.redact
+    redact_stats: dict[str, int] = {}
+
+    def _maybe_redact(text: str) -> str:
+        if not redact_enabled or not text:
+            return text
+        from unread.analyzer.redact import redact as _redact
+
+        scrubbed, hits = _redact(text)
+        for k, v in hits.items():
+            redact_stats[k] = redact_stats.get(k, 0) + v
+        return scrubbed
+
     oai = make_client()
     options_payload = opts.options_payload(preset)
     # Any change to the shared base system prompt (presets/_base.md) bumps
@@ -626,15 +661,17 @@ async def run_analysis(
     # --- Single pass: one chunk OR preset disables reduce
     if len(chunks) <= 1 or not preset.needs_reduce:
         chunk = chunks[0]
-        dynamic = format_messages(
-            chunk.messages,
-            period=period,
-            title=None,
-            link_template=link_template,
-            topic_titles=topic_titles,
-            chat_groups=chat_groups,
-            language=content_language,
-            source_kind=opts.source_kind,
+        dynamic = _maybe_redact(
+            format_messages(
+                chunk.messages,
+                period=period,
+                title=None,
+                link_template=link_template,
+                topic_titles=topic_titles,
+                chat_groups=chat_groups,
+                language=content_language,
+                source_kind=opts.source_kind,
+            )
         )
         user = preset.render_user(
             period=_fmt_period(period),
@@ -705,6 +742,7 @@ async def run_analysis(
             raw_msg_count=raw_count,
             media_counts=media_counts,
             link_count=link_count,
+            redact_counts=dict(redact_stats),
         )
 
     # --- Map-reduce branch
@@ -731,15 +769,17 @@ async def run_analysis(
         _map_task = _map_progress.add_task("map", total=len(chunks), model=filter_model)
 
         async def _map(chunk) -> tuple[str, str, float, bool, bool]:
-            dynamic = format_messages(
-                chunk.messages,
-                period=period,
-                title=None,
-                link_template=link_template,
-                topic_titles=topic_titles,
-                chat_groups=chat_groups,
-                language=content_language,
-                source_kind=opts.source_kind,
+            dynamic = _maybe_redact(
+                format_messages(
+                    chunk.messages,
+                    period=period,
+                    title=None,
+                    link_template=link_template,
+                    topic_titles=topic_titles,
+                    chat_groups=chat_groups,
+                    language=content_language,
+                    source_kind=opts.source_kind,
+                )
             )
             user = preset.render_user(
                 period=_fmt_period(period),
@@ -861,6 +901,7 @@ async def run_analysis(
         raw_msg_count=raw_count,
         media_counts=media_counts,
         link_count=link_count,
+        redact_counts=dict(redact_stats),
     )
 
 

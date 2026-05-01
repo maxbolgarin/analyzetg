@@ -88,13 +88,17 @@ async def test_refresh_with_global_still_raises():
         )
 
 
-# --- Fail-fast: period / thread / with-comments without question/scope ------
+# --- Fail-fast: period / thread / with-comments without scope --------------
+# Pre-redesign these flags + no-scope landed in the wizard (which silently
+# dropped them). New behavior: any no-scope, no-`tg`-ref invocation errors
+# with "Need a ref or scope" — same universal message regardless of which
+# extra flag triggered the call. Pin that message instead of per-flag copy
+# so the surface area stays small.
 
 
 @pytest.mark.asyncio
-async def test_last_days_without_question_or_scope_raises():
-    """Period flags would be silently dropped by the wizard route — fail-fast."""
-    with pytest.raises(typer.BadParameter, match=r"--since/--until/--last-days"):
+async def test_last_days_without_scope_raises():
+    with pytest.raises(typer.BadParameter, match=r"Need a ref or scope"):
         await cmd_ask(
             question=None,
             ref=None,
@@ -106,8 +110,8 @@ async def test_last_days_without_question_or_scope_raises():
 
 
 @pytest.mark.asyncio
-async def test_thread_without_question_or_scope_raises():
-    with pytest.raises(typer.BadParameter, match=r"--thread"):
+async def test_thread_without_scope_raises():
+    with pytest.raises(typer.BadParameter, match=r"Need a ref or scope"):
         await cmd_ask(
             question=None,
             ref=None,
@@ -119,8 +123,8 @@ async def test_thread_without_question_or_scope_raises():
 
 
 @pytest.mark.asyncio
-async def test_with_comments_without_question_or_scope_raises():
-    with pytest.raises(typer.BadParameter, match=r"--with-comments"):
+async def test_with_comments_without_scope_raises():
+    with pytest.raises(typer.BadParameter, match=r"Need a ref or scope"):
         await cmd_ask(
             question=None,
             ref=None,

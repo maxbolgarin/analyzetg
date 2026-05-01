@@ -32,6 +32,22 @@ log = get_logger(__name__)
 
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 _EMBED_BATCH = 100  # OpenAI embeddings allow up to 2048 inputs per call; 100 stays well under.
+# When `build_index` is invoked with confirm=True we surface a heads-up
+# above this many to-be-embedded messages. Below it, the cost is
+# negligible (a few cents) and the prompt is more annoying than helpful.
+_EMBED_CONFIRM_THRESHOLD = 5000
+# Approximate avg tokens per message body. Used only for the heads-up
+# estimate; the API bills exact tokens. Leaning conservative-high so we
+# don't under-promise to users.
+_AVG_TOKENS_PER_MSG = 80
+# Per-1M-token rates (USD) for OpenAI text-embedding-3-* models. We
+# don't pull these from `pricing.toml` because embeddings aren't
+# otherwise priced in the codebase yet — when they are, swap to that.
+_EMBED_PRICE_PER_M_TOKENS = {
+    "text-embedding-3-small": 0.02,
+    "text-embedding-3-large": 0.13,
+    "text-embedding-ada-002": 0.10,
+}
 
 
 def _vec_to_bytes(vec: list[float]) -> bytes:
@@ -72,16 +88,58 @@ async def build_index(
     chat_ids: list[int],
     model: str = DEFAULT_EMBED_MODEL,
     progress_cb=None,
+    confirm: bool = False,
 ) -> int:
     """Embed every message in `chat_ids` that doesn't yet have a row for `model`.
 
     Idempotent: re-running adds only what's missing. Returns the number of
     new rows written. `progress_cb(done, total)` is called between batches
     if provided (used by the CLI wrapper to show a Rich Progress bar).
+
+    When `confirm=True`, the caller asks us to gate large runs: we tally
+    the missing-row count across `chat_ids` upfront, print a one-line
+    cost estimate, and prompt with `typer.confirm`. The prompt fires only
+    when total > `_EMBED_CONFIRM_THRESHOLD` so small backfills aren't
+    interrupted. A "no" answer aborts with `typer.Exit(0)` and zero
+    API calls. Pass `confirm=False` (or `--yes` upstream) to skip.
     """
+    # Pre-flight: tally the work upfront. `msg_ids_missing_embedding`
+    # is a cheap indexed read; the second call further down is paid
+    # for by re-checking the same chat after the prompt window passed
+    # — barely measurable next to the embedding API call itself.
+    per_chat_missing: dict[int, list[int]] = {}
+    total_missing = 0
+    for chat_id in chat_ids:
+        m = await repo.msg_ids_missing_embedding(chat_id, model)
+        per_chat_missing[chat_id] = m
+        total_missing += len(m)
+
+    if total_missing == 0:
+        return 0
+
+    if confirm and total_missing > _EMBED_CONFIRM_THRESHOLD:
+        # Heads-up estimate. Embeddings bill on tokens, not messages,
+        # so this is a (deliberately) conservative upper bound.
+        est_tokens = total_missing * _AVG_TOKENS_PER_MSG
+        rate = _EMBED_PRICE_PER_M_TOKENS.get(model)
+        if rate is not None:
+            est_cost_usd = (est_tokens / 1_000_000.0) * rate
+            cost_str = f"~${est_cost_usd:.2f}"
+        else:
+            cost_str = "(unknown — model not in pricing table)"
+        log.info("embeddings.confirm_threshold", total=total_missing, model=model)
+        try:
+            import typer as _typer
+        except Exception:  # pragma: no cover — typer is a hard dep
+            _typer = None
+        if _typer is not None:
+            console_msg = f"About to embed {total_missing:,} messages with {model} {cost_str}. Continue?"
+            if not _typer.confirm(console_msg, default=False):
+                raise _typer.Exit(0)
+
     total_written = 0
     for chat_id in chat_ids:
-        missing = await repo.msg_ids_missing_embedding(chat_id, model)
+        missing = per_chat_missing.get(chat_id, [])
         if not missing:
             continue
         # Pull the actual bodies for the missing msg_ids — cheap re-read,

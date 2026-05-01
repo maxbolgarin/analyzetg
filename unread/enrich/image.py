@@ -116,7 +116,7 @@ async def enrich_image(
             "enrich.image.skipped_no_openai_key",
             chat_id=msg.chat_id,
             msg_id=msg.msg_id,
-            hint="run `unread tg init` and add an OpenAI key (chat provider can stay non-OpenAI)",
+            hint="run `unread login` and add an OpenAI key (chat provider can stay non-OpenAI)",
         )
         return None
 

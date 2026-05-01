@@ -36,6 +36,29 @@ log = get_logger(__name__)
 _SLOTS: tuple[str, ...] = tuple(sorted(SECRET_KEYS))
 
 
+def _run_async(coro):
+    """Run ``coro`` to completion whether or not an outer loop is active.
+
+    Same pattern as :func:`unread.util.prompt._run_questionary`: when
+    we're called from inside `asyncio.run` (e.g. the wizard's
+    `_run_keychain_step` reaches `cmd_migrate` via the keychain
+    opt-in), ``asyncio.run`` here would blow up with "cannot be called
+    from a running event loop". A one-shot worker thread gets its own
+    loop and the parent stays unaware.
+    """
+    try:
+        asyncio.get_running_loop()
+        in_loop = True
+    except RuntimeError:
+        in_loop = False
+    if not in_loop:
+        return asyncio.run(coro)
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, coro).result()
+
+
 def _set_active_backend_sync(db_path: Path, name: str) -> None:
     """Write the active-backend choice to ``app_settings`` synchronously.
 
@@ -185,7 +208,27 @@ def cmd_migrate(target: str) -> None:
     settings = get_settings()
     db_path = settings.storage.data_path
     if not db_path.is_file():
-        console.print(f"[red]No data DB at {db_path}.[/] Run `unread tg init` first.")
+        console.print(f"[red]No data DB at {db_path}.[/] Run `unread init` first.")
+        raise typer.Exit(1)
+
+    # Hard guard against migrating ciphertext into a backend that
+    # can't decrypt it. The bug we're protecting against: an install
+    # that was on `passphrase` accidentally runs `migrate --to
+    # keychain` (or the wizard's auto-offer fired before the bug
+    # was fixed) — which would copy `$u1$...` blobs into the
+    # keychain as if they were plaintext. The next read would
+    # return ciphertext where the caller expected an api_id.
+    current_backend = read_active_backend_sync(db_path)
+    if current_backend == BACKEND_PASSPHRASE:
+        console.print(
+            "[red]Refusing to migrate while the active backend is `passphrase`.[/]\n"
+            "  Migrating ciphertext rows into a backend that can't decrypt them\n"
+            "  would corrupt the install. To switch from passphrase to another\n"
+            "  backend, use [cyan]unread security set "
+            f"{'plain' if target == BACKEND_DB else 'keystore'}[/]\n"
+            "  (it downgrades cleanly first), or [cyan]unread security recover[/]\n"
+            "  if you've already hit the bug."
+        )
         raise typer.Exit(1)
 
     if target == BACKEND_KEYCHAIN:
@@ -207,8 +250,20 @@ def cmd_migrate(target: str) -> None:
 def _migrate_db_to_keychain(db_path: Path) -> tuple[int, int]:
     """Copy each non-empty DB row into the keychain; blank the DB row on success."""
     from unread.db.repo import read_data_db_secrets_sync
+    from unread.security.crypto import is_encrypted
 
     rows = read_data_db_secrets_sync(db_path)
+    # Defensive: refuse to migrate any encrypted rows. The caller
+    # (`cmd_migrate`) should already guard via the backend flag, but
+    # this catches the case where `secrets.backend` is out of sync
+    # with the on-disk content.
+    encrypted_slots = [k for k, v in rows.items() if v and is_encrypted(v)]
+    if encrypted_slots:
+        console.print(
+            f"[red]Refusing to migrate ciphertext rows: {', '.join(sorted(encrypted_slots))}.[/]\n"
+            "  Run [cyan]unread security recover[/] first to restore plaintext."
+        )
+        raise typer.Exit(1)
     moved = 0
     skipped = 0
     failures: list[str] = []
@@ -236,7 +291,7 @@ def _migrate_db_to_keychain(db_path: Path) -> tuple[int, int]:
     # `Repo` here because the schema enforces the allowlist on the
     # write path.
     if moved:
-        asyncio.run(_clear_db_secrets(db_path, [k for k in _SLOTS if rows.get(k)]))
+        _run_async(_clear_db_secrets(db_path, [k for k in _SLOTS if rows.get(k)]))
     return moved, skipped
 
 
@@ -250,18 +305,31 @@ async def _clear_db_secrets(db_path: Path, keys: list[str]) -> None:
 
 def _migrate_keychain_to_db(db_path: Path) -> tuple[int, int]:
     """Copy each non-empty keychain slot into the DB; remove the keychain entry on success."""
+    from unread.security.crypto import is_encrypted
+
     moved = 0
     skipped = 0
     payload: dict[str, str] = {}
+    encrypted_slots: list[str] = []
     for key in _SLOTS:
         value = keychain_read(key)
         if not value:
             skipped += 1
             continue
+        if is_encrypted(value):
+            encrypted_slots.append(key)
+            continue
         payload[key] = value
+    if encrypted_slots:
+        console.print(
+            f"[red]Refusing to migrate ciphertext keychain entries: "
+            f"{', '.join(sorted(encrypted_slots))}.[/]\n"
+            "  Run [cyan]unread security recover[/] first to restore plaintext."
+        )
+        raise typer.Exit(1)
 
     if payload:
-        asyncio.run(_put_db_secrets(db_path, payload))
+        _run_async(_put_db_secrets(db_path, payload))
         for key in payload:
             keychain_delete(key)
             moved += 1
@@ -356,7 +424,7 @@ def cmd_upgrade() -> None:
     settings = get_settings()
     db_path = settings.storage.data_path
     if not db_path.is_file():
-        console.print(f"[red]No data DB at {db_path}. Run `unread tg init` first.[/]")
+        console.print(f"[red]No data DB at {db_path}. Run `unread init` first.[/]")
         raise typer.Exit(1)
 
     current_backend = read_active_backend_sync(db_path)
@@ -372,7 +440,7 @@ def cmd_upgrade() -> None:
     plaintext = {k: v for k, v in read_secrets(settings).items() if v}
     if not plaintext:
         console.print(
-            "[yellow]No saved credentials to encrypt.[/] Run `unread tg init` to add an API key first."
+            "[yellow]No saved credentials to encrypt.[/] Run `unread init` to add an API key first."
         )
         raise typer.Exit(0)
 
@@ -402,7 +470,7 @@ def cmd_upgrade() -> None:
         encrypted["telegram.session_string"] = encrypt_with_key(session_str, key, salt=salt)
 
     # Persist atomically: salt + ciphertexts + backend flag.
-    asyncio.run(_persist_upgrade(db_path, salt, encrypted))
+    _run_async(_persist_upgrade(db_path, salt, encrypted))
 
     # Backend flip last so a crash before this step leaves the install
     # readable via the old backend.
@@ -516,7 +584,7 @@ def cmd_rotate_passphrase() -> None:
     if session_str:
         encrypted["telegram.session_string"] = encrypt_with_key(session_str, new_key, salt=new_salt)
 
-    asyncio.run(_persist_upgrade(db_path, new_salt, encrypted))
+    _run_async(_persist_upgrade(db_path, new_salt, encrypted))
 
     # Refresh the in-process / cross-invocation caches with the new key.
     forget_process_keys()
@@ -535,7 +603,7 @@ def cmd_downgrade() -> None:
     """Decrypt every slot back to plaintext and switch backend to ``db``.
 
     Telegram session string is dropped — the user must re-run
-    ``unread tg init`` to re-authenticate. (We could write the
+    ``unread init`` to re-authenticate. (We could write the
     session back to a SQLiteSession on disk, but the safer behavior
     is to force a fresh login when downgrading from encrypted-at-rest
     storage; an attacker who got the user to run downgrade shouldn't
@@ -567,7 +635,7 @@ def cmd_downgrade() -> None:
         console.print("[red]Decryption returned nothing — passphrase wrong.[/]")
         raise typer.Exit(1)
 
-    asyncio.run(_persist_downgrade(db_path, plaintext))
+    _run_async(_persist_downgrade(db_path, plaintext))
     _set_active_backend_sync(db_path, BACKEND_DB)
 
     from unread.security.crypto import forget_cached_key, forget_process_keys
@@ -578,7 +646,7 @@ def cmd_downgrade() -> None:
 
     console.print(f"[green]✓ Wrote {len(plaintext)} plaintext slot(s).[/]")
     console.print("Active backend now: [cyan]db[/].")
-    console.print("[yellow]The Telegram session was discarded — run `unread tg init` to re-authenticate.[/]")
+    console.print("[yellow]The Telegram session was discarded — run `unread init` to re-authenticate.[/]")
 
 
 async def _persist_downgrade(db_path: Path, plaintext: dict[str, str]) -> None:
@@ -723,7 +791,7 @@ def cmd_set(target: str) -> None:
     settings = get_settings()
     db_path = settings.storage.data_path
     if not db_path.is_file():
-        console.print(f"[red]No data DB at {db_path}.[/] Run `unread tg init` first.")
+        console.print(f"[red]No data DB at {db_path}.[/] Run `unread init` first.")
         raise typer.Exit(1)
 
     current = read_active_backend_sync(db_path)
@@ -761,6 +829,129 @@ def cmd_set(target: str) -> None:
         return
     # Unreachable: every (current, canonical) pair is covered above.
     raise RuntimeError(f"unhandled transition {current} → {canonical}")
+
+
+# --- recovery -------------------------------------------------------------
+
+
+def cmd_recover() -> None:
+    """Decrypt-in-place recovery for installs whose secrets got mismigrated.
+
+    Two scenarios this fixes, both leaving you with ``$u1$``-prefixed
+    ciphertext in a backend (DB or keychain) that doesn't know how to
+    decrypt it:
+
+    * A pre-fix wizard run migrated ciphertext from the passphrase
+      backend straight into the keychain.
+    * A manual ``security migrate`` was issued while the active
+      backend was still passphrase.
+
+    Walk every slot in both stores, find the ones that look encrypted,
+    prompt for the passphrase, decrypt with the install salt (or
+    per-record salt as fallback), and write the plaintext back to the
+    same store. After this, ``security set {plain|keystore|pass}``
+    works normally again. The Telegram session string is decrypted
+    too but a re-auth via ``unread login --force`` is still needed
+    because the on-disk SQLiteSession was deleted at upgrade time.
+    """
+    from unread.db._keys import SECRET_KEYS as _ALL_SLOTS
+    from unread.db.repo import read_data_db_secrets_sync
+    from unread.security.crypto import (
+        PassphraseError,
+        decrypt,
+        decrypt_with_key,
+        derive_key,
+        is_encrypted,
+        parse_envelope,
+    )
+    from unread.security.passphrase import read_install_salt
+
+    settings = get_settings()
+    db_path = settings.storage.data_path
+
+    # Build a map of {slot: (where, ciphertext)} for every encrypted
+    # row we can see. Either store may have ciphertext after a
+    # botched migration.
+    found: dict[str, tuple[str, str]] = {}
+    db_rows = read_data_db_secrets_sync(db_path)
+    for slot, value in db_rows.items():
+        if value and is_encrypted(value):
+            found[slot] = ("db", value)
+    if keychain_available():
+        for slot in sorted(_ALL_SLOTS):
+            value = keychain_read(slot)
+            if value and is_encrypted(value):
+                # DB takes precedence if both stores have it (shouldn't
+                # happen, but pick a deterministic winner).
+                found.setdefault(slot, ("keychain", value))
+
+    if not found:
+        console.print(
+            "[green]No encrypted-but-misplaced rows found.[/] "
+            "Nothing to recover — your backend is already in a coherent state."
+        )
+        return
+
+    console.print(f"[yellow]Found {len(found)} ciphertext row(s) sitting in the wrong backend:[/]")
+    for slot, (where, _) in sorted(found.items()):
+        console.print(f"  • {slot:<24} in {where}")
+    console.print("")
+
+    salt = read_install_salt(db_path)
+    # Honour the same passphrase source order as `read_secrets`:
+    # in-process cache → UNREAD_PASSPHRASE → getpass prompt. Keeps
+    # cron / scripted recovery viable.
+    from unread.secrets import _ensure_passphrase
+
+    try:
+        pw = _ensure_passphrase()
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(1) from e
+    install_key: bytes | None = derive_key(pw, salt) if salt is not None else None
+
+    decrypted: dict[str, tuple[str, str]] = {}
+    for slot, (where, ct) in found.items():
+        try:
+            env = parse_envelope(ct)
+            if install_key is not None and env.salt == salt:
+                plaintext = decrypt_with_key(ct, install_key)
+            else:
+                plaintext = decrypt(ct, pw)
+        except PassphraseError:
+            console.print(f"[red]Wrong passphrase[/] (failed on slot {slot!r}). Aborting before any writes.")
+            raise typer.Exit(1) from None
+        decrypted[slot] = (where, plaintext)
+
+    # Write plaintext back to the same store. We deliberately keep the
+    # current backend flag — recovery restores readability without
+    # changing the user's chosen storage policy. They can run
+    # `unread security set plain` afterwards if they want plaintext
+    # at rest, or re-run `set pass` to encrypt cleanly.
+    db_writes: dict[str, str] = {}
+    for slot, (where, plaintext) in decrypted.items():
+        if where == "keychain":
+            keychain_write(slot, plaintext)
+        else:
+            db_writes[slot] = plaintext
+    if db_writes:
+        _run_async(_put_db_secrets(db_path, db_writes))
+
+    # If the install was on `passphrase` before the bad migration,
+    # demote to `db` since the install salt + ciphertext invariants
+    # are no longer in sync. The user can re-encrypt with
+    # `unread security set pass`.
+    current_backend = read_active_backend_sync(db_path)
+    if current_backend == BACKEND_PASSPHRASE:
+        _set_active_backend_sync(db_path, BACKEND_DB)
+        console.print("Demoted backend: [cyan]passphrase[/] → [cyan]db[/].")
+
+    console.print(f"\n[green]✓ Recovered {len(decrypted)} slot(s).[/]")
+    console.print(
+        "[yellow]Telegram session must be re-authenticated:[/] "
+        "the on-disk SQLiteSession was removed during the original encrypt step. "
+        "Run [cyan]unread login --force[/] to log in again."
+    )
 
 
 # --- session revoke -------------------------------------------------------
@@ -847,6 +1038,11 @@ def register(app: typer.Typer, panel: str) -> typer.Typer:
         """Delete the local Telegram session file (revoke remotely from the Telegram app)."""
         cmd_revoke_session()
 
+    @security_app.command("recover")
+    def _recover() -> None:
+        """Decrypt-in-place fix for slots that got migrated as ciphertext."""
+        cmd_recover()
+
     @security_app.command("upgrade", hidden=True)
     def _upgrade() -> None:
         """Legacy upgrade command. Prefer `unread security set pass`."""
@@ -887,6 +1083,7 @@ __all__ = [
     "cmd_downgrade",
     "cmd_lock",
     "cmd_migrate",
+    "cmd_recover",
     "cmd_revoke_session",
     "cmd_rotate_passphrase",
     "cmd_set",

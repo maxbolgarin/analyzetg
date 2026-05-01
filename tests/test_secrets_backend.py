@@ -361,3 +361,115 @@ def test_set_rejects_unknown_alias(isolated_home: Path) -> None:
 
     with pytest.raises(typer.Exit):
         cmd_set("magic")
+
+
+# ---------- ciphertext-migration guards ----------------------------------
+
+
+def test_migrate_refuses_to_move_ciphertext_keychain(isolated_home: Path, fake_keyring, monkeypatch) -> None:
+    """`migrate --to keychain` must refuse when the active backend is `passphrase`,
+    even if the user (or a stale wizard) tries it. This is the exact bug that
+    corrupted a real install.
+    """
+    import typer
+
+    from unread.config import reset_settings
+    from unread.secrets_backend import BACKEND_KEYCHAIN, BACKEND_PASSPHRASE
+    from unread.security.commands import cmd_migrate
+    from unread.security.crypto import (
+        APP_SETTING_SALT,
+        SALT_LEN,
+        derive_key,
+        encrypt_with_key,
+    )
+    from unread.security.passphrase import _b64encode
+
+    salt = b"\x05" * SALT_LEN
+    key = derive_key("pw", salt)
+    real_ciphertext = encrypt_with_key("sk-x", key, salt=salt)
+
+    db = _seed_db_secrets(isolated_home, {"openai.api_key": real_ciphertext})
+    _set_app_setting(db, APP_SETTING_SALT, _b64encode(salt))
+    _set_app_setting(db, "secrets.backend", BACKEND_PASSPHRASE)
+    monkeypatch.setenv("UNREAD_PASSPHRASE", "pw")
+    reset_settings()
+
+    with pytest.raises(typer.Exit):
+        cmd_migrate(BACKEND_KEYCHAIN)
+
+
+def test_migrate_helper_rejects_encrypted_db_rows(isolated_home: Path, fake_keyring) -> None:
+    """Even if the backend flag is wrong, the migrate helper itself blocks
+    ciphertext from leaving the DB.
+    """
+    import typer
+
+    from unread.config import reset_settings
+    from unread.security.commands import _migrate_db_to_keychain
+
+    # Backend flag stays at default (db); rows are ciphertext-shaped.
+    db = _seed_db_secrets(isolated_home, {"openai.api_key": "$u1$pretend-ciphertext"})
+    reset_settings()
+
+    with pytest.raises(typer.Exit):
+        _migrate_db_to_keychain(db)
+
+
+def test_recover_decrypts_keychain_back_to_plaintext(isolated_home: Path, fake_keyring) -> None:
+    """`security recover` reads ciphertext sitting in keychain, decrypts with
+    the user's passphrase, and writes plaintext back."""
+    from unread.config import reset_settings
+    from unread.secrets_backend import (
+        BACKEND_DB,
+        BACKEND_KEYCHAIN,
+        BACKEND_PASSPHRASE,
+        KEYCHAIN_SERVICE,
+        read_active_backend_sync,
+    )
+    from unread.security.commands import cmd_recover
+    from unread.security.crypto import (
+        APP_SETTING_SALT,
+        SALT_LEN,
+        derive_key,
+        encrypt_with_key,
+        forget_cached_key,
+        forget_process_keys,
+    )
+    from unread.security.passphrase import _b64encode
+
+    db = _seed_db_secrets(isolated_home, {})
+    salt = b"\x09" * SALT_LEN
+    key = derive_key("rescue", salt)
+
+    # Simulate the broken state: ciphertext in keychain, backend
+    # marked as passphrase, install salt persisted.
+    fake_keyring.set_password(
+        KEYCHAIN_SERVICE, "openai.api_key", encrypt_with_key("sk-saved", key, salt=salt)
+    )
+    fake_keyring.set_password(KEYCHAIN_SERVICE, "telegram.api_id", encrypt_with_key("12345", key, salt=salt))
+    _set_app_setting(db, APP_SETTING_SALT, _b64encode(salt))
+    _set_app_setting(db, "secrets.backend", BACKEND_PASSPHRASE)
+    _set_app_setting(db, "_meta.schema_version", "1")  # keep schema check happy
+
+    # Reset state and pre-supply the passphrase so cmd_recover doesn't
+    # try to call getpass on a non-TTY pytest stdin.
+    reset_settings()
+    forget_process_keys()
+    forget_cached_key()
+    import unread.secrets as _s
+
+    _s._PROCESS_PASSPHRASE = "rescue"  # type: ignore[attr-defined]
+
+    cmd_recover()
+
+    # Plaintext is now in the keychain.
+    assert fake_keyring.get_password(KEYCHAIN_SERVICE, "openai.api_key") == "sk-saved"
+    assert fake_keyring.get_password(KEYCHAIN_SERVICE, "telegram.api_id") == "12345"
+    # Backend was demoted from passphrase to db (tests assert end state).
+    assert read_active_backend_sync(db) == BACKEND_DB
+
+    # Cleanup so neighbouring tests start fresh.
+    _s._PROCESS_PASSPHRASE = None  # type: ignore[attr-defined]
+    forget_process_keys()
+    forget_cached_key()
+    _ = BACKEND_KEYCHAIN  # silence unused-import lint

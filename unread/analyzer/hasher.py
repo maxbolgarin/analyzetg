@@ -13,11 +13,16 @@ def options_hash(options: dict[str, Any] | None) -> str:
         return ""
     # Sorted JSON so equivalent dicts hash identically
     canonical = json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    # 16 hex chars = 64 bits. Birthday-bound 50% collision at ~2^32 ≈ 4B
+    # distinct option dicts — far above any single user's lifetime cache,
+    # so safe. Don't truncate further; collisions here cause silent stale
+    # cache hits in `analysis_cache`.
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def text_hash(*parts: str) -> str:
     payload = json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
+    # Same 64-bit budget as options_hash; see note there.
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 

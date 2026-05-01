@@ -33,7 +33,7 @@ Behavior:
     use the same string.
 
 Falls back to plain typer prompts when stdin/stdout aren't a TTY
-(scripts, CI, `unread tg init < answers.txt`). The fallback also
+(scripts, CI, `unread login < answers.txt`). The fallback also
 keeps the existing test suite working — tests patch `typer.confirm`
 or `typer.prompt` and the fallback path delivers those calls.
 

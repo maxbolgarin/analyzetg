@@ -290,5 +290,5 @@ when we cut a release.
 - `--max-cost N` budget guard on `analyze` / `dump`
 - Wizard reorder: period → enrich, with period-scoped media counts
 - `unread doctor` — preflight / health check
-- `unread backup` / `unread restore` for `data.sqlite`
+- `unread backup up` / `unread backup restore` for `data.sqlite`
 - `--post-saved` — push analysis result to Telegram Saved Messages

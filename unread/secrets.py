@@ -1,7 +1,7 @@
 """Persisted credentials read at settings-load time.
 
 Authoritative storage is the `secrets` table in `~/.unread/storage/data.sqlite`
-— populated by `unread tg init` (the interactive wizard) or programmatically
+— populated by `unread init` (the interactive wizard) or programmatically
 via `Repo.put_secrets`. Persisting these means a user can blow away
 `~/.unread/.env` after a successful first-run setup and the CLI keeps
 working.
@@ -262,7 +262,7 @@ def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]
 
     When the legacy ``session.sqlite::unread_secrets`` table is the only
     source, log a once-per-process deprecation warning so users know to
-    re-run ``unread tg init`` (which writes to the new location) before
+    re-run ``unread init`` (which writes to the new location) before
     the next release removes the fallback.
     """
     # Late import: this module is read at `config.load_settings` time,
@@ -316,7 +316,7 @@ def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]
                     hint=(
                         "Credentials are being read from the legacy "
                         "session.sqlite::unread_secrets table. Re-run "
-                        "`unread tg init` to migrate them into "
+                        "`unread login` to migrate them into "
                         "data.sqlite::secrets — the legacy fallback will "
                         "be removed in the next release."
                     ),

@@ -353,6 +353,32 @@ Doing both is the only way to fully invalidate a leaked session.
 - **Headless Linux / Docker / CI:** stay on `plain`, set `UNREAD_PASSPHRASE` only if you've also enabled `pass` mode and need automation.
 - **Anywhere:** turn on FileVault / LUKS, exclude `~/.unread/` from `tmutil`/cloud sync, run `unread doctor` after first setup.
 
+### Privacy: PII redaction before the LLM
+
+`--redact` (or `analyze.redact = true` in config) scrubs PII from the
+text sent to the LLM provider, while keeping originals in the local
+DB and the saved Markdown report. Only the API payload is redacted.
+
+```bash
+unread @somegroup --redact
+```
+
+Patterns scrubbed: phone numbers (E.164 with `+` prefix), emails,
+IBANs, and Luhn-valid credit-card numbers. Each match is replaced
+with `[redacted-phone]` / `[redacted-email]` / `[redacted-iban]` /
+`[redacted-card]`, and the run summary shows per-kind counts so you
+can see what was filtered. Caching honors the flag — toggling
+`--redact` produces a different cache row, so you never serve a
+non-redacted cached result on a redacted run (or vice versa).
+
+The match is intentionally conservative (regex with strict word
+boundaries) to keep false positives low. SHA hashes and order-id
+numerics are not flagged; non-E.164 phone shapes (raw 10-digit US
+numbers without `+1` prefix) pass through. If you need stricter
+redaction, layer your own preset prompt that asks the LLM to
+generalize personal references — `--redact` complements that, it
+doesn't replace it.
+
 ---
 
 ## Command reference
@@ -367,16 +393,16 @@ Doing both is the only way to fully invalidate a leaked session.
 | `unread tg [<ref>] [flags]` / `unread telegram [<ref>] [flags]` | Same as the bare form, but auto-runs `tg init` if no Telegram session exists. |
 | `unread init [--force]` | Full interactive setup: install folder, AI provider + key, optional Telegram login. |
 | `unread tg init [--force]` | Telegram-only setup: skip the AI step. `--force` wipes the saved session before logging in. |
-| `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help describe`, `unread help tg init`. |
-| `unread describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
+| `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help tg describe`, `unread help tg init`. |
+| `unread tg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
 | `unread ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
 | `unread dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
 | `unread migrate [--move] [--dry-run]` | Move legacy cwd-relative `./storage` and `./reports` into `~/.unread/`. |
 
 > **Subcommand-name collisions.** `unread <ref>` will route to a
-> subcommand if `<ref>` matches one (e.g. `unread describe` opens the
-> describe command, not a chat literally titled "describe"). Use
-> `unread tg "describe"` or `unread -- describe` for the rare case of
+> subcommand if `<ref>` matches one (e.g. `unread cleanup` opens the
+> cleanup command, not a chat literally titled "cleanup"). Use
+> `unread tg "cleanup"` or `unread -- cleanup` for the rare case of
 > a chat that shares a subcommand name.
 
 ### Sync & subscriptions
@@ -390,15 +416,14 @@ Doing both is the only way to fully invalidate a leaked session.
 
 | Command | Purpose |
 |---|---|
-| `unread folders` | List your Telegram folders (use with `--folder NAME`). |
+| `unread tg folders` | List your Telegram folders (use with `--folder NAME`). |
 | `unread stats [--by …]` | Token spend / cache hit rate — by chat, preset, model, day, kind. |
 | `unread cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
-| `unread cache stats / ls / show / purge / export` | Analysis-cache maintenance. |
-| `unread cache effectiveness` | Per-(chat, preset) OpenAI prompt-cache hit rate. |
+| `unread cache stats / ls / show / purge / export` | Analysis-cache maintenance (`stats` also surfaces OpenAI prompt-cache hit rate). |
 | `unread doctor` | Preflight check — Telegram session, OpenAI key, ffmpeg, DB integrity, pricing, FDE, cloud-sync warnings. |
 | `unread security {status,set,unlock,lock,rotate-passphrase,revoke-session}` | Inspect / switch the credential-storage backend. See the [Security](#security) section. |
-| `unread backup [out]` | Snapshot `storage/data.sqlite` via `VACUUM INTO`. |
-| `unread restore <file>` | Replace `data.sqlite` with a backup (current DB moved aside). |
+| `unread backup up [out]` | Snapshot `storage/data.sqlite` via `VACUUM INTO`. |
+| `unread backup restore <file>` | Replace `data.sqlite` with a backup (current DB moved aside). |
 | `unread reports prune --older-than 30d` | Move stale report files to `reports/.trash/`. |
 | `unread watch --interval 1h <inner cmd>` | Run an inner `unread` command on a fixed cadence. |
 
@@ -420,11 +445,15 @@ Doing both is the only way to fully invalidate a leaked session.
 | Private link | `https://t.me/c/1234567890/5000` |
 | Invite link | `https://t.me/+AbCdEf...` (add `--join` to join it) |
 | Numeric `chat_id` | `-1001234567890` or `1001234567890` |
-| Fuzzy title | `"Bull Trading"` — substring match across your dialogs |
 | YouTube URL | `https://www.youtube.com/watch?v=...` (see [YouTube videos](#youtube-videos)) |
 | Website URL | `https://example.com/article` (see [Web pages](#web-pages)) |
 | Local file path | `./report.pdf`, `~/notes.md`, `/tmp/recording.mp3` (see [Local files](#local-files)) |
 | `-` | Read from stdin: `cat notes.txt \| unread` or `unread - < notes.txt` |
+
+**Fuzzy chat-title match** (`"Bull Trading"` → substring search across your dialogs)
+is intentionally NOT a bare-`unread <ref>` form — bare `unread "some text"` would
+silently try to authenticate with Telegram for every typo. Use `unread tg "Bull
+Trading"` instead, or pick from the wizard via `unread` with no args.
 
 The wizard's chat picker accepts non-Latin type-to-filter (Cyrillic,
 Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
@@ -432,7 +461,7 @@ Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
 
 ### YouTube videos
 
-`unread analyze <youtube-url>` analyzes a single video end-to-end. Flow:
+`unread <youtube-url>` analyzes a single video end-to-end. Flow:
 
 1. yt-dlp fetches metadata (title, channel, duration, captions index).
 2. A summary panel shows up + an interactive picker asks for the
@@ -449,16 +478,16 @@ Greek, Arabic, Hebrew, Latin Extended) so searching for `биохакинг` or
 
 ```bash
 # Interactive default: shows metadata + asks for source.
-unread analyze "https://www.youtube.com/watch?v=jmzoJCn8evU"
+unread "https://www.youtube.com/watch?v=jmzoJCn8evU"
 
 # Scripted (skip prompts, auto-pick captions / Whisper as needed):
-unread analyze "https://youtu.be/dQw4w9WgXcQ" --yes
+unread "https://youtu.be/dQw4w9WgXcQ" --yes
 
 # Force Whisper (slower; ~$0.003/min):
-unread analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio
+unread "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio
 
-# Different preset; see `unread analyze --help` for the full list.
-unread analyze "https://www.youtube.com/watch?v=..." --preset summary --console
+# Different preset; see `unread --help` for the full list.
+unread "https://www.youtube.com/watch?v=..." --preset summary --console
 ```
 
 Reports land under `reports/youtube/<channel-slug>/<video-slug>-<preset>-<ts>.md`.
@@ -484,7 +513,7 @@ a clear error.
 
 ### Web pages
 
-`unread analyze <url>` analyzes any HTTP/HTTPS web page (article, blog
+`unread <url>` analyzes any HTTP/HTTPS web page (article, blog
 post, documentation, essay) end-to-end. Auto-detected from the URL
 shape: anything that isn't a YouTube link or a Telegram link
 (`t.me/...`) routes here. No flag needed.
@@ -517,22 +546,22 @@ Flow:
 
 ```bash
 # Default — fetch, extract, run the website preset, save under reports/website/...
-unread analyze "https://www.paulgraham.com/greatwork.html"
+unread "https://www.paulgraham.com/greatwork.html"
 
 # Estimate-and-exit (no LLM call):
-unread analyze "https://example.com/blog/post" --dry-run
+unread "https://example.com/blog/post" --dry-run
 
 # Render to terminal instead of saving a file:
-unread analyze "https://example.com/blog/post" --console
+unread "https://example.com/blog/post" --console
 
 # Different preset — `summary`, `digest`, `highlights`, etc. all work:
-unread analyze "https://example.com/blog/post" --preset summary
+unread "https://example.com/blog/post" --preset summary
 
 # Cost-bounded run + post the analysis to your Saved Messages:
-unread analyze "https://example.com/blog/post" --max-cost 0.05 --post-saved
+unread "https://example.com/blog/post" --max-cost 0.05 --post-saved
 
 # Run a custom prompt against a page:
-unread analyze "https://example.com/paper.html" --preset custom --prompt-file my-prompt.md
+unread "https://example.com/paper.html" --preset custom --prompt-file my-prompt.md
 ```
 
 Reports land under `reports/website/<domain-slug>/<title-slug>-<preset>-<ts>.md`.
@@ -608,10 +637,10 @@ or stdin ref.
 
 ---
 
-## `unread analyze` — flags
+## `unread <ref>` — flags
 
 ```bash
-unread analyze [<ref>] [period] [output] [enrichment] [budget] [audit] [delivery]
+unread [<ref>] [period] [output] [enrichment] [budget] [audit] [delivery]
 ```
 
 ### Period (start point of the analysis window)
@@ -820,10 +849,10 @@ unread dump --folder Work                     # batch-dump every unread chat in 
 ## Wizard (no `<ref>`)
 
 ```bash
-unread analyze            # → pick chat → thread (forum) → preset → period → enrich → run
+unread            # → pick chat → thread (forum) → preset → period → enrich → run
 unread ask                # → pick chat → period → enrich → ask
 unread dump               # → pick chat → period → enrich → run
-unread describe           # → pick chat → show details / topics
+unread tg describe        # → pick chat → show details / topics
 ```
 
 Navigation: **↑/↓** move, **type to filter** (works for Cyrillic /
@@ -856,15 +885,15 @@ Forums are chats with topics, each with its own unread marker. Three
 modes for both `analyze` and `dump`:
 
 ```bash
-unread analyze @forumchat --thread 42                       # one specific topic
-unread analyze @forumchat --all-flat --last-days 3          # whole forum, one report
-unread analyze @forumchat --all-per-topic                   # one report per topic
+unread @forumchat --thread 42                       # one specific topic
+unread @forumchat --all-flat --last-days 3          # whole forum, one report
+unread @forumchat --all-per-topic                   # one report per topic
 ```
 
-Without any of these, `unread analyze @forumchat` opens a topic picker.
+Without any of these, `unread @forumchat` opens a topic picker.
 
-`unread describe @forumchat` prints the topic list with unread counts and
-local-DB counts; both `describe` and the wizard fix Telegram's stale /
+`unread tg describe @forumchat` prints the topic list with unread counts and
+local-DB counts; both `tg describe` and the wizard fix Telegram's stale /
 capped dialog-level forum counts by summing per-topic counts via
 `GetForumTopicsRequest`.
 
@@ -888,9 +917,9 @@ into something the LLM can read:
 Three ways to control:
 
 ```bash
-unread analyze @somegroup --enrich=voice,image,link    # explicit set
-unread analyze @somegroup --enrich-all                 # everything
-unread analyze @somegroup --no-enrich                  # nothing, even defaults
+unread @somegroup --enrich=voice,image,link    # explicit set
+unread @somegroup --enrich-all                 # everything
+unread @somegroup --no-enrich                  # nothing, even defaults
 ```
 
 **Precedence** (first wins): `--no-enrich` → `--enrich-all` →
@@ -986,7 +1015,7 @@ Per-run override:
 
 ```bash
 # English UI, Russian prompts → English headings, Russian analysis body
-unread analyze @somechat --language en --content-language ru
+unread @somechat --language en --content-language ru
 unread ask "что обсуждали?" --language en --content-language ru
 ```
 
@@ -1052,12 +1081,11 @@ stored in SQLite. Re-run the same query → zero-cost hit. Toggling
 the relevant rows.
 
 ```bash
-unread cache stats               # rows, disk size, saved $, breakdown
+unread cache stats               # rows, disk size, saved $, breakdown + prompt-cache hit rate
 unread cache ls --limit 20       # latest entries
 unread cache show <hash-prefix>  # print a stored result
 unread cache export -o old.jsonl --older-than 30d
 unread cache purge --older-than 30d --vacuum
-unread cache effectiveness       # per-(chat, preset) prompt-cache hit rate from usage_log
 ```
 
 **Truncated results are never cached.** A partial summary would
@@ -1067,7 +1095,8 @@ silently poison every future run.
 
 When prompt prefix ≥ 1024 tokens and identical bytes arrive within
 ~5–10 minutes, OpenAI discounts repeated tokens.
-`unread cache effectiveness` shows your hit rate per (chat, preset).
+`unread cache stats` shows your hit rate per (chat, preset) at the
+bottom of its output.
 `config.toml` enforces `temperature=0.2` and a fixed
 `system → static_context → dynamic` message order to maximize hits.
 
@@ -1084,9 +1113,9 @@ Forwarded 10× = fetched once.
 ### Up-front cost guard
 
 ```bash
-unread analyze @somegroup --max-cost 0.50    # confirm if estimate exceeds
-unread analyze @somegroup --max-cost 0.50 --yes   # silently abort if over
-unread analyze @somegroup --dry-run          # estimate-and-exit, no LLM call
+unread @somegroup --max-cost 0.50    # confirm if estimate exceeds
+unread @somegroup --max-cost 0.50 --yes   # silently abort if over
+unread @somegroup --dry-run          # estimate-and-exit, no LLM call
 ```
 
 Estimate covers the analysis (map + reduce); enrichment cost is **not**
@@ -1099,7 +1128,7 @@ unread stats                     # totals by preset
 unread stats --by chat           # biggest spenders by chat
 unread stats --by day            # spend over time
 unread stats --by kind           # chat vs audio vs ask
-unread cache effectiveness       # OpenAI prompt-cache hit rate per (chat, preset)
+unread cache stats               # OpenAI prompt-cache hit rate per (chat, preset) (bottom of output)
 ```
 
 If a row says `(N unpriced)` next to its call count, those rows used a
@@ -1123,11 +1152,11 @@ unread bug-report                              # prints to stdout
 unread bug-report --out report.txt             # writes to a file
 
 # Backup the data DB (VACUUM INTO — atomic, compact)
-unread backup                                  # → storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite
-unread backup mybackup.sqlite --overwrite
+unread backup up                               # → storage/backups/data-YYYY-MM-DD_HHMMSS.sqlite
+unread backup up mybackup.sqlite --overwrite
 
 # Restore a backup (current DB moved aside as data-replaced-…sqlite)
-unread restore storage/backups/data-2026-04-25_…sqlite --yes
+unread backup restore storage/backups/data-2026-04-25_…sqlite --yes
 
 # Null out old message texts (privacy / disk reclaim)
 unread cleanup --retention 90d                # preview + confirmation
@@ -1169,20 +1198,20 @@ streams live; each iteration is preceded by `── Run K  YYYY-MM-DDThh:mm:ss`.
 
 ---
 
-## `unread folders` — Telegram folder integration
+## `unread tg folders` — Telegram folder integration
 
 Telegram "folders" (dialog filters) become a first-class scope:
 
 ```bash
-unread folders                                  # list every folder + chat counts
-unread analyze --folder Work                    # batch every unread chat in folder
+unread tg folders                               # list every folder + chat counts
+unread --folder Work                    # batch every unread chat in folder
 unread dump --folder Work                       # same for dump
 unread ask "..." --folder Work                  # Q&A scoped to folder
 ```
 
 Folder column shows up in:
-- `unread describe` (no ref) — the dialogs table.
-- `unread describe @chat` — folder line under the username row.
+- `unread tg describe` (no ref) — the dialogs table.
+- `unread tg describe @chat` — folder line under the username row.
 - The wizard's chat picker — `unread | kind | last msg | folder | title`.
 
 Only **explicitly listed** chats are expanded — rule-based folders
@@ -1193,7 +1222,7 @@ walked.
 
 ## Subscriptions (optional)
 
-You don't need these for one-off analysis — `unread analyze @chat` already
+You don't need these for one-off analysis — `unread @chat` already
 resolves the chat and fetches what's missing. Subscriptions are for
 **long-term tracking**: a fixed set of chats you keep in your local DB,
 sync on a cron, and analyze by date ranges across many runs.
@@ -1216,35 +1245,35 @@ unread chats add @channel --with-comments
 unread watch --interval 24h analyze --folder Work --preset digest --post-saved
 
 # Audit a high-stakes report — citations get expanded, claims verified
-unread analyze @somegroup --preset action_items --cite-context 5 --self-check
+unread @somegroup --preset action_items --cite-context 5 --self-check
 
 # What did Bob say last week? In one chat, with rerank + post-answer follow-ups (default)
 unread ask "what did Bob propose?" @somegroup --last-days 7
 
 # Filter analysis to one sender (with a citable result)
-unread analyze @somegroup --by Bob --preset highlights
+unread @somegroup --by Bob --preset highlights
 
 # Cost-bounded run, with a budget alarm
-unread analyze @somegroup --enrich-all --max-cost 0.50 --post-to me
+unread @somegroup --enrich-all --max-cost 0.50 --post-to me
 
 # Re-run with the same flags as last time, but force a fresh cache
-unread analyze @somegroup --repeat-last --no-cache
+unread @somegroup --repeat-last --no-cache
 
 # Build a semantic index over a folder, then query it
 unread ask --build-index --folder Work
 unread ask "open architecture questions" --folder Work --semantic
 
 # Forum: per-topic reports for the entire forum
-unread analyze @forumchat --all-per-topic
+unread @forumchat --all-per-topic
 
 # Dump and save every photo / voice / video / doc alongside the text
 unread dump @somegroup --save-media --save-media-types photo,voice
 
 # Analyze a long-form article — paragraph-indexed citations link back to the page
-unread analyze "https://www.paulgraham.com/greatwork.html" --preset website
+unread "https://www.paulgraham.com/greatwork.html" --preset website
 
 # Analyze a YouTube video, force Whisper instead of captions
-unread analyze "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio --post-saved
+unread "https://youtu.be/dQw4w9WgXcQ" --youtube-source audio --post-saved
 ```
 
 ---
@@ -1360,8 +1389,8 @@ every secret masked.
 | `OPENAI_API_KEY missing` but you set it elsewhere | The CLI reads `~/.unread/.env`, not `~/.zshrc`. Either edit `~/.unread/.env` or run `unread tg init` to persist via the wizard |
 | `attempt to write a readonly database` | `chmod -R 700 ~/.unread/storage` — the install dir lost write perms (sudo install, restored backup with wrong owner) |
 | `storage permissions overpermissive` (doctor warning) | Run the `chmod 700 … && chmod 600 …` line printed by doctor — older installs predate the 0o700 hardening |
-| Cost reports look truncated / `unread stats` shows zeros | `unread cache effectiveness` to confirm the prompt cache is hitting; if not, verify `[pricing]` covers your model in `~/.unread/config.toml` |
-| Cache directory is huge | `unread cache stats` then `unread cache trim --keep-days 30` (or smaller) |
+| Cost reports look truncated / `unread stats` shows zeros | `unread cache stats` to confirm the prompt cache is hitting (hit-rate table at the bottom); if not, verify `[pricing]` covers your model in `~/.unread/config.toml` |
+| Cache directory is huge | `unread cache stats` then `unread cache purge --older-than 30d --vacuum` |
 | Migrating to a new install dir / moved `~/.unread/` | Set `UNREAD_HOME=/new/path` or run `unread migrate` from the old folder |
 | Russian locale, English `--help` | Currently English help only; full localization is on the [roadmap](ROADMAP.md) |
 | Want to start fresh | Delete `~/.unread/storage/data.sqlite` and re-run `unread tg init` — credentials persist in `data.sqlite::secrets`, so this resets cache + analysis runs while keeping or refreshing keys |

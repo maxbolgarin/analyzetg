@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TIMESTAMP NOT NULL
 );
 
--- Persisted secrets written by `unread tg init` — Telegram api_id /
+-- Persisted secrets written by `unread init` — Telegram api_id /
 -- api_hash and the OpenAI api_key. Lets a user delete `~/.unread/.env`
 -- after the first successful interactive setup and keep working off
 -- the saved values. Schema mirrors `app_settings`; kept in a separate

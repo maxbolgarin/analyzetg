@@ -67,7 +67,7 @@ class SettingDef:
 
 _SETTINGS: tuple[SettingDef, ...] = (
     # AI provider — exposed in the editor so multi-key users can
-    # switch providers without re-running `unread tg init`. Each row
+    # switch providers without re-running `unread init`. Each row
     # is a separate `app_settings::ai.*` override; the primary key
     # blocks (`anthropic.api_key`, `google.api_key`, etc.) live in the
     # secrets table and stay reachable via the wizard.
@@ -296,10 +296,25 @@ async def _interactive(repo) -> None:
         apply_db_overrides_sync(get_settings(), db_path)
 
     saved_anything = False
+    # Double-ESC guard: a single ESC at the top-level menu sets this
+    # flag and prints a hint instead of bailing. The next iteration's
+    # ESC then exits cleanly. ESC inside a sub-picker is handled in
+    # the per-type editors and acts as "back" — it returns to this
+    # loop with `_was_esc_at_top` reset, so a sub-picker ESC followed
+    # by a top-level ESC still requires the double press to exit.
+    _was_esc_at_top = False
     while True:
         overrides = await repo.get_all_app_settings()
         s = get_settings()
-        choice = await _pick_setting_to_edit(overrides, s)
+        try:
+            choice = await _pick_setting_to_edit(overrides, s)
+        except KeyboardInterrupt:
+            if _was_esc_at_top:
+                break
+            _was_esc_at_top = True
+            console.print(f"[grey70]{_t('settings_press_esc_again_to_exit')}[/]")
+            continue
+        _was_esc_at_top = False
 
         if choice is None or choice == _SENTINEL_DONE:
             break
@@ -349,6 +364,17 @@ async def _interactive(repo) -> None:
                     f"cleartext. Use HTTPS, or pick the [cyan]local[/] "
                     f"provider for self-hosted servers.[/]"
                 )
+        # Snapshot the previous effective value so we can show a one-time
+        # advisory when a setting changes (provider switch, language
+        # change). Read from the override dict first, fall back to the
+        # live singleton (which carries the .env / config.toml / default).
+        _old_effective: str | None = overrides.get(sdef.key)
+        if _old_effective is None:
+            try:
+                _attr_val = _read_attr(s, sdef.key)
+                _old_effective = "" if _attr_val is None else str(_attr_val)
+            except Exception:
+                _old_effective = None
         await repo.set_app_setting(sdef.key, new_value)
         # Apply the new value onto the live singleton in-place so the
         # menu's value column refreshes immediately. Same coercion logic
@@ -357,6 +383,31 @@ async def _interactive(repo) -> None:
         _apply_one_override(get_settings(), sdef.key, new_value)
         display_value = new_value or _t("settings_empty_value")
         console.print(_tf("settings_saved_kv", key=f"[bold]{sdef.key}[/]", value=f"[cyan]{display_value}[/]"))
+        # Advisory: provider switch leaves the old provider's cache rows
+        # behind (cache key includes model, but stale token-count drift
+        # can still surprise users). Don't auto-clear cache — just point
+        # at the right command.
+        if sdef.key == "ai.provider" and _old_effective and _old_effective != new_value:
+            console.print(f"[yellow]{_tf('provider_switch_hint', old=_old_effective, new=new_value)}[/]")
+            # Stale `ai.chat_model` / `ai.filter_model` overrides are
+            # almost certainly wrong on the new provider (a GPT alias
+            # under Anthropic, etc.), so drop them here. The user can
+            # re-pick from the new provider's catalog on the next
+            # iteration of the menu.
+            cleared: list[str] = []
+            for stale_key in ("ai.chat_model", "ai.filter_model"):
+                if await repo.delete_app_setting(stale_key):
+                    cleared.append(stale_key)
+                    _apply_one_override(get_settings(), stale_key, "")
+            if cleared:
+                console.print(f"[grey70]{_tf('provider_switch_cleared_models', keys=', '.join(cleared))}[/]")
+        # Advisory: when the user changes UI language but content_language
+        # is empty/unset, remind them that LLM output language is a
+        # separate axis.
+        if sdef.key == "locale.language" and new_value:
+            content_lang = (overrides.get("locale.content_language") or "").strip()
+            if not content_lang:
+                console.print(f"[grey70]{_tf('lang_axes_hint', lang=new_value)}[/]")
         saved_anything = True
 
     if saved_anything:
@@ -519,7 +570,11 @@ async def _pick_language(
 
     default = current if current in pool else _SENTINEL_KEEP
     console.print(f"[grey70]{sd.desc}[/grey70]")
-    picked = _select(sd.label, choices=items, default_value=default)
+    try:
+        picked = _select(sd.label, choices=items, default_value=default)
+    except KeyboardInterrupt:
+        # ESC inside a sub-picker is "back to settings menu", not "exit".
+        return None
     if picked is None:
         return _SENTINEL_EXIT
     if picked == _SENTINEL_KEEP:
@@ -533,48 +588,95 @@ async def _pick_language(
     return picked
 
 
-async def _pick_model(sd: SettingDef, current: str, *, kind: str) -> str | None:
-    """Pick a model name from the configured pricing table.
+def _provider_for_model_key(setting_key: str, active_provider: str) -> str:
+    """Pick which provider's catalog backs the model picker for this row.
 
-    Pricing table = the source of truth for "what models the user has
-    cost data for". Picking a model outside the table runs fine but
-    `--max-cost` won't enforce, and `unread doctor` warns. We expose the
-    table's keys + a "Custom…" text-input for power users.
+    `ai.chat_model` / `ai.filter_model` follow the active chat provider —
+    that's the whole point of the per-provider catalog: with
+    `provider = "anthropic"`, don't offer GPT models. The
+    OpenAI-namespaced rows (`openai.chat_model_default`,
+    `openai.filter_model_default`, `openai.audio_model_default`,
+    `enrich.vision_model`) are always OpenAI capabilities and stay
+    pinned to the OpenAI catalog regardless of the active chat provider.
     """
+    if setting_key in {"ai.chat_model", "ai.filter_model"}:
+        return active_provider
+    return "openai"
+
+
+async def _pick_model(sd: SettingDef, current: str, *, kind: str) -> str | None:
+    """Pick a model name from the active provider's curated catalog.
+
+    The catalog (per-provider list, refreshed 2026-05-01) lives in
+    `unread.ai.models`. Picking a model outside it runs fine but
+    `--max-cost` won't enforce and `unread doctor` warns — we expose a
+    "Custom…" text-input for power users (private fine-tunes, brand-new
+    models, OpenRouter aliases not in the curated subset).
+
+    `kind` selects the role filter: "audio" → transcription, "vision" →
+    image-understanding, anything else → chat (with filter-tier models
+    included so users can pin a budget model to the chat slot).
+    """
+    from unread.ai.models import models_for_provider
     from unread.config import get_settings as _get_settings
     from unread.util.prompt import Choice, ask_text
     from unread.util.prompt import select as _select
     from unread.util.prompt import separator as _sep
 
     s = _get_settings()
-    pool: list[str]
-    if kind == "audio":
-        pool = sorted((s.pricing.audio or {}).keys())
-    else:
-        pool = sorted((s.pricing.chat or {}).keys())
-    if not pool:
-        console.print(f"[yellow]{_t('settings_no_pricing_models')}[/]")
+    active_provider = str(getattr(s.ai, "provider", "openai") or "openai")
+    target_provider = _provider_for_model_key(sd.key, active_provider)
+    role = {"audio": "audio", "vision": "vision"}.get(kind, "chat")
+    catalog = models_for_provider(target_provider, role=role)
+    pool_ids = [m.id for m in catalog]
+    # Surface a current-but-uncatalogued value at the top so the user can
+    # keep it without re-typing — without shadowing the catalog rows.
+    if current and current not in pool_ids:
+        pool_ids = [current, *pool_ids]
 
+    if not catalog and target_provider == "local":
+        console.print(f"[grey70]{_t('settings_local_no_catalog')}[/grey70]")
+    elif not catalog:
+        console.print(f"[yellow]{_t('settings_no_pricing_models')}[/]")
+    else:
+        console.print(f"[grey70]{_tf('settings_models_for_provider', provider=target_provider)}[/grey70]")
+
+    catalog_by_id = {m.id: m for m in catalog}
     items: list = []
-    for name in pool:
+    for name in pool_ids:
         marker = "  ★" if name == current else ""
-        items.append(Choice(value=name, label=f"{name}{marker}"))
-    if pool:
+        info = catalog_by_id.get(name)
+        if info is None:
+            label = f"{name}{marker}"
+        elif role == "audio":
+            label = f"{info.label}  [{name}]  ${info.input_price:g}/min{marker}"
+        elif info.input_price > 0:
+            label = f"{info.label}  [{name}]  ${info.input_price:g}/${info.output_price:g}{marker}"
+        else:
+            label = f"{info.label}  [{name}]{marker}"
+        items.append(Choice(value=name, label=label))
+    if pool_ids:
         items.append(_sep())
     items.append(Choice(value="__custom__", label=_t("settings_custom_model_row")))
     items.append(_sep())
     items.append(Choice(value=_SENTINEL_KEEP, label=_t("settings_keep_current")))
     items.append(Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")))
 
-    default = current if current in pool else _SENTINEL_KEEP
-    console.print(f"[grey70]{sd.desc} — current: {current}[/grey70]")
-    picked = _select(sd.label, choices=items, default_value=default)
+    default = current if current in pool_ids else _SENTINEL_KEEP
+    console.print(f"[grey70]{sd.desc} — current: {current or '(unset)'}[/grey70]")
+    try:
+        picked = _select(sd.label, choices=items, default_value=default)
+    except KeyboardInterrupt:
+        return None
     if picked is None or picked == _SENTINEL_KEEP:
         return None
     if picked == _SENTINEL_EXIT:
         return _SENTINEL_EXIT
     if picked == "__custom__":
-        raw = ask_text(_tf("settings_custom_model_prompt", key=sd.key), default="")
+        try:
+            raw = ask_text(_tf("settings_custom_model_prompt", key=sd.key), default="")
+        except KeyboardInterrupt:
+            return None
         if not raw:
             return None
         return raw.strip()
@@ -599,7 +701,10 @@ async def _pick_bool(sd: SettingDef, current: bool) -> str | None:
         Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")),
     ]
     console.print(f"[grey70]{sd.desc}[/grey70]")
-    picked = _select(sd.label, choices=items, default_value="1" if current else "0")
+    try:
+        picked = _select(sd.label, choices=items, default_value="1" if current else "0")
+    except KeyboardInterrupt:
+        return None
     if picked is None or picked == _SENTINEL_KEEP:
         return None
     if picked == _SENTINEL_EXIT:
@@ -631,7 +736,10 @@ async def _pick_provider(sd: SettingDef, current: str) -> str | None:
 
     default = current if current in options else _SENTINEL_KEEP
     console.print(f"[grey70]{sd.desc} — current: {current}[/grey70]")
-    picked = _select(sd.label, choices=items, default_value=default)
+    try:
+        picked = _select(sd.label, choices=items, default_value=default)
+    except KeyboardInterrupt:
+        return None
     if picked is None or picked == _SENTINEL_KEEP:
         return None
     if picked == _SENTINEL_EXIT:
@@ -645,10 +753,13 @@ async def _pick_string(sd: SettingDef, current: str) -> str | None:
     """Free-text string input. Empty input clears the override."""
     from unread.util.prompt import ask_text
 
-    raw = ask_text(
-        f"{sd.label} — current: {current or '(unset)'}\n{sd.desc}\n",
-        default=current,
-    )
+    try:
+        raw = ask_text(
+            f"{sd.label} — current: {current or '(unset)'}\n{sd.desc}\n",
+            default=current,
+        )
+    except KeyboardInterrupt:
+        return None
     if raw is None:
         return _SENTINEL_EXIT
     raw = raw.strip()
@@ -666,10 +777,13 @@ async def _pick_int(sd: SettingDef, current: int) -> str | None:
     from unread.util.prompt import ask_text
 
     while True:
-        raw = ask_text(
-            _tf("settings_int_prompt", label=sd.label, desc=sd.desc, current=current),
-            default="",
-        )
+        try:
+            raw = ask_text(
+                _tf("settings_int_prompt", label=sd.label, desc=sd.desc, current=current),
+                default="",
+            )
+        except KeyboardInterrupt:
+            return None
         if raw is None:
             return _SENTINEL_EXIT
         raw = raw.strip()
@@ -694,10 +808,18 @@ async def _pick_int(sd: SettingDef, current: int) -> str | None:
 
 
 async def _confirm_reset(n: int) -> bool:
-    """Modal confirm before wiping every override."""
+    """Modal confirm before wiping every override.
+
+    ESC here means "back to the menu" — match the rest of the settings
+    pickers, where ESC is non-destructive. Returning False keeps every
+    override; the menu loop just re-renders.
+    """
     from unread.util.prompt import confirm as _confirm
 
-    return _confirm(_tf("settings_drop_n_q", n=n), default=False)
+    try:
+        return _confirm(_tf("settings_drop_n_q", n=n), default=False)
+    except KeyboardInterrupt:
+        return False
 
 
 # ----------------------------- Language pools ------------------------------

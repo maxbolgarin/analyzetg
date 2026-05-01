@@ -4,7 +4,8 @@ Without this, a user with a stale / revoked / typo'd API key sees a raw
 ``openai.AuthenticationError`` (or the equivalent from Anthropic /
 Google / OpenRouter) which doesn't tell them what to do. The
 chat_complete wrapper catches anything auth-shaped and surfaces a
-one-line "Run `unread tg init`" hint.
+one-line "Run `unread init`" hint (was `unread tg init` before the
+`tg` subgroup was retired).
 """
 
 from __future__ import annotations
@@ -70,7 +71,7 @@ async def test_chat_complete_remaps_auth_error_to_friendly():
     msg = str(ei.value)
     assert "openai" in msg.lower()
     assert "rejected" in msg.lower() or "invalid" in msg.lower()
-    assert "unread tg init" in msg
+    assert "unread init" in msg
 
 
 @pytest.mark.asyncio

@@ -8,21 +8,18 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_cmd_ask_with_question_no_scope_routes_to_wizard():
-    """`unread ask "Q"` (question, no scope) → wizard, NOT global retrieval.
-
-    Spec: no scope flag set → wizard, regardless of whether the question
-    is supplied. The wizard collects scope; the question is forwarded.
-    """
+async def test_cmd_ask_with_tg_ref_routes_to_wizard():
+    """`unread ask tg "Q"` → wizard. The magic `tg` ref is the only
+    way to reach the interactive picker from `cmd_ask`; no-scope without
+    `tg` errors instead of silently launching a wizard that would touch
+    Telegram for the chat list."""
     from unread.ask import commands as ask_commands
 
     fake_wizard = AsyncMock()
-    # `run_interactive_ask` is imported lazily inside cmd_ask, so patch it
-    # at the source module — the lazy import resolves at call time.
     with patch("unread.interactive.run_interactive_ask", new=fake_wizard):
         await ask_commands.cmd_ask(
             question="как дела?",
-            ref=None,
+            ref="tg",
             chat=None,
             folder=None,
             global_scope=False,
@@ -30,6 +27,25 @@ async def test_cmd_ask_with_question_no_scope_routes_to_wizard():
 
     fake_wizard.assert_awaited_once()
     assert fake_wizard.call_args.kwargs["question"] == "как дела?"
+
+
+@pytest.mark.asyncio
+async def test_cmd_ask_no_scope_no_tg_errors():
+    """`unread ask` (no ref, no scope) errors instead of silently opening
+    the wizard — matches the "ref is required, use `tg` for the picker"
+    rule that `unread <ref>` and `unread dump <ref>` follow."""
+    import typer
+
+    from unread.ask import commands as ask_commands
+
+    with pytest.raises(typer.BadParameter, match="Need a ref or scope"):
+        await ask_commands.cmd_ask(
+            question=None,
+            ref=None,
+            chat=None,
+            folder=None,
+            global_scope=False,
+        )
 
 
 @pytest.mark.asyncio

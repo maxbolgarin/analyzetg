@@ -416,6 +416,11 @@ async def cmd_run(
         summary.add_row(str(r["chat_id"]), r["title"][:40], status, r["err"] or "")
     console.print(summary)
     console.print(f"[bold]{_tf('run_results_summary', ok=ok_count, total=len(results))}[/]")
+    # Exit non-zero on partial failure so `unread chats run && next-step.sh`
+    # doesn't silently continue when subscriptions failed.
+    failed_count = len(results) - ok_count
+    if failed_count > 0:
+        raise typer.Exit(1)
 
 
 async def _cmd_run_flat(

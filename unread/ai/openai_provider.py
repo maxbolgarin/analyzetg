@@ -106,7 +106,7 @@ class OpenAIProvider(_OpenAICompatBase):
     def _make_client(self, settings) -> AsyncOpenAI:  # type: ignore[no-untyped-def]
         if not settings.openai.api_key:
             raise ProviderUnavailableError(
-                "OpenAI provider selected but `openai.api_key` is empty. Run `unread tg init` to add one."
+                "OpenAI provider selected but `openai.api_key` is empty. Run `unread init` to add one."
             )
         enforce_base_url_trust("openai", settings)
         kwargs: dict[str, Any] = {
@@ -132,7 +132,7 @@ class OpenRouterProvider(_OpenAICompatBase):
         if not settings.openrouter.api_key:
             raise ProviderUnavailableError(
                 "OpenRouter provider selected but `openrouter.api_key` is empty. "
-                "Run `unread tg init` to add one."
+                "Run `unread init` to add one."
             )
         enforce_base_url_trust("openrouter", settings)
         return AsyncOpenAI(
