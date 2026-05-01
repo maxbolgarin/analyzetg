@@ -154,7 +154,7 @@ def _friendly_auth_message(provider_name: str) -> str:
     """One-line "your key is bad" copy, with a recovery hint."""
     return (
         f"Your {provider_name} API key was rejected (invalid, revoked, or expired). "
-        f"Run `unread tg init` to update it, or set the matching env var "
+        f"Run `unread init` to update it, or set the matching env var "
         f"in ~/.unread/.env."
     )
 

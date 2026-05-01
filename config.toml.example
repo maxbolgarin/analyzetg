@@ -4,10 +4,11 @@
 # is listed commented-out, showing its default, so it's discoverable. Flip
 # to uncomment and edit. Secrets (api_id / api_hash / api_key) live in .env.
 #
-# Model picks (Chat Completions API):
-#   gpt-5.4       — flagship: long context, strong reasoning; use for final reduce.
-#   gpt-5.4-mini  — balance of cost/latency/quality for medium workloads.
-#   gpt-5.4-nano  — cheapest; per-chunk map/filter passes.
+# Model picks (Chat Completions API, refreshed 2026-05-01):
+#   gpt-5.5       — newest flagship (1M ctx, $5/$30 per 1M); use for top-quality reduce.
+#   gpt-5.4       — heavy reasoning ($2.50/$15); good cost/quality trade-off.
+#   gpt-5.4-mini  — balance of cost/latency/quality for medium workloads ($0.75/$4.50).
+#   gpt-5.4-nano  — cheapest; per-chunk map/filter passes ($0.20/$1.25).
 #   gpt-4o / gpt-4o-mini — previous generation; gpt-4o-mini is the vision default.
 
 # ====================================================== AI provider (chat)
@@ -16,9 +17,9 @@
 #   openai     — Chat Completions via the OpenAI SDK (default).
 #   openrouter — Same SDK, pointed at https://openrouter.ai/api/v1.
 #                Set `[openrouter] api_key` (or run `unread tg init`).
-#   anthropic  — Claude (claude-sonnet-4-5 / claude-haiku-4-5 by default).
+#   anthropic  — Claude (claude-sonnet-4-6 / claude-haiku-4-5 by default).
 #                Set `[anthropic] api_key`.
-#   google     — Gemini Developer API (gemini-2.5-flash by default).
+#   google     — Gemini Developer API (gemini-2.5-flash / -lite by default).
 #                Set `[google] api_key`.
 #   local      — Self-hosted OpenAI-compatible server (Ollama / LM Studio
 #                / vLLM). Set `[local] base_url` (default Ollama port).
@@ -99,6 +100,12 @@ output_budget_tokens = 1500
 # chunk_soft_break_minutes = 30        # roll new chunk on > N min idle gap
 # map_concurrency = 4                  # parallel per-chunk OpenAI calls
 
+# Scrub phone / email / IBAN / Luhn-valid card numbers from the prompt
+# sent to the LLM. Originals stay in the local DB and the saved Markdown
+# report — only the API payload is redacted. Off by default; flip on for
+# a privacy-positive run, or pass `--redact` to override per-call.
+# redact = false
+
 # ==================================================================== Enrich
 #
 # Per-run overrides via CLI: --enrich=image,link / --enrich-all / --no-enrich.
@@ -139,7 +146,20 @@ vision_model = "gpt-4o-mini"
 # attribute spend. A model missing from this table shows up as
 # "⚠ N call(s) had no pricing entry" in the stats output.
 # Keep entries for every model you actually use.
-# Rates last pulled from platform.openai.com/docs/pricing — update manually.
+# Rates last refreshed 2026-05-01. `unread/ai/models.py` ships the same
+# table for the model picker, so these entries here are advisory unless
+# you want to override them.
+
+# ----- OpenAI ($/1M tokens) -----
+[pricing.chat."gpt-5.5"]
+input = 5.00
+cached_input = 0.50
+output = 30.00
+
+[pricing.chat."gpt-5.4"]
+input = 2.50
+cached_input = 0.25
+output = 15.00
 
 [pricing.chat."gpt-5.4-mini"]
 input = 0.75
@@ -151,41 +171,30 @@ input = 0.20
 cached_input = 0.02
 output = 1.25
 
+[pricing.chat."gpt-4o"]
+input = 2.50
+cached_input = 1.25
+output = 10.00
+
 [pricing.chat."gpt-4o-mini"]
 input = 0.15
 cached_input = 0.075
 output = 0.60
 
-# Flagship — uncomment if you bump chat_model_default back to "gpt-5.4".
-# [pricing.chat."gpt-5.4"]
-# input = 2.50
-# cached_input = 0.25
-# output = 15.00
-#
-# [pricing.chat."gpt-4o"]
-# input = 2.50
-# cached_input = 1.25
-# output = 10.00
-#
-# [pricing.chat."gpt-5"]
-# input = 1.25
-# cached_input = 0.125
-# output = 10.00
-#
-# [pricing.chat."o3-mini"]
-# input = 1.10
-# cached_input = 0.55
-# output = 4.40
-
 [pricing.audio]
 "gpt-4o-mini-transcribe" = 0.003
-# "gpt-4o-transcribe" = 0.006
+"gpt-4o-transcribe" = 0.006
 # "whisper-1" = 0.006
 
-# Anthropic Claude — used when `ai.provider = "anthropic"`. Approximate
-# prices in $/1M tokens; refresh from console.anthropic.com when rates
-# move.
-[pricing.chat."claude-sonnet-4-5"]
+# ----- Anthropic Claude — used when `ai.provider = "anthropic"`. -----
+# `cached_input` reflects the cache-read rate (~0.1× input). Refresh
+# from docs.claude.com/en/docs/about-claude/pricing when rates move.
+[pricing.chat."claude-opus-4-7"]
+input = 5.00
+cached_input = 0.50
+output = 25.00
+
+[pricing.chat."claude-sonnet-4-6"]
 input = 3.00
 cached_input = 0.30
 output = 15.00
@@ -195,8 +204,23 @@ input = 1.00
 cached_input = 0.10
 output = 5.00
 
-# Google Gemini — used when `ai.provider = "google"`. Refresh from
-# ai.google.dev/pricing when rates move.
+# ----- Google Gemini — used when `ai.provider = "google"`. -----
+# Pricing for prompts ≤200k tokens. Refresh from ai.google.dev/pricing.
+[pricing.chat."gemini-3.1-pro-preview"]
+input = 2.00
+cached_input = 0.50
+output = 12.00
+
+[pricing.chat."gemini-3.1-flash-lite-preview"]
+input = 0.25
+cached_input = 0.0625
+output = 1.50
+
+[pricing.chat."gemini-2.5-pro"]
+input = 1.25
+cached_input = 0.31
+output = 10.00
+
 [pricing.chat."gemini-2.5-flash"]
 input = 0.30
 cached_input = 0.075

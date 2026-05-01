@@ -45,7 +45,7 @@ async def cmd_init(*, scope: str = "full") -> None:
 
     Runs as a pipeline of four conditional steps. Each step gates on
     "is this thing already configured?" so re-running `unread init`
-    (or `unread tg init`) is always safe and only prompts for what's
+    (or `unread login`) is always safe and only prompts for what's
     missing:
 
       1. **Folder pick** — runs iff `~/.unread/install.toml` is absent.
@@ -63,7 +63,7 @@ async def cmd_init(*, scope: str = "full") -> None:
 
     `scope` selects which steps fire. `"full"` (the default, used by
     `unread init`) runs every step. `"telegram_only"` (used by
-    `unread tg init`) skips the AI-provider step — convenient when
+    `unread login`) skips the AI-provider step — convenient when
     the user just wants to (re-)link a Telegram account without
     revisiting credential prompts.
 
@@ -100,7 +100,7 @@ async def cmd_init(*, scope: str = "full") -> None:
     # Anthropic for chat), or replace a stale key. The provider menu
     # has a "Keep current" entry preselected when a key is already
     # set, so re-running `unread init` to refresh Telegram alone is
-    # one Enter press. `tg init` (the telegram-only scope) bypasses
+    # one Enter press. `login` (the telegram-only scope) bypasses
     # this step entirely.
     if scope == "full":
         await _run_provider_step()
@@ -120,9 +120,18 @@ async def cmd_init(*, scope: str = "full") -> None:
         reset_settings()
         settings = get_settings()
 
-    # Step 4: Telethon auth (only if credentials are populated).
+    # Step 4: Telethon auth (only if credentials are populated). On `unread
+    # init` (full scope) we ask before launching the phone-number prompt —
+    # re-running the full wizard shouldn't auto-jump into Telegram login.
+    # `unread login` (telegram_only) is the explicit "log me in" path; that
+    # one proceeds unconditionally. The confirm is delegated into the auth
+    # helper because it can only be surfaced AFTER we connect and see the
+    # session is unauthorized — a session file may exist on disk but the
+    # underlying session can be expired/revoked, in which case Telethon would
+    # silently drop into the phone prompt. Asking for the user's consent only
+    # at that point ensures we never confirm when no login is actually needed.
     if settings.telegram.api_id and settings.telegram.api_hash:
-        await _run_telethon_auth_step(settings)
+        await _run_telethon_auth_step(settings, confirm_login=(scope == "full"))
 
     # Step 5: optional credential-store hardening — offer to move
     # already-saved keys into the OS keychain. Skipped silently when
@@ -379,7 +388,7 @@ async def _smoke_test_openai(api_key: str) -> None:
     except Exception as e:
         console.print(
             f"[yellow]OpenAI smoke test failed: {e}.[/] "
-            "[grey70]Saved anyway — you can re-run `unread tg init` to update.[/]"
+            "[grey70]Saved anyway — you can re-run `unread login` to update.[/]"
         )
 
 
@@ -395,7 +404,7 @@ async def _run_telegram_creds_step() -> bool:
     if not confirm("Set up Telegram login now?", default=False):
         console.print(
             "[grey70]Skipped — Telegram-based commands (describe, dump, sync, …) "
-            "won't be available. Re-run `unread init` (or `unread tg init`) to add credentials later.[/]"
+            "won't be available. Re-run `unread init` (or `unread login`) to add credentials later.[/]"
         )
         return False
 
@@ -445,12 +454,15 @@ def _run_keychain_step() -> None:
       - we're not on a real TTY (tests, scripted invocations) — the
         offer requires interactive consent and silently migrating is
         worse UX than not offering;
-      - the active backend is already ``keychain`` (idempotent re-runs);
+      - the active backend is anything OTHER than ``db`` — migrating
+        from ``keychain`` is a no-op, and migrating from ``passphrase``
+        would copy ciphertext into the keychain as if it were
+        plaintext (the bug this guard prevents);
       - the keychain backend is unavailable on this host;
       - no slots are populated yet.
     """
     from unread.secrets_backend import (
-        BACKEND_KEYCHAIN,
+        BACKEND_DB,
         keychain_available,
         keychain_describe,
         read_active_backend_sync,
@@ -463,7 +475,10 @@ def _run_keychain_step() -> None:
     settings = get_settings()
     db_path = settings.storage.data_path
     backend = read_active_backend_sync(db_path)
-    if backend == BACKEND_KEYCHAIN:
+    if backend != BACKEND_DB:
+        # Already on keychain (idempotent), or on passphrase (the
+        # wizard must NOT silently demote encryption — explicit
+        # `unread security set keystore` would handle that path).
         return
     if not keychain_available():
         return
@@ -493,10 +508,11 @@ def _run_keychain_step() -> None:
     ):
         console.print(
             "[grey70]Skipped — credentials stay in the data DB. "
-            "Run `unread security migrate --to keychain` later to change your mind.[/]"
+            "Run `unread security set keystore` later to change your mind.[/]"
         )
         return
 
+    from unread.secrets_backend import BACKEND_KEYCHAIN
     from unread.security.commands import cmd_migrate
 
     try:
@@ -509,9 +525,17 @@ def _run_keychain_step() -> None:
         return
 
 
-async def _run_telethon_auth_step(settings) -> None:  # type: ignore[no-untyped-def]
-    """Run Telethon's interactive login if the session isn't already authorized."""
+async def _run_telethon_auth_step(settings, *, confirm_login: bool = False) -> None:  # type: ignore[no-untyped-def]
+    """Run Telethon's interactive login if the session isn't already authorized.
+
+    `confirm_login` gates the phone-number prompt behind a yes/no confirm —
+    used by the full-scope `unread init` wizard so re-runs don't auto-launch
+    a Telegram login when the saved session is expired/revoked. The
+    `unread login` path leaves it False (the user invoked the explicit
+    "log me in" entry point and we should just go).
+    """
     from unread.util.prompt import ask_text as _ask_text
+    from unread.util.prompt import confirm
 
     client = build_client(settings)
 
@@ -533,9 +557,18 @@ async def _run_telethon_auth_step(settings) -> None:  # type: ignore[no-untyped-
     try:
         if await client.is_user_authorized():
             console.print(f"[green]{_t('doctor_session_authorized')}[/]")
-        else:
-            await client.start(phone=_phone, code_callback=_code, password=_password)
-            console.print(f"[green]{_t('doctor_logged_in')}[/]")
+            return
+        if confirm_login:
+            console.print("\n[bold]Telegram login.[/]")
+            console.print(
+                "[grey70]Credentials are saved but the session isn't authorized. "
+                "Logging in will prompt for phone, code, and (if set) 2FA password.[/]\n"
+            )
+            if not confirm("Log in to Telegram now?", default=False):
+                console.print("[grey70]Skipped — run `unread login` later to log in.[/]")
+                return
+        await client.start(phone=_phone, code_callback=_code, password=_password)
+        console.print(f"[green]{_t('doctor_logged_in')}[/]")
     finally:
         await client.disconnect()
 
@@ -559,10 +592,18 @@ async def cmd_doctor() -> None:
     warn = "[yellow]WARN[/]"
     fail = "[red]FAIL[/]"
     statuses: list[str] = []
+    # Track every issue by (severity, label, detail) so the summary
+    # block can surface concrete next-steps instead of an opaque
+    # "1 fail / 2 warn".
+    issues: list[tuple[str, str, str]] = []
 
     def _line(status: str, label: str, detail: str = "") -> None:
         console.print(f"  {status:<24} {label}{(' — ' + detail) if detail else ''}")
         statuses.append(status)
+        if "FAIL" in status:
+            issues.append(("fail", label, detail))
+        elif "WARN" in status:
+            issues.append(("warn", label, detail))
 
     console.print(f"[bold]{_t('tg_doctor_banner')}[/]")
 
@@ -611,18 +652,79 @@ async def cmd_doctor() -> None:
     if has_drift:
         _line(fail, "install-pointer drift", drift_hint)
 
-    # 2. Secrets resolved
-    if settings.telegram.api_id and settings.telegram.api_hash:
+    # 2. Secrets resolved.
+    # Show the active credential-storage backend up-front so triage knows
+    # WHERE values are coming from (the "missing" / "present" hints below
+    # reference the same store).
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        BACKEND_PASSPHRASE,
+        read_active_backend_sync,
+    )
+    from unread.security.crypto import is_encrypted
+
+    backend = read_active_backend_sync(settings.storage.data_path)
+    _BACKEND_LABEL = {
+        "db": "plain (data.sqlite)",
+        BACKEND_KEYCHAIN: "keystore (OS keychain)",
+        BACKEND_PASSPHRASE: "pass (passphrase-encrypted)",
+    }
+    _line(ok, "secrets backend", _BACKEND_LABEL.get(backend, backend))
+
+    # Hint copy depends on where the values would land. On `keystore`
+    # the user re-runs `unread login` (which writes through the
+    # backend). On the plain DB / fresh install they can also drop
+    # values into `.env`.
+    _setup_hint = (
+        "run `unread login`"
+        if backend in (BACKEND_KEYCHAIN, BACKEND_PASSPHRASE)
+        else ("run `unread login` (or set TELEGRAM_API_ID / TELEGRAM_API_HASH in ~/.unread/.env)")
+    )
+    _openai_hint = (
+        "run `unread login`"
+        if backend in (BACKEND_KEYCHAIN, BACKEND_PASSPHRASE)
+        else ("run `unread login` (or set OPENAI_API_KEY in ~/.unread/.env)")
+    )
+
+    # Ciphertext leak: a `$u1$…` value in `settings.<svc>.api_key`
+    # means an encrypted blob slipped past the active backend's
+    # decrypt path (typically: an old `passphrase`-mode install was
+    # migrated to `keystore`/`db` while the values were still
+    # encrypted). Calling out to OpenAI with that string yields a
+    # cryptic 401 — surface the real fix instead.
+    # `api_id` is an int post-coercion — only api_hash / api_key can
+    # carry the `$u1$…` envelope shape. Guard the type so a stray int
+    # doesn't crash `str.startswith` inside `is_encrypted`.
+    def _ct(v: object) -> bool:
+        return isinstance(v, str) and is_encrypted(v)
+
+    _api_hash_ct = _ct(settings.telegram.api_hash)
+    _openai_ct = _ct(settings.openai.api_key)
+
+    if _api_hash_ct:
+        _line(
+            fail,
+            "telegram credentials look encrypted",
+            "ciphertext (`$u1$…`) reached the active backend — run `unread security recover`",
+        )
+    elif settings.telegram.api_id and settings.telegram.api_hash:
         # Don't print the api_id value — it's a stable account fingerprint
         # and shows up in pasted bug reports / screenshots. The presence
         # check is enough for triage.
         _line(ok, "telegram credentials", "api_id + api_hash present")
     else:
-        _line(fail, "telegram credentials missing", "set TELEGRAM_API_ID / TELEGRAM_API_HASH in .env")
-    if settings.openai.api_key:
+        _line(fail, "telegram credentials missing", _setup_hint)
+
+    if _openai_ct:
+        _line(
+            fail,
+            "OPENAI_API_KEY looks encrypted",
+            "ciphertext (`$u1$…`) reached the active backend — run `unread security recover`",
+        )
+    elif settings.openai.api_key:
         _line(ok, "OPENAI_API_KEY present")
     else:
-        _line(fail, "OPENAI_API_KEY missing", "set in .env")
+        _line(fail, "OPENAI_API_KEY missing", _openai_hint)
 
     # 3. ffmpeg
     ffmpeg_path = shutil.which(settings.media.ffmpeg_path) or shutil.which("ffmpeg")
@@ -666,6 +768,19 @@ async def cmd_doctor() -> None:
 
     # 5. DB integrity + size
     db_path = settings.storage.data_path
+    # Snapshot perms BEFORE opening the DB — `Repo.open` auto-tightens
+    # the storage dir (defense in depth), which would silently mask
+    # the warning we want to surface in section 5c.
+    import contextlib as _cl
+
+    _pre_open_storage_mode: int | None = None
+    _pre_open_db_mode: int | None = None
+    if os.name == "posix":
+        with _cl.suppress(OSError):
+            _pre_open_storage_mode = settings.storage.data_path.parent.stat().st_mode & 0o777
+        if db_path.exists():
+            with _cl.suppress(OSError):
+                _pre_open_db_mode = db_path.stat().st_mode & 0o777
     if db_path.exists():
         try:
             from unread.db.repo import open_repo as _open_repo
@@ -676,9 +791,9 @@ async def cmd_doctor() -> None:
                 await cur.close()
                 verdict = (row["integrity_check"] if row else "?") if row is not None else "?"
                 # Cache-size advisory — daily users accumulate hundreds of
-                # MB in `analysis_cache` over months. We don't auto-trim
+                # MB in `analysis_cache` over months. We don't auto-purge
                 # here (no surprise destructive ops) but surface a hint
-                # the moment it becomes worth running `unread cache trim`.
+                # the moment it becomes worth running `unread cache purge`.
                 cache_summary = await repo.cache_stats()
             size_mb = db_path.stat().st_size / 1024**2
             if verdict == "ok":
@@ -692,7 +807,7 @@ async def cmd_doctor() -> None:
                     warn,
                     "analysis cache large",
                     f"{cache_rows} rows / {cache_bytes / 1024**2:.0f} MB — "
-                    "consider `unread cache trim --keep-days 30`",
+                    "consider `unread cache purge --older-than 30d --vacuum`",
                 )
             elif cache_rows > 0:
                 _line(ok, "analysis cache size", f"{cache_rows} rows / {cache_bytes / 1024**2:.1f} MB")
@@ -726,9 +841,19 @@ async def cmd_doctor() -> None:
     # init, but pre-existing installs may carry 0o755. Skip on Windows
     # (POSIX mode bits don't translate cleanly).
     if os.name == "posix" and storage_dir.exists():
+        # Use the pre-open snapshot when available so `Repo.open`'s
+        # auto-fix doesn't paper over what we want to report. Falls
+        # back to a fresh stat() when the snapshot is missing
+        # (e.g. doctor ran without ever opening the DB).
         try:
-            mode = storage_dir.stat().st_mode & 0o777
-            db_mode = db_path.stat().st_mode & 0o777 if db_path.exists() else None
+            mode = (
+                _pre_open_storage_mode
+                if _pre_open_storage_mode is not None
+                else storage_dir.stat().st_mode & 0o777
+            )
+            db_mode = _pre_open_db_mode
+            if db_mode is None and db_path.exists():
+                db_mode = db_path.stat().st_mode & 0o777
             problems: list[str] = []
             if mode & 0o077:  # group or other have any access
                 problems.append(f"dir mode {oct(mode)} — expect 0o700")
@@ -771,7 +896,7 @@ async def cmd_doctor() -> None:
         if hits:
             advice = (
                 f"under {', '.join(hits)} — plaintext secrets and chat cache will be replicated. "
-                "Move the install (`unread tg init` lets you pick a folder) "
+                "Move the install (`unread login` lets you pick a folder) "
                 "or exclude it from the sync app."
             )
             if sys.platform == "darwin":
@@ -835,7 +960,45 @@ async def cmd_doctor() -> None:
     session_with_suffix = session_path.with_name(session_path.name + ".session")
     session_present = session_path.exists() or session_with_suffix.exists()
     actual_session = session_path if session_path.exists() else session_with_suffix
-    if not session_present:
+
+    # Encrypted-mode installs (passphrase backend) intentionally have
+    # no on-disk session file — the StringSession lives ciphertext-only
+    # in `data.sqlite::secrets`. Treat that as `ok` rather than the
+    # generic "session missing" warning.
+    encrypted_session_present = False
+    try:
+        from unread.secrets_backend import BACKEND_PASSPHRASE, read_active_backend_sync
+
+        if read_active_backend_sync(settings.storage.data_path) == BACKEND_PASSPHRASE:
+            import sqlite3 as _sqlite3
+
+            from unread.security.passphrase import _b64encode  # noqa: F401  (side import)
+
+            try:
+                conn = _sqlite3.connect(
+                    f"file:{settings.storage.data_path.resolve()}?mode=ro",
+                    uri=True,
+                    timeout=0.5,
+                )
+                cur = conn.execute(
+                    "SELECT length(value) FROM secrets WHERE key = ?",
+                    ("telegram.session_string",),
+                )
+                row = cur.fetchone()
+                conn.close()
+                encrypted_session_present = bool(row and row[0])
+            except _sqlite3.Error:
+                pass
+    except Exception:
+        pass
+
+    if not session_present and encrypted_session_present:
+        _line(
+            ok,
+            "Telegram session",
+            "encrypted (passphrase backend; no on-disk file by design)",
+        )
+    elif not session_present:
         _line(warn, "Telegram session missing", f"run `unread init` (expected {session_path})")
     elif settings.telegram.api_id and settings.telegram.api_hash:
         try:
@@ -854,8 +1017,10 @@ async def cmd_doctor() -> None:
 
     # 7. OpenAI key liveness — special-cased because OpenAI also backs
     # Whisper / vision / embeddings even when the chat provider is
-    # something else.
-    if settings.openai.api_key:
+    # something else. Skip the network call when the key is ciphertext
+    # (the dedicated FAIL line above already named the fix); sending
+    # `$u1$…` to OpenAI just yields a misleading 401.
+    if settings.openai.api_key and not _openai_ct:
         try:
             from openai import AsyncOpenAI
 
@@ -891,7 +1056,7 @@ async def cmd_doctor() -> None:
         from unread.analyzer.prompts import PRESETS
 
         if PRESETS:
-            _line(ok, "presets loaded", f"{len(PRESETS)} ({', '.join(sorted(PRESETS))})")
+            _line(ok, "presets loaded", str(len(PRESETS)))
         else:
             _line(warn, "no presets loaded", "expected presets/*.md")
     except Exception as e:
@@ -907,9 +1072,16 @@ async def cmd_doctor() -> None:
         settings.enrich.vision_model,
     }
     chat_referenced.discard(None)
-    chat_missing = [m for m in chat_referenced if m and m not in pricing.chat]
+    from unread.util.pricing import chat_pricing_for
+
+    chat_missing = [m for m in chat_referenced if m and chat_pricing_for(m, settings) is None]
     audio_model = settings.openai.audio_model_default
-    audio_missing = bool(audio_model and audio_model not in pricing.audio)
+    from unread.ai.models import find_model as _find_model
+
+    audio_info = _find_model(audio_model) if audio_model else None
+    audio_missing = bool(
+        audio_model and audio_model not in pricing.audio and not (audio_info and audio_info.role == "audio")
+    )
     if chat_missing or audio_missing:
         bits: list[str] = []
         if chat_missing:
@@ -924,16 +1096,67 @@ async def cmd_doctor() -> None:
     else:
         _line(ok, "pricing covers default models")
 
-    # Summary
+    # 10. Config sanity: catch values that pass Pydantic strict validation
+    # but are still nonsense (typo'd model names that match no pricing
+    # entry, out-of-range temperature, zero concurrency). Pricing-coverage
+    # is already covered above; here we focus on numeric-range smells.
+    try:
+        temp = float(settings.openai.temperature)
+        # OpenAI accepts 0-2 inclusive. Above 2 the API rejects; below 0
+        # is meaningless. Flag obvious config typos like 20 (a "2.0" with
+        # a stray digit).
+        if not 0.0 <= temp <= 2.0:
+            _line(
+                warn,
+                "openai.temperature out of range",
+                f"got {temp}; expected 0.0–2.0 (typo in config.toml?)",
+            )
+    except (AttributeError, TypeError, ValueError):
+        # If the field itself is malformed, Pydantic should have caught
+        # it; treat any miss here as a no-op rather than a doctor crash.
+        pass
+    try:
+        conc = int(getattr(settings.enrich, "concurrency", 4))
+        if conc <= 0:
+            _line(
+                warn,
+                "enrich.concurrency invalid",
+                f"got {conc}; must be ≥1 — set in config.toml or `unread settings`",
+            )
+        elif conc > 64:
+            _line(
+                warn,
+                "enrich.concurrency unusually high",
+                f"got {conc}; >64 will likely flood-wait Telegram or 429 OpenAI",
+            )
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    # Summary + actionable next-steps. The legacy summary just stated
+    # counts ("N failed / N warnings"); users had to scroll back through
+    # a screen of OK/WARN/FAIL lines to find what to fix. Now we lead
+    # with the count, then list the top 5 actionable issues so the most
+    # useful copy-paste lives at the bottom of the output.
     fails = sum(1 for s in statuses if "FAIL" in s)
     warns = sum(1 for s in statuses if "WARN" in s)
+    actionable = [i for i in issues if i[0] == "fail"] + [i for i in issues if i[0] == "warn"]
+    if actionable:
+        console.print(f"\n[bold]{_t('doctor_next_steps_header')}[/]")
+        for severity, label, detail in actionable[:5]:
+            tag = "[red]fix[/]" if severity == "fail" else "[yellow]check[/]"
+            line = f"  {tag} {label}"
+            if detail:
+                line += f" — {detail[:160]}"
+            console.print(line)
+        if len(actionable) > 5:
+            console.print(f"  [grey70]{_tf('doctor_more_issues', n=len(actionable) - 5)}[/]")
     if fails:
-        console.print(f"[bold red]{_tf('doctor_summary_failed', fails=fails, warns=warns)}[/]")
+        console.print(f"\n[bold red]{_tf('doctor_summary_failed', fails=fails, warns=warns)}[/]")
         raise typer.Exit(1)
     if warns:
-        console.print(f"[bold yellow]{_tf('doctor_summary_warned', warns=warns)}[/]")
+        console.print(f"\n[bold yellow]{_tf('doctor_summary_warned', warns=warns)}[/]")
     else:
-        console.print(f"[bold green]{_t('doctor_all_ok')}[/]")
+        console.print(f"\n[bold green]{_t('doctor_all_ok')}[/]")
 
 
 # ------------------------------------------------------------------- dialogs

@@ -128,11 +128,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     # has applied DB-saved locale settings to the singleton. Adding new
     # commands → add a one-liner here for both langs.
     "cli_app_help": {
-        "en": "Pull Telegram chats, enrich media (voice/images/docs/links), and analyze via OpenAI — all local.",
-        "ru": "Загружай Telegram-чаты, обогащай медиа (голос/изображения/доки/ссылки) и анализируй через OpenAI — всё локально.",
+        "en": "Pull Telegram chats, enrich media (voice/images/docs/links), and analyze with the AI provider you choose.",
+        "ru": "Загружай Telegram-чаты, обогащай медиа (голос/изображения/доки/ссылки) и анализируй через выбранного AI-провайдера.",
     },
     "cli_panel_main": {"en": "Main", "ru": "Основные"},
-    "cli_panel_sync": {"en": "Sync & subscriptions", "ru": "Синхронизация и подписки"},
+    "cli_panel_sync": {
+        "en": "Sync & subscriptions (Telegram)",
+        "ru": "Синхронизация и подписки (Telegram)",
+    },
     "cli_panel_maint": {"en": "Maintenance", "ru": "Обслуживание"},
     # Command one-liners (Typer reads from each command's docstring; we
     # set `help=` explicitly so the i18n lookup wins). Keys mirror the
@@ -146,8 +149,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Список чатов (без ref) или подробности одного чата (с ref).",
     },
     "cmd_analyze": {
-        "en": "Analyze a chat, YouTube video, or any web page URL. Default window = messages since your Telegram read marker.",
-        "ru": "Анализ чата, видео YouTube или произвольной веб-страницы. По умолчанию — сообщения после маркера прочтения Telegram.",
+        "en": "Analyze a Telegram chat, YouTube video, web page, or local file. Default window = messages since your Telegram read marker.",
+        "ru": "Анализ Telegram-чата, видео YouTube, веб-страницы или локального файла. По умолчанию — сообщения после маркера прочтения.",
     },
     "cmd_ask": {
         "en": "Answer a question about your synced Telegram archive.",
@@ -158,16 +161,16 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Сохранение истории чата в файл. По умолчанию — сообщения после маркера прочтения.",
     },
     "cmd_sync": {
-        "en": "Incrementally fetch new messages for all (or one) subscriptions.",
-        "ru": "Инкрементально подтянуть новые сообщения для всех (или одной) подписок.",
+        "en": "Incrementally fetch new Telegram messages for all (or one) subscriptions. Needs a Telegram session.",
+        "ru": "Инкрементально подтянуть новые сообщения Telegram для всех (или одной) подписок. Нужна сессия Telegram.",
     },
     "cmd_chats": {
-        "en": "Manage subscriptions (what to sync).",
-        "ru": "Управление подписками (что синхронизировать).",
+        "en": "Manage Telegram subscriptions (what to sync).",
+        "ru": "Управление подписками Telegram (что синхронизировать).",
     },
     "cmd_folders": {
-        "en": "List your Telegram folders (for use with `analyze --folder NAME` / `dump --folder NAME`).",
-        "ru": "Список папок Telegram (для `analyze --folder NAME` / `dump --folder NAME`).",
+        "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`).",
+        "ru": "Список папок Telegram (для `unread --folder NAME` / `unread dump --folder NAME`).",
     },
     "cmd_stats": {
         "en": "Aggregate API spend, cache hit rate and run counts.",
@@ -190,10 +193,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Сформировать диагностический отчёт с маскировкой секретов для GitHub-issue.",
     },
     "cmd_backup": {
+        "en": "Snapshot and restore storage/data.sqlite (`up` writes, `restore` replaces).",
+        "ru": "Снимки и восстановление storage/data.sqlite (`up` создать, `restore` восстановить).",
+    },
+    "cmd_backup_up": {
         "en": "Snapshot storage/data.sqlite to a single compact file (uses VACUUM INTO).",
         "ru": "Сделать снимок storage/data.sqlite в один компактный файл (через VACUUM INTO).",
     },
-    "cmd_restore": {
+    "cmd_backup_restore": {
         "en": "Replace storage/data.sqlite with a backup. The current DB is moved aside.",
         "ru": "Заменить storage/data.sqlite резервной копией. Текущая БД отодвигается в сторону.",
     },
@@ -355,12 +362,16 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "unread settings — интерактивный редактор.",
     },
     "settings_banner_hint": {
-        "en": "↑/↓ navigate, Enter open, ESC or 'Done' to exit.",
-        "ru": "↑/↓ навигация, Enter — открыть, ESC или «Готово» — выход.",
+        "en": "↑/↓ navigate, Enter open, ESC back, ESC twice or 'Done' to exit.",
+        "ru": "↑/↓ навигация, Enter — открыть, ESC — назад, двойной ESC или «Готово» — выход.",
     },
     "settings_pick_prompt": {
-        "en": "Pick a setting (or an action) — type to filter, ESC to exit",
-        "ru": "Выберите настройку (или действие) — введите текст для фильтра, ESC — выход",
+        "en": "Pick a setting (or an action) — type to filter, ESC twice to exit",
+        "ru": "Выберите настройку (или действие) — введите текст для фильтра, двойной ESC — выход",
+    },
+    "settings_press_esc_again_to_exit": {
+        "en": "Press ESC again to exit (or pick 'Done').",
+        "ru": "Нажмите ESC ещё раз для выхода (или выберите «Готово»).",
     },
     "settings_show_row": {
         "en": "📋  Show effective settings (printable table)",
@@ -398,6 +409,28 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "  → сохранено {key}={value}",
     },
     "settings_empty_value": {"en": "(empty)", "ru": "(пусто)"},
+    "provider_switch_hint": {
+        "en": (
+            "  → Provider changed from {old} → {new}. Cached analyses tied to the "
+            "previous provider remain on disk. Run `unread cache clear` to drop "
+            "them, or `unread cache stats` to inspect."
+        ),
+        "ru": (
+            "  → Провайдер изменён: {old} → {new}. Кэшированные анализы старого "
+            "провайдера остаются на диске. Очистите через `unread cache clear` "
+            "или проверьте `unread cache stats`."
+        ),
+    },
+    "lang_axes_hint": {
+        "en": (
+            "  → UI language set to {lang}. To also change LLM analysis output "
+            "language, set `locale.content_language` to the same code."
+        ),
+        "ru": (
+            "  → Язык интерфейса: {lang}. Чтобы выходные тексты анализа также "
+            "стали на этом языке, установите `locale.content_language`."
+        ),
+    },
     "settings_drop_n_q": {
         "en": "Drop {n} saved setting(s)? This cannot be undone.",
         "ru": "Удалить сохранённых настроек: {n}? Действие необратимо.",
@@ -409,6 +442,25 @@ _STRINGS: dict[str, dict[str, str]] = {
     "settings_custom_model_row": {
         "en": "Custom… (type a model name)",
         "ru": "Своё… (введите имя модели)",
+    },
+    "settings_models_for_provider": {
+        "en": "Models available for provider: {provider}",
+        "ru": "Модели, доступные для провайдера: {provider}",
+    },
+    "settings_local_no_catalog": {
+        "en": (
+            "Local provider has no fixed catalog — pick `Custom…` and type "
+            "the model name your local server serves (e.g. `llama3.1`, `qwen2.5:7b`)."
+        ),
+        "ru": (
+            "У локального провайдера нет фиксированного каталога — выберите "
+            "«Своё…» и укажите имя модели, обслуживаемой вашим сервером "
+            "(например, `llama3.1`, `qwen2.5:7b`)."
+        ),
+    },
+    "provider_switch_cleared_models": {
+        "en": "Cleared stale model overrides: {keys}. Pick new ones from the menu.",
+        "ru": "Удалены устаревшие переопределения моделей: {keys}. Выберите новые в меню.",
     },
     "settings_keep_current": {"en": "(keep current)", "ru": "(оставить как есть)"},
     "settings_exit_row": {"en": "✕ Exit settings", "ru": "✕ Выйти из настроек"},
@@ -556,7 +608,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     # AI provider routing — exposed in `unread settings` so a multi-key
     # user can switch between OpenAI / Anthropic / Google / OpenRouter /
-    # local without re-running `unread tg init`.
+    # local without re-running `unread init`.
     "set_label_ai_provider": {"en": "Active chat provider", "ru": "Активный chat-провайдер"},
     "set_desc_ai_provider": {
         "en": "openai | openrouter | anthropic | google | local. Each provider's key lives in its own block.",
@@ -703,6 +755,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "→ --max-cost not enforced: pricing missing for one of the run's models.",
         "ru": "→ --max-cost не применяется: нет цены для одной из моделей.",
     },
+    "max_cost_pricing_missing_abort": {
+        "en": (
+            "✗ --max-cost requires pricing for the selected model(s) but pricing is missing. "
+            "Add an entry with `unread settings set pricing.chat.<model>.input <price>` "
+            "(and `.output <price>`), or pass --yes to override the guard."
+        ),
+        "ru": (
+            "✗ --max-cost требует цены для выбранной модели, но она отсутствует. "
+            "Добавьте через `unread settings set pricing.chat.<model>.input <price>` "
+            "(и `.output <price>`) либо передайте --yes, чтобы обойти проверку."
+        ),
+    },
+    "max_cost_pricing_missing_yes_override": {
+        "en": "→ --max-cost guard skipped (pricing missing, --yes override).",
+        "ru": "→ Проверка --max-cost пропущена (нет цены, использован --yes).",
+    },
     "run_anyway_q": {"en": "Run anyway?", "ru": "Запустить всё равно?"},
     # ---- Single-message analyze ----------------------------------------
     "msg_not_found_in_chat": {
@@ -794,6 +862,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Предупреждений: {warns}. Возможны ограничения функций.",
     },
     "doctor_all_ok": {"en": "All checks passed.", "ru": "Все проверки пройдены."},
+    "doctor_next_steps_header": {
+        "en": "Top items to address:",
+        "ru": "Что нужно поправить:",
+    },
+    "doctor_more_issues": {
+        "en": "(+{n} more — scroll up for the full list)",
+        "ru": "(ещё {n} — выше полный список)",
+    },
     "init_phone_prompt": {
         "en": "Phone number (international, e.g. +491711234567)",
         "ru": "Номер телефона (в международном формате, напр. +491711234567)",
@@ -912,6 +988,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "report_meta_enrichment": {"en": "**Enrichment:**", "ru": "**Обогащение:**"},
     "report_meta_enrichment_detail": {"en": "**Enrichment detail:**", "ru": "**Детали обогащения:**"},
+    "report_meta_redact": {
+        "en": "**PII redacted (LLM input only):**",
+        "ru": "**Скрыто PII (только во входе LLM):**",
+    },
     "report_meta_cost": {"en": "**Cost:**", "ru": "**Стоимость:**"},
     "report_meta_generated": {"en": "**Generated:**", "ru": "**Создано:**"},
     "report_meta_period_unread": {
@@ -1672,24 +1752,24 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "В DOCX нет извлекаемого текста (пустой документ?).",
     },
     "error_audio_no_openai": {
-        "en": "Audio transcription requires an OpenAI key (Whisper). Run `unread tg init` to add one — your chat provider can stay non-OpenAI.",
-        "ru": "Транскрибация аудио требует ключ OpenAI (Whisper). Запустите `unread tg init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
+        "en": "Audio transcription requires an OpenAI key (Whisper). Run `unread init` to add one — your chat provider can stay non-OpenAI.",
+        "ru": "Транскрибация аудио требует ключ OpenAI (Whisper). Запустите `unread init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
     },
     "error_audio_silent": {
         "en": "Transcription produced no text — file may be silent or unreadable.",
         "ru": "Транскрибация вернула пустой текст — возможно, файл молчит или повреждён.",
     },
     "error_video_no_openai": {
-        "en": "Video transcription requires an OpenAI key (Whisper). Run `unread tg init` to add one — your chat provider can stay non-OpenAI.",
-        "ru": "Транскрибация видео требует ключ OpenAI (Whisper). Запустите `unread tg init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
+        "en": "Video transcription requires an OpenAI key (Whisper). Run `unread init` to add one — your chat provider can stay non-OpenAI.",
+        "ru": "Транскрибация видео требует ключ OpenAI (Whisper). Запустите `unread init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
     },
     "error_video_silent": {
         "en": "Transcription produced no text — video may have no audio track. ffmpeg required for video files; install via `brew install ffmpeg` (macOS) or your distro's package manager.",
         "ru": "Транскрибация вернула пустой текст — возможно, у видео нет звуковой дорожки. Для видео нужен ffmpeg; установите через `brew install ffmpeg` (macOS) или менеджер пакетов вашей системы.",
     },
     "error_image_no_openai": {
-        "en": "Image description requires an OpenAI key (vision). Run `unread tg init` to add one — your chat provider can stay non-OpenAI.",
-        "ru": "Описание изображения требует ключ OpenAI (vision). Запустите `unread tg init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
+        "en": "Image description requires an OpenAI key (vision). Run `unread init` to add one — your chat provider can stay non-OpenAI.",
+        "ru": "Описание изображения требует ключ OpenAI (vision). Запустите `unread init`, чтобы добавить его — основной провайдер чата может оставаться не-OpenAI.",
     },
     "error_image_empty": {
         "en": "Vision model returned no description — try a different image.",
@@ -1701,8 +1781,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Сессия Telegram истекла или повреждена",
     },
     "tg_session_expired_hint": {
-        "en": "Re-authenticate with `unread tg init --force`. This will delete the local session file and start a fresh login.",
-        "ru": "Авторизуйтесь заново через `unread tg init --force`. Команда удалит локальный файл сессии и проведёт новый вход.",
+        "en": "Re-authenticate with `unread login --force`. This will delete the local session file and start a fresh login.",
+        "ru": "Авторизуйтесь заново через `unread login --force`. Команда удалит локальный файл сессии и проведёт новый вход.",
     },
     # ---- YouTube ------------------------------------------------------
     "youtube_fetch_failed": {
@@ -1728,8 +1808,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     # ---- YouTube Whisper / ffmpeg / audio errors ----------------------
     "youtube_whisper_no_openai": {
-        "en": "YouTube Whisper transcription needs an OpenAI key (your chat provider can stay non-OpenAI). Run `unread tg init` to add one, or pick `--youtube-source captions` to use the video's own captions only.",
-        "ru": "Транскрибация YouTube через Whisper требует ключ OpenAI (основной провайдер чата может оставаться не-OpenAI). Запустите `unread tg init`, чтобы добавить его, или используйте `--youtube-source captions` для работы только по субтитрам.",
+        "en": "YouTube Whisper transcription needs an OpenAI key (your chat provider can stay non-OpenAI). Run `unread init` to add one, or pick `--youtube-source captions` to use the video's own captions only.",
+        "ru": "Транскрибация YouTube через Whisper требует ключ OpenAI (основной провайдер чата может оставаться не-OpenAI). Запустите `unread init`, чтобы добавить его, или используйте `--youtube-source captions` для работы только по субтитрам.",
     },
     "error_ffmpeg_missing_youtube": {
         "en": "ffmpeg required to transcribe YouTube audio; install ffmpeg or update [media] ffmpeg_path.",

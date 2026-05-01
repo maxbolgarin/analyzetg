@@ -153,6 +153,13 @@ class AnalyzeCfg(_StrictCfg):
     # OSC 8-friendly for terminals that support it. Flip on if you're on
     # macOS Terminal.app or any other terminal without OSC 8 hyperlinks.
     plain_citations: bool = False
+    # When True, scrub phone numbers / emails / IBANs / Luhn-valid card
+    # numbers from the prompt that goes to the LLM. The DB rows and the
+    # saved Markdown report keep the originals — only the API payload
+    # is redacted. Off by default; flip on for a privacy-positive run.
+    # CLI: `--redact / --no-redact`. Cache key includes this so toggling
+    # busts cached results.
+    redact: bool = False
 
 
 class AskCfg(_StrictCfg):
@@ -364,7 +371,7 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
     explicitly during development.
 
     Layer 4 lets a user delete `~/.unread/.env` after the first
-    successful `unread tg init` and keep using the CLI — credentials
+    successful `unread init` and keep using the CLI — credentials
     are written into the session DB at init time and read back here.
     """
     _load_dotenv(default_env_path())

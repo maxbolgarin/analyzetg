@@ -36,7 +36,7 @@ def unread_home() -> Path:
     Resolution order (high → low):
       1. `UNREAD_HOME` env var (tests, dev, multi-profile installs).
       2. `~/.unread/install.toml` pointer file with a `home = "..."`
-         entry — written by `unread tg init` when the user picks
+         entry — written by `unread init` when the user picks
          "current folder" or "custom path". Empty / absent value falls
          through to the default.
       3. Default: `~/.unread/`.
@@ -44,7 +44,7 @@ def unread_home() -> Path:
     Defensive about pointer-file errors: a missing/corrupt TOML simply
     falls through to the default. We never want a bad pointer to
     surface as an exception — the user can always recover by deleting
-    the file and re-running `unread tg init`.
+    the file and re-running `unread init`.
     """
     override = os.environ.get("UNREAD_HOME")
     if override:
@@ -70,7 +70,7 @@ def write_install_pointer(home: Path | None) -> None:
 
     Pass `None` (or the default `~/.unread/` itself) to record the
     "default" choice as `home = ""` — its presence is the canonical
-    "setup has been done" marker that keeps subsequent `unread tg init`
+    "setup has been done" marker that keeps subsequent `unread init`
     runs from re-prompting for folder selection.
     """
     pointer = install_pointer_path()
@@ -78,7 +78,7 @@ def write_install_pointer(home: Path | None) -> None:
     # Default choice → empty value, so a future move of the pointer
     # subtree never accidentally redirects somewhere weird.
     target = "" if home is None else str(Path(home).expanduser().resolve())
-    body = f'# Written by `unread tg init`. Delete to re-pick the install folder.\nhome = "{target}"\n'
+    body = f'# Written by `unread init`. Delete to re-pick the install folder.\nhome = "{target}"\n'
     # Mode 0o600 from creation: the pointer doesn't carry secrets but
     # routing every secret-adjacent writer through the same helper
     # keeps the invariant uniform — no umask races anywhere in
@@ -113,7 +113,7 @@ def install_pointer_drift() -> tuple[bool, str]:
     except (OSError, ValueError):
         return (
             True,
-            f"{pointer} is unreadable / not valid TOML — delete it and re-run `unread tg init` to recreate.",
+            f"{pointer} is unreadable / not valid TOML — delete it and re-run `unread init` to recreate.",
         )
     home = data.get("home")
     if not home:

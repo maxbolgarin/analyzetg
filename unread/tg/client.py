@@ -97,16 +97,127 @@ def exit_session_expired() -> None:
     session corrupted, password change). The fix in both cases is the
     same wizard, but the copy needs to differ so the user knows it's a
     re-auth, not a fresh setup.
+
+    Also wipes the local session BEFORE printing — without this, the
+    `auth_key`-based status check in `is_session_authorized_sync` would
+    keep reading the stale-but-non-empty file and report "session
+    linked" on the very next `unread help` invocation, contradicting
+    the banner we just showed. The user has to re-auth anyway, so
+    pre-clearing matches what `unread login --force` would do.
     """
     import typer
     from rich.console import Console
 
     from unread.i18n import t as _t
 
+    _wipe_local_session()
     console = Console()
     console.print(f"[bold yellow]{_t('tg_session_expired_title')}[/]")
     console.print(_t("tg_session_expired_hint"))
     raise typer.Exit(1)
+
+
+async def offer_inline_tg_init(reason: str) -> bool:
+    """Offer to run `unread login` inline when a TG-needing command is blocked.
+
+    Returns ``True`` iff init ran to completion (caller should retry the
+    failing operation). Returns ``False`` iff the user declined; the
+    caller is expected to surface its original exit path. Caller is
+    responsible for the non-TTY check — this helper assumes a real
+    terminal is available, so it can be called from any retry loop
+    that already knows interactive prompts are safe.
+
+    `reason`:
+      - ``"missing_creds"`` — api_id / api_hash are blank.
+      - ``"session_expired"`` — creds present, on-disk session
+        unauthorized (revoked / corrupted / password rotated).
+
+    On accept, the function:
+
+    1. Wipes the local session for ``"session_expired"`` (init's
+       "session already valid" short-circuit would skip re-auth otherwise).
+    2. Runs ``cmd_init(scope="telegram_only")`` — same wizard
+       ``unread login`` uses, so persistence is identical.
+    3. Drops the settings singleton so the caller's retry picks up
+       freshly-written api_id / api_hash / session.
+
+    The retry coupling lives in ``tg_client``'s single one-shot loop,
+    not at every call site, so command code doesn't need to know about
+    inline init at all.
+    """
+    from rich.console import Console
+
+    from unread.config import reset_settings
+    from unread.util.prompt import confirm
+
+    console = Console()
+    if reason == "missing_creds":
+        console.print("[yellow]Telegram is not configured (api_id / api_hash missing).[/]")
+    else:
+        console.print("[yellow]Telegram session expired or invalid.[/]")
+
+    if not confirm("Run `unread login` now and continue?", default=True):
+        return False
+
+    # Deferred import to break the tg.client ↔ tg.commands cycle —
+    # tg.commands imports build_client from this module at top of file.
+    from unread.tg.commands import cmd_init
+
+    if reason == "session_expired":
+        _wipe_local_session()
+    await cmd_init(scope="telegram_only")
+    reset_settings()
+    return True
+
+
+def _wipe_local_session() -> None:
+    """Clear whichever session storage the active backend uses.
+
+    For the file-based backends (`db` / `keychain`) this unlinks both
+    Telethon session-file variants. For the passphrase backend it
+    clears the encrypted ``telegram.session_string`` slot in the
+    secrets table. Best-effort: any IO / keychain failure is logged
+    and swallowed so the friendly banner still gets printed.
+    """
+    import contextlib
+    from pathlib import Path
+
+    from unread.secrets_backend import BACKEND_PASSPHRASE, read_active_backend_sync
+
+    try:
+        s = get_settings()
+    except Exception as e:
+        log.warning("tg.session_wipe_settings_failed", err=str(e)[:200])
+        return
+
+    backend = read_active_backend_sync(s.storage.data_path)
+    if backend == BACKEND_PASSPHRASE:
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(s.storage.data_path)
+            try:
+                conn.execute(
+                    "DELETE FROM secrets WHERE key = ?",
+                    ("telegram.session_string",),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            log.warning("tg.session_wipe_passphrase_failed", err=str(e)[:200])
+        return
+
+    session_path = Path(s.telegram.session_path)
+    for candidate in (session_path, session_path.with_name(session_path.name + ".session")):
+        with contextlib.suppress(FileNotFoundError):
+            candidate.unlink()
+        # Telethon writes a `-journal` sidecar during transactions; clean
+        # it up too so a future status read can't accidentally resurrect
+        # the auth_key from a half-applied write.
+        for sidecar_suffix in ("-journal", "-wal", "-shm"):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                Path(str(candidate) + sidecar_suffix).unlink()
 
 
 def build_client(settings: Settings | None = None) -> TelegramClient:
@@ -164,14 +275,64 @@ async def tg_client(
     Raises :class:`TelegramSessionExpired` (a `RuntimeError` subclass) when
     `require_auth=True` and the local session is not authorized. Command
     boundaries catch that and emit `exit_session_expired()`.
+
+    Auto-init: in interactive shells, the first time we hit a missing
+    credentials / unauthorized session per command invocation we offer
+    to run ``unread login`` inline. If the user accepts and init
+    succeeds, we retry the connection once with the freshly written
+    creds / session. Non-TTY environments skip the offer and behave
+    exactly as before — see :func:`offer_inline_tg_init`.
     """
-    client = build_client(settings)
-    await client.connect()
+    from unread.util.prompt import _can_interact
+
+    can_offer_init = _can_interact()
+    s_param = settings  # may be None; will be re-resolved each attempt
+    client: TelegramClient | None = None
+    s: Settings | None = None
+    for attempt in range(2):
+        # Pre-flight: catch missing creds before `build_client` exits
+        # the process, so we can offer inline init instead. Skip the
+        # offer entirely in non-TTY environments (CI / piped runs /
+        # tests) — those keep the original exit path so behavior +
+        # exit codes stay identical to the pre-auto-init release.
+        s = s_param or get_settings()
+        if not s.telegram.api_id or not s.telegram.api_hash:
+            if attempt == 1 or not can_offer_init:
+                _exit_missing_telegram_credentials()  # raises typer.Exit
+            if not await offer_inline_tg_init("missing_creds"):
+                _exit_missing_telegram_credentials()
+            s_param = None  # force re-read after init
+            continue
+        try:
+            client = build_client(s)
+            await client.connect()
+            if require_auth and not await client.is_user_authorized():
+                # Disconnect before raising so we don't leak the
+                # connection (no `yield` happened, so the caller's
+                # `finally` block can't clean up for us).
+                await client.disconnect()
+                client = None
+                raise TelegramSessionExpired(
+                    "Telegram session is not authorized. Run `unread login --force`."
+                )
+            break  # success
+        except TelegramSessionExpired:
+            if attempt == 1 or not can_offer_init:
+                # Preserve the original contract — `_run` in cli.py
+                # catches this and renders the friendly banner.
+                raise
+            if not await offer_inline_tg_init("session_expired"):
+                # User declined the inline offer. Fall back to the
+                # historical exit path so the banner still prints.
+                exit_session_expired()
+            s_param = None
+            continue
+
+    assert client is not None and s is not None  # invariant from the loop
     # Telethon writes the session file on connect; it's auth-equivalent
     # so the file mode matters as much as the DB. Telethon respects
     # umask, so on a 022 system we'd land at 0o644 — readable by every
     # other local user. Tighten on every connect (idempotent).
-    s = settings or get_settings()
     from unread.util.fsmode import tighten
 
     session_path = s.telegram.session_path
@@ -179,8 +340,6 @@ async def tg_client(
         if candidate.exists():
             tighten(candidate)
     try:
-        if require_auth and not await client.is_user_authorized():
-            raise TelegramSessionExpired("Telegram session is not authorized. Run `unread tg init --force`.")
         yield client
     finally:
         # Encrypted-mode persistence: if Telethon rotated the auth

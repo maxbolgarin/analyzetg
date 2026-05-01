@@ -186,8 +186,9 @@ def test_wizard_exit_writes_nothing(isolated_home: Path, mock_telethon) -> None:
 
 
 def test_tg_init_skips_ai_provider_step(isolated_home: Path, mock_telethon) -> None:
-    """`unread tg init` (scope='telegram_only') jumps straight from folder
-    pick to the Telegram-credentials step — no provider menu, no key prompt."""
+    """`unread login` (scope='telegram_only') jumps straight from folder
+    pick to the Telegram-credentials step — no provider menu, no key prompt.
+    Was `unread tg init` before the `tg` subgroup was retired."""
     from unread.tg.commands import cmd_init
 
     # Folder=1, then Telegram api_id=12345, api_hash=abcdef. Note: NO
@@ -245,10 +246,10 @@ def test_wizard_short_circuits_when_already_configured(
     isolated_home: Path, mock_telethon, monkeypatch
 ) -> None:
     """install.toml + populated env → folder & Telegram-creds steps stay
-    silent; the AI provider step now fires unconditionally on full-scope
-    re-runs (the menu offers "Keep current" so the user can press Enter
-    through it). Only Telethon auth runs after that, no Telegram-creds
-    prompt because creds are already set.
+    silent; the AI provider step still fires on full-scope re-runs (the menu
+    offers "Keep current" so the user can press Enter through it). Telethon
+    auth runs and short-circuits via `is_user_authorized=True`, so no
+    phone-number confirm or prompt is surfaced.
     """
     _seed_pointer_at_default(isolated_home)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-set")
@@ -263,7 +264,8 @@ def test_wizard_short_circuits_when_already_configured(
     # AI menu fallback (non-TTY) renders a numeric prompt; "1" picks the
     # "Keep current" row that was prepended because the active provider
     # already has a key. That's the only typer.prompt() call the wizard
-    # should make. typer.confirm must not fire (Telegram creds are set).
+    # should make. typer.confirm must not fire — Telegram creds are set and
+    # Telethon reports authorized, so no login confirm is needed either.
     confirm_boom = MagicMock(side_effect=AssertionError("wizard should not confirm"))
     with (
         patch("typer.prompt", return_value="1"),

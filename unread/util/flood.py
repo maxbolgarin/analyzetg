@@ -60,8 +60,18 @@ def retry_on_flood(
                         f"Telegram FloodWait — sleeping {delay}s (attempt {attempt + 1}/{max_retries})…"
                     )
                     await asyncio.sleep(delay)
-            # Final attempt, no catch
-            return await fn(*args, **kwargs)
+            # Final attempt — convert FloodWaitError to a friendly RuntimeError
+            # so per-subscription handlers in runner.py can report the chat
+            # cleanly instead of letting a raw Telethon exception crash the
+            # whole `unread chats run`.
+            try:
+                return await fn(*args, **kwargs)
+            except FloodWaitError as e:
+                seconds = int(getattr(e, "seconds", 0))
+                log.error("tg.flood_wait.exhausted", seconds=seconds, retries=max_retries)
+                raise RuntimeError(
+                    f"Telegram rate-limited for {seconds}s after {max_retries} retries — try again later"
+                ) from e
 
         return inner
 

@@ -505,7 +505,7 @@ async def run_interactive_dump(
 
 
 async def run_interactive_describe() -> None:
-    """Default UX for `unread describe` (no ref, no filters): pick → show."""
+    """Default UX for `unread tg describe` (no ref, no filters): pick → show."""
     settings = get_settings()
     async with tg_client(settings) as client, open_repo(settings.storage.data_path):
         console.print(f"[bold cyan]{i18n_t('wiz_pick_chat_to_describe')}[/]")
@@ -550,6 +550,47 @@ def _period_to_cli_kwargs(answers: InteractiveAnswers) -> dict[str, Any]:
     return {}  # "unread" or anything else
 
 
+async def _ensure_tg_for_wizard() -> None:
+    """Run the inline-init offer NOW if Telegram isn't ready.
+
+    The wizard's `_collect_answers` opens a Telegram client to drive
+    the chat picker; without this preflight, a user with an expired
+    session would be asked to type a question (or click through wizard
+    steps) only to hit the session-expired prompt at the chat-picker
+    step. Doing the offer up-front means the user never types input
+    that's about to be thrown away.
+
+    Behavior:
+      - Already authorized → no-op.
+      - Non-TTY → no-op (let the existing tg_client error path fire,
+        same as before; the wizard isn't used in scripted contexts).
+      - TTY + missing creds / expired session → offer inline init;
+        on decline fall back to the historical exit banners.
+    """
+    from unread.tg.session_state import is_session_authorized_sync
+    from unread.util.prompt import _can_interact
+
+    s = get_settings()
+    creds_ok = bool(s.telegram.api_id and s.telegram.api_hash)
+    if creds_ok and is_session_authorized_sync(s):
+        return
+    if not _can_interact():
+        return
+
+    from unread.tg.client import (
+        _exit_missing_telegram_credentials,
+        exit_session_expired,
+        offer_inline_tg_init,
+    )
+
+    reason = "missing_creds" if not creds_ok else "session_expired"
+    if not await offer_inline_tg_init(reason):
+        if reason == "missing_creds":
+            _exit_missing_telegram_credentials()
+        else:
+            exit_session_expired()
+
+
 async def run_interactive_ask(
     *,
     question: str,
@@ -574,6 +615,13 @@ async def run_interactive_ask(
     picked scope. The wizard never builds the embeddings index or
     invokes --build-index — that's an explicit user decision.
     """
+    # Preflight Telegram BEFORE prompting for the question. Without this,
+    # the user types a question, the wizard then opens tg_client at the
+    # chat-picker step, and the user has to deal with the session-expired
+    # prompt holding a now-pointless typed question. Cheaper to gate up
+    # front: ready → continue silently; not ready → offer init now.
+    await _ensure_tg_for_wizard()
+
     # If no question was supplied (bare `unread ask`), prompt for one now.
     # `_collect_answers(mode="ask")` only uses the question for the
     # confirm-step summary; it doesn't ask the user for it.

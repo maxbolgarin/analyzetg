@@ -104,9 +104,11 @@ def test_missing_key_raises_with_friendly_message(provider: str, api_attr: str) 
     with pytest.raises(ProviderUnavailableError) as exc:
         make_chat_provider(s)
     msg = str(exc.value)
-    # Mentions the provider and the key field that's missing.
+    # Mentions the provider and points at the wizard. The wizard moved
+    # from `unread tg init` to plain `unread init` (the full wizard) when
+    # the `tg` subgroup was retired in favor of the magic-ref design.
     assert provider in msg.lower()
-    assert "unread tg init" in msg
+    assert "unread init" in msg
 
 
 # --- resolve_chat_model / resolve_filter_model --------------------------

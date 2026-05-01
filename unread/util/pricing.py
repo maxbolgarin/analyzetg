@@ -1,15 +1,30 @@
 """Cost estimation for OpenAI chat and audio usage.
 
-Prices live in config.toml; if a model isn't listed we log a warning and
-return None (cost) so the rest of the pipeline still completes.
+Prices live in config.toml first; for any model missing there we fall
+back to the curated catalog in `unread.ai.models` (refreshed 2026-05-01)
+so picking a brand-new catalog model from `unread settings` doesn't
+require also editing config.toml. A model unknown to both paths logs a
+warning and returns None — the pipeline still completes.
 """
 
 from __future__ import annotations
 
-from unread.config import Settings, get_settings
+from unread.ai.models import find_model
+from unread.config import ChatPricing, Settings, get_settings
 from unread.util.logging import get_logger
 
 log = get_logger(__name__)
+
+
+def chat_pricing_for(model: str, settings: Settings) -> ChatPricing | None:
+    """Look up `model` in user pricing, falling back to the curated catalog."""
+    row = settings.pricing.chat.get(model)
+    if row is not None:
+        return row
+    info = find_model(model)
+    if info is None or info.role == "audio":
+        return None
+    return ChatPricing(input=info.input_price, cached_input=info.cached_price, output=info.output_price)
 
 
 def chat_cost(
@@ -21,7 +36,7 @@ def chat_cost(
     settings: Settings | None = None,
 ) -> float | None:
     s = settings or get_settings()
-    row = s.pricing.chat.get(model)
+    row = chat_pricing_for(model, s)
     if row is None:
         log.warning("pricing.chat.unknown_model", model=model)
         return None
@@ -39,6 +54,10 @@ def chat_cost(
 def audio_cost(model: str, seconds: int | None, *, settings: Settings | None = None) -> float | None:
     s = settings or get_settings()
     per_min = s.pricing.audio.get(model)
+    if per_min is None:
+        info = find_model(model)
+        if info is not None and info.role == "audio":
+            per_min = info.input_price
     if per_min is None:
         log.warning("pricing.audio.unknown_model", model=model)
         return None

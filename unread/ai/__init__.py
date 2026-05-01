@@ -19,6 +19,13 @@ it's empty — see `unread/cli.py:_exit_missing_openai_credentials`.
 
 from __future__ import annotations
 
+from unread.ai.models import (
+    ModelInfo,
+    all_known_models,
+    find_model,
+    models_for_provider,
+    supported_providers,
+)
 from unread.ai.providers import (
     ChatProvider,
     ChatResult,
@@ -31,8 +38,13 @@ from unread.ai.providers import (
 __all__ = [
     "ChatProvider",
     "ChatResult",
+    "ModelInfo",
     "ProviderUnavailableError",
+    "all_known_models",
+    "find_model",
     "make_chat_provider",
+    "models_for_provider",
     "resolve_chat_model",
     "resolve_filter_model",
+    "supported_providers",
 ]

@@ -63,7 +63,13 @@ class Repo:
     @classmethod
     async def open(cls, path: Path | str) -> Repo:
         p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
+        # `mkdir(parents=True, exist_ok=True)` would inherit umask
+        # (typically 0o755 — group/world-traversable), and an upgrade
+        # from a pre-hardening install can leave a stale 0o755 dir
+        # behind. `ensure_private_dir` chmods to 0o700 either way.
+        from unread.util.fsmode import ensure_private_dir
+
+        ensure_private_dir(p.parent)
         conn = await aiosqlite.connect(p)
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")

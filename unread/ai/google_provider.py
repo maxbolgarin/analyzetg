@@ -74,7 +74,7 @@ class GoogleProvider:
             ) from e
         if not settings.google.api_key:
             raise ProviderUnavailableError(
-                "Google provider selected but `google.api_key` is empty. Run `unread tg init` to add one."
+                "Google provider selected but `google.api_key` is empty. Run `unread init` to add one."
             )
         self._client = genai.Client(api_key=settings.google.api_key)
         self._settings = settings

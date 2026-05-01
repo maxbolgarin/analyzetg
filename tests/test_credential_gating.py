@@ -175,3 +175,33 @@ def test_bare_unread_skips_prompt_when_already_initialized(monkeypatch, tmp_path
     # health check.
     assert "Status" in result.output
     assert "unread help" in result.output
+
+
+def test_bare_unread_skips_prompt_with_key_but_no_pointer(monkeypatch, tmp_path) -> None:
+    """Regression: working API key + missing install.toml pointer must NOT
+    surface the 'isn't set up yet' prompt.
+
+    Before the fix, `_is_uninitialized()` treated the pointer file as a
+    hard 'wizard ever ran' marker and triggered the setup prompt for
+    users who configured their install via env vars / `.env` / an
+    external secrets store (i.e. anyone whose path didn't go through
+    the wizard's folder-pick step). After the fix the decisive signal
+    is the active provider key — pointer presence is informational only.
+    """
+    from unread.cli import app
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    # Deliberately do NOT seed install.toml. Conftest's fake
+    # `OPENAI_API_KEY` is intact, so the credential check returns True.
+    from unread.config import reset_settings
+
+    reset_settings()
+
+    runner = CliRunner()
+    with patch("typer.confirm") as confirm:
+        result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.output
+    confirm.assert_not_called()
+    assert "isn't set up yet" not in result.output
+    assert "Status" in result.output

@@ -16,6 +16,7 @@ a year-of-history question, retrieval keeps the chunk small.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -90,6 +91,37 @@ _SYSTEM_PROMPT: dict[str, str] = {
 
 def _resolve_system_prompt(language: str) -> str:
     return _SYSTEM_PROMPT.get(language, _SYSTEM_PROMPT["en"])
+
+
+@asynccontextmanager
+async def _null_async_client():
+    """Async no-op replacement for `tg_client(...)`.
+
+    `cmd_ask` always opened a Telegram session even when the user just
+    wanted to query the local SQLite archive (no `--chat` / `--folder`).
+    Telegram is only actually needed when the user scopes the question
+    to a specific chat/folder; for the local-only path we swap in this
+    null context so the `async with ... as client` shape stays unchanged
+    and the per-flag branches that touch `client` remain correctly
+    guarded — they only fire when chat/folder is set anyway, which is
+    exactly when the real `tg_client` is opened.
+    """
+    yield None
+
+
+def _ask_needs_tg(*, chat: str | None, folder: str | None) -> bool:
+    """Decide whether `cmd_ask` needs a live Telegram session.
+
+    Telegram RPCs inside ask are reachable only via the chat- and
+    folder-scoped branches: `resolve_ref` (chat), `list_folders`
+    (folder), `_refresh_chats` (chat/folder + --refresh), enrichment
+    (chat/folder + enabled), and `_mark_as_read` (single-chat scope).
+    Every one of these is gated behind chat/folder being set, so a
+    single check covers them all. With neither flag, ask reads only
+    the local DB and skipping Telegram avoids the session-expired
+    dead-end on a YouTube-only / website-only / multi-archive corpus.
+    """
+    return chat is not None or folder is not None
 
 
 def _validate_scope_args(
@@ -221,52 +253,11 @@ async def cmd_ask(
         _print_first_run_banner("openai")
         raise typer.Exit(1)
 
-    _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
-
-    _no_scope = ref is None and chat is None and folder is None and not global_scope
-
-    # --refresh / --build-index require an explicit chat or folder scope;
-    # they're incompatible with the wizard (which can pick ALL_LOCAL) and
-    # with --global (which has no chat list to backfill / index). Fail-fast
-    # so the user doesn't waste a wizard run on a constraint that would
-    # only fail at the end.
-    if refresh and chat is None and folder is None and ref is None:
-        raise typer.BadParameter(
-            "--refresh requires <ref>, --chat, or --folder; refusing to backfill every synced dialog."
-        )
-    if build_index and chat is None and folder is None and ref is None:
-        raise typer.BadParameter(
-            "--build-index requires <ref>, --chat, or --folder; "
-            "refusing to embed every synced dialog at once."
-        )
-
-    # The wizard collects period / thread / with-comments interactively;
-    # accepting these flags too would silently drop or duplicate them.
-    if _no_scope:
-        forbidden_with_wizard: list[str] = []
-        if (
-            since is not None
-            or until is not None
-            or last_days is not None
-            or last_hours is not None
-            or last_minutes is not None
-        ):
-            forbidden_with_wizard.append("--since/--until/--last-days/--last-hours/--last-minutes")
-        if thread is not None:
-            forbidden_with_wizard.append("--thread")
-        if with_comments:
-            forbidden_with_wizard.append("--with-comments")
-        if forbidden_with_wizard:
-            raise typer.BadParameter(
-                f"Cannot use {' / '.join(forbidden_with_wizard)} without a scope; "
-                "pass <ref> / --chat / --folder / --global, or drop these flags "
-                "and let the wizard collect them."
-            )
-
-    # No scope → drop into the wizard. The wizard handles the question
-    # (prompts if empty) and the scope decision (chat picker / ALL_LOCAL),
-    # then dispatches back into cmd_ask with both populated.
-    if _no_scope:
+    # `tg` is the magic ref token: route to the interactive picker wizard.
+    # Treating it before `_validate_scope_args` keeps the wizard reachable
+    # even when the user passes other scope flags (the wizard ignores
+    # them — picking from the chat list overrides whatever was on the CLI).
+    if ref == "tg":
         from unread.interactive import run_interactive_ask
 
         return await run_interactive_ask(
@@ -285,6 +276,34 @@ async def cmd_ask(
             language=language,
             content_language=content_language,
             mark_read=mark_read,
+        )
+
+    _validate_scope_args(ref=ref, chat=chat, folder=folder, global_scope=global_scope)
+
+    _no_scope = ref is None and chat is None and folder is None and not global_scope
+
+    # --refresh / --build-index require an explicit chat or folder scope;
+    # they're incompatible with --global (no chat list to backfill / index).
+    if refresh and chat is None and folder is None and ref is None:
+        raise typer.BadParameter(
+            "--refresh requires <ref>, --chat, or --folder; refusing to backfill every synced dialog."
+        )
+    if build_index and chat is None and folder is None and ref is None:
+        raise typer.BadParameter(
+            "--build-index requires <ref>, --chat, or --folder; "
+            "refusing to embed every synced dialog at once."
+        )
+
+    if _no_scope:
+        # No scope, no ref, no `tg` token → refuse to guess. Pre-fix
+        # this fell through to a wizard that opened a Telegram client
+        # and surprised users with a session prompt for a command they
+        # thought was a quick question against the local archive.
+        # Direct them at `tg` (the picker) or `--global` (local archive).
+        raise typer.BadParameter(
+            "Need a ref or scope. Use `tg` for the interactive chat picker, "
+            "an @user / t.me link / numeric id for one chat, "
+            "`--folder NAME` for a folder, or `--global` to query every synced chat in the local DB."
         )
 
     # Scope is set; an empty question here is a user error.
@@ -323,7 +342,13 @@ async def cmd_ask(
     ).lower()
     since_dt, until_dt = compute_window(since, until, last_days, last_hours, last_minutes)
 
-    async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
+    # Skip the Telegram open when the request is fully local — see
+    # `_ask_needs_tg` for the rule. Without this guard, every `unread
+    # ask "..."` against the local archive triggered a session check
+    # and died on the "session expired" banner even though no Telegram
+    # RPC would actually have been issued.
+    _client_cm = tg_client(settings) if _ask_needs_tg(chat=chat, folder=folder) else _null_async_client()
+    async with _client_cm as client, open_repo(settings.storage.data_path) as repo:
         # Resolve scope.
         chat_ids: list[int] | None = None
         chat_titles: dict[int, str] = {}
@@ -450,7 +475,7 @@ async def cmd_ask(
             if not settings.openai.api_key:
                 console.print(
                     "[yellow]Embeddings (`ask --semantic --build-index`) need an OpenAI key.[/] "
-                    "Run `unread tg init` and add one (chat provider can stay non-OpenAI)."
+                    "Run `unread init` and add one (chat provider can stay non-OpenAI)."
                 )
                 raise typer.Exit(1)
 
@@ -469,6 +494,10 @@ async def cmd_ask(
                 oai=embed_client,
                 chat_ids=chat_ids,
                 model=embed_model,
+                # Without --yes, surface a cost heads-up for big backfills
+                # (>5k messages) so a power user with hundreds of synced
+                # chats doesn't incur a surprise bill on first run.
+                confirm=not yes,
             )
             if written:
                 console.print(f"[green]{_tf('ask_indexed_n', n=written)}[/]")
@@ -684,7 +713,7 @@ async def _run_single_turn(
         if not settings.openai.api_key:
             console.print(
                 "[yellow]Semantic retrieval (`ask --semantic`) needs an OpenAI key.[/] "
-                "Run `unread tg init` to add one (chat provider can stay non-OpenAI)."
+                "Run `unread init` to add one (chat provider can stay non-OpenAI)."
             )
             raise typer.Exit(1)
         console.print(

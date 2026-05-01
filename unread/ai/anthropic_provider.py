@@ -44,9 +44,11 @@ def _split_system_and_messages(messages: list[dict[str, str]]) -> tuple[str, lis
 
 class AnthropicProvider:
     name = "anthropic"
-    # Sensible defaults as of the SDK / model lineup at the time of
-    # writing; the user can switch via `ai.chat_model` / `ai.filter_model`.
-    default_chat_model = "claude-sonnet-4-5"
+    # Defaults track the current generally-available lineup (refreshed
+    # 2026-05-01). The user can switch via `ai.chat_model` /
+    # `ai.filter_model`; the full per-provider catalog lives in
+    # `unread.ai.models`.
+    default_chat_model = "claude-sonnet-4-6"
     default_filter_model = "claude-haiku-4-5"
 
     def __init__(self, settings) -> None:  # type: ignore[no-untyped-def]
@@ -60,7 +62,7 @@ class AnthropicProvider:
         if not settings.anthropic.api_key:
             raise ProviderUnavailableError(
                 "Anthropic provider selected but `anthropic.api_key` is empty. "
-                "Run `unread tg init` to add one."
+                "Run `unread init` to add one."
             )
         # `max_retries` makes the SDK transparently re-issue the call on
         # `RateLimitError` / `APIConnectionError` / 5xx with exponential

@@ -109,10 +109,13 @@ def _file_id_for_path(path: Path) -> str:
         canonical = path.resolve()
     except OSError:
         canonical = path
+    # 16 hex chars = 64 bits. Birthday-bound 50% collision at ~4B paths,
+    # safe for any realistic single-user file history. Don't shorten.
     return hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
 
 
 def _file_id_for_stdin(content: bytes) -> str:
+    # 64-bit hex (see `_file_id_for_path`).
     return hashlib.sha256(content).hexdigest()[:16]
 
 
