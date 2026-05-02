@@ -6,9 +6,24 @@ import csv
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from unread.analyzer.formatter import format_messages
 from unread.models import Message
+
+# CSV "formula injection" defense (OWASP). Excel / LibreOffice / Numbers
+# evaluate any cell whose first character is one of these as a formula.
+# A Telegram message starting with `=cmd|'/c calc'!A0` would open calc.exe
+# when the exported CSV is opened in Excel. Prefix such cells with a
+# single quote so the spreadsheet renders the literal text.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: Any) -> Any:
+    """Defang an outgoing CSV cell against spreadsheet formula injection."""
+    if isinstance(value, str) and value and value[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
 
 
 def render_md(msgs: list[Message], *, title: str | None, language: str = "en") -> str:
@@ -112,17 +127,17 @@ def export_csv(msgs: list[Message], output: Path) -> None:
                     m.thread_id,
                     m.date.isoformat(),
                     m.sender_id,
-                    m.sender_name,
-                    m.text,
+                    _csv_safe(m.sender_name),
+                    _csv_safe(m.text),
                     m.reply_to,
-                    m.forward_from,
+                    _csv_safe(m.forward_from),
                     m.media_type,
                     m.media_doc_id,
                     m.media_duration,
-                    m.transcript,
-                    m.image_description,
-                    m.extracted_text,
-                    links_flat,
+                    _csv_safe(m.transcript),
+                    _csv_safe(m.image_description),
+                    _csv_safe(m.extracted_text),
+                    _csv_safe(links_flat),
                 ]
             )
     _tighten(output)

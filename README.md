@@ -29,7 +29,7 @@ enrichment is enabled — the URLs shared in your chats.
 
 ```bash
 # First time — initializes ~/.unread/ and logs in to Telegram.
-unread tg init
+unread init
 
 # Most common: interactive wizard — pick a chat, pick a preset, done
 unread                            # pick chat → preset → period → enrich → run
@@ -67,7 +67,7 @@ unread dump @somegroup -o history.md --last-days 30
 # Help — `--help` and `help` both work; `help <cmd>` walks subcommands.
 unread help
 unread help describe
-unread help tg init
+unread help init
 ```
 
 ---
@@ -150,7 +150,6 @@ After a `git pull` that adds new Python dependencies, refresh with
 
 ```bash
 unread init           # full wizard: install folder + AI provider + Telegram (optional)
-unread tg init        # Telegram-only: skip the AI provider step
 ```
 
 Or just type `unread` — when nothing's set up yet, it prompts to run
@@ -180,7 +179,7 @@ On a fresh install this is a four-step interactive wizard:
    > **Capability gaps.** Whisper / embeddings / vision are OpenAI-only.
    > If you pick Anthropic / Google / OpenRouter / Local as your chat
    > provider but also want media transcription or `--semantic`
-   > retrieval, run `unread tg init` again and add an OpenAI key
+   > retrieval, run `unread init` again and add an OpenAI key
    > alongside — the chat provider stays unchanged. Without one, those
    > features skip with a one-line warning.
 3. **Telegram login** (optional). Answer `y` to set up `api_id` /
@@ -193,7 +192,7 @@ On a fresh install this is a four-step interactive wizard:
    and the CLI keeps working.
 
 Re-run `unread init` to fill in any step you skipped — only the
-unsatisfied steps prompt. `unread init --force` (or `unread tg init
+unsatisfied steps prompt. `unread init --force` (or `unread init
 --force`) re-runs Telethon auth (useful when switching accounts)
 without re-prompting for folder or keys; to re-pick the install folder,
 delete `~/.unread/install.toml` first.
@@ -206,7 +205,7 @@ TELEGRAM_API_HASH=abcdef0123456789abcdef0123456789
 OPENAI_API_KEY=sk-...
 ```
 
-Then `unread tg init` skips the wizard prompts and goes straight to
+Then `unread init` skips the wizard prompts and goes straight to
 Telethon auth. The `.env` values continue to win over anything
 persisted in the secrets DB, so rotating a key only needs an `.env`
 edit.
@@ -390,10 +389,9 @@ doesn't replace it.
 | Command | Purpose |
 |---|---|
 | `unread [<ref>] [flags]` | Analyze a chat (default action). No args → interactive wizard. |
-| `unread tg [<ref>] [flags]` / `unread telegram [<ref>] [flags]` | Same as the bare form, but auto-runs `tg init` if no Telegram session exists. |
-| `unread init [--force]` | Full interactive setup: install folder, AI provider + key, optional Telegram login. |
-| `unread tg init [--force]` | Telegram-only setup: skip the AI step. `--force` wipes the saved session before logging in. |
-| `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help tg describe`, `unread help tg init`. |
+| `unread tg [<ref>] [flags]` / `unread telegram [<ref>] [flags]` | Same as the bare form, but auto-runs `init` if no Telegram session exists. |
+| `unread init [--force]` | Full interactive setup: install folder, AI provider + key, optional Telegram login. `--force` wipes the saved session before logging in. |
+| `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help tg`, `unread help init`. |
 | `unread tg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
 | `unread ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
 | `unread dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
@@ -1383,17 +1381,17 @@ every secret masked.
 
 | Symptom | Fix |
 |---|---|
-| `Telegram session expired` / asks for code on every run | `unread tg init --force` (re-runs Telethon auth without re-prompting for keys) |
+| `Telegram session expired` / asks for code on every run | `unread init --force` (re-runs Telethon auth without re-prompting for keys) |
 | `yt-dlp DownloadError` (private / region-locked / format change) | `uv tool upgrade unread` — yt-dlp tracks YouTube changes; running an outdated wheel breaks first |
 | `ffmpeg not found` | Install per the platform table above; `unread doctor` confirms detection |
-| `OPENAI_API_KEY missing` but you set it elsewhere | The CLI reads `~/.unread/.env`, not `~/.zshrc`. Either edit `~/.unread/.env` or run `unread tg init` to persist via the wizard |
+| `OPENAI_API_KEY missing` but you set it elsewhere | The CLI reads `~/.unread/.env`, not `~/.zshrc`. Either edit `~/.unread/.env` or run `unread init` to persist via the wizard |
 | `attempt to write a readonly database` | `chmod -R 700 ~/.unread/storage` — the install dir lost write perms (sudo install, restored backup with wrong owner) |
 | `storage permissions overpermissive` (doctor warning) | Run the `chmod 700 … && chmod 600 …` line printed by doctor — older installs predate the 0o700 hardening |
 | Cost reports look truncated / `unread stats` shows zeros | `unread cache stats` to confirm the prompt cache is hitting (hit-rate table at the bottom); if not, verify `[pricing]` covers your model in `~/.unread/config.toml` |
 | Cache directory is huge | `unread cache stats` then `unread cache purge --older-than 30d --vacuum` |
 | Migrating to a new install dir / moved `~/.unread/` | Set `UNREAD_HOME=/new/path` or run `unread migrate` from the old folder |
 | Russian locale, English `--help` | Currently English help only; full localization is on the [roadmap](ROADMAP.md) |
-| Want to start fresh | Delete `~/.unread/storage/data.sqlite` and re-run `unread tg init` — credentials persist in `data.sqlite::secrets`, so this resets cache + analysis runs while keeping or refreshing keys |
+| Want to start fresh | Delete `~/.unread/storage/data.sqlite` and re-run `unread init` — credentials persist in `data.sqlite::secrets`, so this resets cache + analysis runs while keeping or refreshing keys |
 
 For anything else: `unread bug-report > report.txt` and paste into a
 new issue at <https://github.com/maxbolgarin/unread/issues>.

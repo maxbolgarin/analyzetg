@@ -135,6 +135,12 @@ class MediaCfg(_StrictCfg):
     download_concurrency: int = 3
     tmp_dir: Path = Field(default_factory=default_media_dir)
     ffmpeg_path: str = "ffmpeg"
+    # Skip downloads above this size (MiB). Telegram permits up to 4 GB
+    # per file; without a cap, `unread download-media` against a chat
+    # with a few large videos silently fills the user's reports/ disk.
+    # 0 disables the check; default 500 MiB is generous for typical
+    # photo/voice/document workloads but well below disaster.
+    max_download_mb: int = 500
 
 
 class AnalyzeCfg(_StrictCfg):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from unread.ai.models import find_model
 from unread.analyzer.formatter import format_messages
 from unread.models import Chunk, Message
 from unread.util.logging import get_logger
@@ -11,22 +12,36 @@ from unread.util.tokens import count_tokens
 
 log = get_logger(__name__)
 
-# Context window estimates. Real limits can differ per model; we err conservatively.
+# Legacy fallback table for OpenAI ids predating the per-provider catalog
+# in unread/ai/models.py. New entries should land in `ai/models.py` as a
+# `ModelInfo.context_window=` instead, so the chunker, settings picker,
+# and pricing table all read from the same source.
 MODEL_CONTEXT: dict[str, int] = {
-    "gpt-4o": 128_000,
-    "gpt-4o-mini": 128_000,
     "gpt-4.1": 128_000,
     "o3-mini": 128_000,
     "gpt-5": 200_000,
-    "gpt-5.4": 1_000_000,
-    "gpt-5.4-mini": 400_000,
-    "gpt-5.4-nano": 400_000,
 }
 
 _UNKNOWN_MODEL_WARNED: set[str] = set()
 
 
 def model_context_window(model: str) -> int:
+    """Return the input-context window for `model`, defaulting to 128k.
+
+    Lookup order:
+      1. `ai.models.find_model()` — covers OpenAI / Anthropic / Google
+         / OpenRouter ids registered in the per-provider catalog.
+      2. Legacy `MODEL_CONTEXT` table for any older alias.
+      3. 128k fallback with a one-time warning.
+
+    Without (1), every Claude / Gemini id silently fell to 128k — the
+    chunker over-chunked Opus 4.7 (1M ctx) by ~8x, multiplying both
+    spend and wall time. The warning fires once per unknown model id
+    per process so log volume stays sane.
+    """
+    info = find_model(model)
+    if info is not None and info.context_window > 0:
+        return info.context_window
     if model in MODEL_CONTEXT:
         return MODEL_CONTEXT[model]
     if model not in _UNKNOWN_MODEL_WARNED:
@@ -35,7 +50,7 @@ def model_context_window(model: str) -> int:
             "chunker.unknown_model",
             model=model,
             fallback=128_000,
-            hint="add the model to unread/analyzer/chunker.py::MODEL_CONTEXT",
+            hint="register the model in unread/ai/models.py with a context_window",
         )
     return 128_000
 

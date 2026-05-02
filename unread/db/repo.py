@@ -75,6 +75,13 @@ class Repo:
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA foreign_keys=ON")
         await conn.execute("PRAGMA synchronous=NORMAL")
+        # Concurrent invocations (e.g. `unread sync` in one shell while
+        # `unread ask` runs in another — a documented use case) race
+        # the writer. Without this pragma the second writer raises
+        # "database is locked" after aiosqlite's default 5s wait.
+        # 15s is well above any realistic transaction time and short
+        # enough that a stuck writer doesn't hang the user forever.
+        await conn.execute("PRAGMA busy_timeout=15000")
         repo = cls(conn, p)
         try:
             await repo._apply_schema()

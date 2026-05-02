@@ -128,21 +128,39 @@ class GoogleProvider:
                     f"Gemini {code} — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})…"
                 )
                 await asyncio.sleep(delay)
-        assert resp is not None  # loop either returns or raises
+        # The retry loop above either `break`s on success or `raise`s on
+        # final failure. `assert` would be stripped under `python -O`,
+        # so use an explicit guard instead.
+        if resp is None:
+            raise RuntimeError("Gemini call exhausted retries without a response")
 
-        # `resp.text` is the convenience accessor; falls back to
-        # walking candidates[0].content.parts when None.
-        text = resp.text or ""
+        finish_reason = ""
+        candidates = getattr(resp, "candidates", None) or []
+        if candidates:
+            finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
+
+        # Gemini sets `finish_reason` to `SAFETY` / `RECITATION` / `OTHER`
+        # when it refuses to emit content; in those cases `resp.text`
+        # *raises* a `ValueError` rather than returning empty. Without
+        # the try-block, a single safety-blocked chunk crashed the
+        # entire map-reduce gather. Surface it as empty text + a
+        # warning, mark `truncated=False` so the orchestrator doesn't
+        # retry with a doubled budget (which would refuse identically).
+        try:
+            text = resp.text or ""
+        except (ValueError, AttributeError) as e:
+            log.warning(
+                "google.refusal",
+                finish_reason=finish_reason or "unknown",
+                err=type(e).__name__,
+            )
+            text = ""
 
         usage = getattr(resp, "usage_metadata", None)
         prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
         completion_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
         cached_tokens = int(getattr(usage, "cached_content_token_count", 0) or 0)
 
-        finish_reason = ""
-        candidates = getattr(resp, "candidates", None) or []
-        if candidates:
-            finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
         truncated = finish_reason.upper().endswith("MAX_TOKENS")
 
         return ChatResult(

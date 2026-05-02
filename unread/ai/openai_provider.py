@@ -25,6 +25,22 @@ from unread.ai.trust import enforce_base_url_trust
 from unread.util.flood import retry_on_429
 
 
+def _is_reasoning_model(model: str) -> bool:
+    """True when `model` is an OpenAI reasoning-class model that rejects
+    custom `temperature`.
+
+    Covers the o-series (`o1`, `o3`, `o4-mini`, etc.) and the gpt-5
+    family. Provider-prefixed OpenRouter ids (`openai/gpt-5.4`) are
+    matched by suffix so the same predicate works for both adapters.
+    Match is permissive — accidentally dropping temperature for a
+    non-reasoning model is harmless (defaults to 1.0 server-side),
+    while incorrectly *forwarding* temperature to a reasoning model
+    400s the request.
+    """
+    name = model.rsplit("/", 1)[-1].lower()
+    return name.startswith("o1") or name.startswith("o3") or name.startswith("o4") or name.startswith("gpt-5")
+
+
 class _OpenAICompatBase:
     """Shared `AsyncOpenAI` plumbing.
 
@@ -57,12 +73,19 @@ class _OpenAICompatBase:
         # models). Older OpenAI-compat servers still accept it; the few
         # that don't are local-model bridges that vary by version, and
         # the user can fall back by editing the local server's config.
-        return await self._client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=max_tokens,
-            temperature=temperature,
-        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": max_tokens,
+        }
+        # OpenAI's reasoning model family (gpt-5, gpt-5.4, o1, o3, ...)
+        # rejects any `temperature` other than the default 1.0 with a
+        # 400. Drop the parameter for those models so the wired-in
+        # default of 0.2 (config.py) doesn't silently 4xx every chat
+        # call when the user picks the catalog default `gpt-5.4-mini`.
+        if not _is_reasoning_model(model):
+            kwargs["temperature"] = temperature
+        return await self._client.chat.completions.create(**kwargs)
 
     async def chat(
         self,

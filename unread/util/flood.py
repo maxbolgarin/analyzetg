@@ -35,6 +35,14 @@ def _user_visible_retry_status(message: str) -> None:
         pass
 
 
+# Cap for any single FloodWait sleep. Telegram occasionally returns
+# 24h+ FloodWait values (banned account, channel-level limit). Without
+# a cap, the runner blocks silently for hours. Surface a RuntimeError
+# instead so the per-subscription handler in runner.py can move on to
+# the next chat.
+_MAX_FLOOD_WAIT_SEC = 600
+
+
 def retry_on_flood(
     max_retries: int = 10,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
@@ -42,7 +50,9 @@ def retry_on_flood(
 
     Other exceptions propagate immediately. Users see a one-line
     "FloodWait — sleeping {n}s" status on each retry so a 30-second
-    pause doesn't look like a frozen process.
+    pause doesn't look like a frozen process. Sleeps over
+    `_MAX_FLOOD_WAIT_SEC` are converted to a RuntimeError so the runner
+    can move to the next chat instead of blocking for hours.
     """
 
     def wrap(fn: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
@@ -54,7 +64,18 @@ def retry_on_flood(
                 try:
                     return await fn(*args, **kwargs)
                 except FloodWaitError as e:
-                    delay = int(getattr(e, "seconds", 1)) + 1
+                    seconds = int(getattr(e, "seconds", 1))
+                    if seconds > _MAX_FLOOD_WAIT_SEC:
+                        log.error(
+                            "tg.flood_wait.too_long",
+                            seconds=seconds,
+                            cap=_MAX_FLOOD_WAIT_SEC,
+                        )
+                        raise RuntimeError(
+                            f"Telegram FloodWait of {seconds}s exceeds the {_MAX_FLOOD_WAIT_SEC}s "
+                            "cap — try again later"
+                        ) from e
+                    delay = seconds + 1
                     log.warning("tg.flood_wait", delay=delay, attempt=attempt + 1)
                     _user_visible_retry_status(
                         f"Telegram FloodWait — sleeping {delay}s (attempt {attempt + 1}/{max_retries})…"
@@ -127,18 +148,28 @@ def retry_on_429(
 
 
 class RateLimiter:
-    """Simple rolling-minute token bucket for Telegram read throttle."""
+    """Simple rolling-minute token bucket for Telegram read throttle.
+
+    `acquire` is invoked from multiple coroutines concurrently
+    (`asyncio.gather` over chats in `_refresh_chats`, parallel workers
+    in `save_raw_media`). Without the lock, two coroutines can each
+    rebuild `_hits` and `append` simultaneously — the rebuild loses
+    one hit and the bucket lets through more requests than `max`,
+    which is exactly the over-acquire that triggers a Telegram flood.
+    """
 
     def __init__(self, max_per_minute: int) -> None:
         self._max = max(1, int(max_per_minute))
         self._hits: list[float] = []
+        self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        loop = asyncio.get_event_loop()
-        now = loop.time()
-        self._hits = [t for t in self._hits if now - t < 60]
-        if len(self._hits) >= self._max:
-            sleep = 60 - (now - self._hits[0]) + 0.05
-            if sleep > 0:
-                await asyncio.sleep(sleep)
-        self._hits.append(loop.time())
+        async with self._lock:
+            loop = asyncio.get_event_loop()
+            now = loop.time()
+            self._hits = [t for t in self._hits if now - t < 60]
+            if len(self._hits) >= self._max:
+                sleep = 60 - (now - self._hits[0]) + 0.05
+                if sleep > 0:
+                    await asyncio.sleep(sleep)
+            self._hits.append(loop.time())

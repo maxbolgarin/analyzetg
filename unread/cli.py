@@ -809,9 +809,7 @@ def _print_config_status() -> None:
     if authorized:
         tg_line = f"  [bold]Telegram:[/] {_mark(True)} session linked"
     elif creds_present:
-        tg_line = (
-            "  [bold]Telegram:[/] [yellow]creds set, not logged in[/]  [grey70](run `unread login`)[/]"
-        )
+        tg_line = "  [bold]Telegram:[/] [yellow]creds set, not logged in[/]  [grey70](run `unread login`)[/]"
     else:
         tg_line = f"  [bold]Telegram:[/] {_mark(False)} not configured"
     rows.append(tg_line)
@@ -2647,8 +2645,7 @@ def ask(
     question: str | None = typer.Argument(
         None,
         help=(
-            "Free-form question, in any language. Omit when ref is `tg` and "
-            "the wizard will prompt for it."
+            "Free-form question, in any language. Omit when ref is `tg` and the wizard will prompt for it."
         ),
     ),
     chat: str | None = typer.Option(
