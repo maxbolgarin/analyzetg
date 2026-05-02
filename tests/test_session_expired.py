@@ -137,8 +137,6 @@ def test_exit_session_expired_clears_passphrase_session_string(tmp_path, monkeyp
         exit_session_expired()
 
     conn = sqlite3.connect(str(db_path))
-    rows = conn.execute(
-        "SELECT value FROM secrets WHERE key = ?", ("telegram.session_string",)
-    ).fetchall()
+    rows = conn.execute("SELECT value FROM secrets WHERE key = ?", ("telegram.session_string",)).fetchall()
     conn.close()
     assert rows == [], "encrypted session-string slot should have been cleared"

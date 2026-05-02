@@ -87,12 +87,19 @@ def setup_logging(verbose: bool = False) -> None:
         os.environ["UNREAD_VERBOSE"] = "1"
     level = logging.DEBUG if verbose or os.environ.get("UNREAD_DEBUG") else logging.INFO
 
+    # Rich tracebacks render local variables — including any passphrase
+    # / API key still on the stack — to the terminal on any unhandled
+    # exception. The structlog redactor only walks top-level event-dict
+    # keys, so a Rich traceback bypasses it. Gate the feature behind
+    # `verbose=True` (or `UNREAD_VERBOSE=1`) so production runs default
+    # to the safe boring traceback that doesn't print locals.
+    rich_tracebacks_enabled = bool(verbose or os.environ.get("UNREAD_VERBOSE"))
     handler = RichHandler(
         console=console,
         show_time=True,
         show_path=False,
         markup=False,
-        rich_tracebacks=True,
+        rich_tracebacks=rich_tracebacks_enabled,
     )
     root = logging.getLogger()
     root.handlers.clear()

@@ -61,8 +61,7 @@ class AnthropicProvider:
             ) from e
         if not settings.anthropic.api_key:
             raise ProviderUnavailableError(
-                "Anthropic provider selected but `anthropic.api_key` is empty. "
-                "Run `unread init` to add one."
+                "Anthropic provider selected but `anthropic.api_key` is empty. Run `unread init` to add one."
             )
         # `max_retries` makes the SDK transparently re-issue the call on
         # `RateLimitError` / `APIConnectionError` / 5xx with exponential
@@ -85,11 +84,15 @@ class AnthropicProvider:
         temperature: float,
     ) -> ChatResult:
         system_prompt, rest = _split_system_and_messages(messages)
-        # Anthropic requires `messages` non-empty. If the formatter
-        # only produced a system entry (rare; defensive only), inject
-        # a placeholder user turn so the call doesn't fail validation.
+        # Anthropic requires `messages` non-empty AND each `content`
+        # block non-empty — an empty string raises 400
+        # ("messages.0.content: at least one message content block is
+        # required"). The formatter always produces a populated user
+        # message in practice; this is the defensive fallback for
+        # unusual call sites (e.g. rerank prompt). Use a single space
+        # so the API accepts it; the placeholder costs ~1 token.
         if not rest:
-            rest = [{"role": "user", "content": ""}]
+            rest = [{"role": "user", "content": " "}]
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,

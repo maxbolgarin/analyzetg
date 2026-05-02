@@ -39,18 +39,26 @@ class ModelInfo:
     input_price: float = 0.0  # $ / 1M tokens (or $ / minute for audio)
     cached_price: float = 0.0  # $ / 1M tokens
     output_price: float = 0.0  # $ / 1M tokens
+    # Effective input-context window in tokens. 0 means "unknown — use the
+    # 128k fallback". Wired through `model_context_window()` so the
+    # chunker sizes prompts correctly for Claude / Gemini, not just
+    # OpenAI. Refreshed against vendor docs 2026-05-01.
+    context_window: int = 0
 
 
 # ----------------------- OpenAI (refreshed 2026-05-01) ---------------------
 
 _OPENAI_MODELS: tuple[ModelInfo, ...] = (
-    ModelInfo("gpt-5.5", "GPT-5.5 — flagship (1M ctx)", "chat", 5.00, 0.50, 30.00),
-    ModelInfo("gpt-5.4", "GPT-5.4 — heavy reasoning", "chat", 2.50, 0.25, 15.00),
-    ModelInfo("gpt-5.4-mini", "GPT-5.4 mini — balanced", "chat", 0.75, 0.075, 4.50),
-    ModelInfo("gpt-5.4-nano", "GPT-5.4 nano — cheapest", "filter", 0.20, 0.02, 1.25),
-    ModelInfo("gpt-4o", "GPT-4o — previous gen", "chat", 2.50, 1.25, 10.00),
-    ModelInfo("gpt-4o-mini", "GPT-4o mini — vision default", "vision", 0.15, 0.075, 0.60),
-    # Audio. `input_price` carries $/minute; cached/output are unused.
+    ModelInfo("gpt-5.5", "GPT-5.5 — flagship (1M ctx)", "chat", 5.00, 0.50, 30.00, context_window=1_000_000),
+    ModelInfo("gpt-5.4", "GPT-5.4 — heavy reasoning", "chat", 2.50, 0.25, 15.00, context_window=1_000_000),
+    ModelInfo("gpt-5.4-mini", "GPT-5.4 mini — balanced", "chat", 0.75, 0.075, 4.50, context_window=400_000),
+    ModelInfo("gpt-5.4-nano", "GPT-5.4 nano — cheapest", "filter", 0.20, 0.02, 1.25, context_window=400_000),
+    ModelInfo("gpt-4o", "GPT-4o — previous gen", "chat", 2.50, 1.25, 10.00, context_window=128_000),
+    ModelInfo(
+        "gpt-4o-mini", "GPT-4o mini — vision default", "vision", 0.15, 0.075, 0.60, context_window=128_000
+    ),
+    # Audio. `input_price` carries $/minute; cached/output are unused;
+    # context window is irrelevant (file-based input).
     ModelInfo("gpt-4o-mini-transcribe", "GPT-4o mini transcribe", "audio", 0.003),
     ModelInfo("gpt-4o-transcribe", "GPT-4o transcribe", "audio", 0.006),
     ModelInfo("whisper-1", "Whisper v1", "audio", 0.006),
@@ -60,9 +68,33 @@ _OPENAI_MODELS: tuple[ModelInfo, ...] = (
 # ----------------------- Anthropic (refreshed 2026-05-01) ------------------
 
 _ANTHROPIC_MODELS: tuple[ModelInfo, ...] = (
-    ModelInfo("claude-opus-4-7", "Claude Opus 4.7 — most capable (1M ctx)", "chat", 5.00, 0.50, 25.00),
-    ModelInfo("claude-sonnet-4-6", "Claude Sonnet 4.6 — balanced", "chat", 3.00, 0.30, 15.00),
-    ModelInfo("claude-haiku-4-5", "Claude Haiku 4.5 — fast & cheap", "filter", 1.00, 0.10, 5.00),
+    ModelInfo(
+        "claude-opus-4-7",
+        "Claude Opus 4.7 — most capable (1M ctx)",
+        "chat",
+        5.00,
+        0.50,
+        25.00,
+        context_window=1_000_000,
+    ),
+    ModelInfo(
+        "claude-sonnet-4-6",
+        "Claude Sonnet 4.6 — balanced",
+        "chat",
+        3.00,
+        0.30,
+        15.00,
+        context_window=200_000,
+    ),
+    ModelInfo(
+        "claude-haiku-4-5",
+        "Claude Haiku 4.5 — fast & cheap",
+        "filter",
+        1.00,
+        0.10,
+        5.00,
+        context_window=200_000,
+    ),
 )
 
 
@@ -73,13 +105,51 @@ _ANTHROPIC_MODELS: tuple[ModelInfo, ...] = (
 # chunks ahead of any single call ever crossing the threshold.
 
 _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
-    ModelInfo("gemini-3.1-pro-preview", "Gemini 3.1 Pro — frontier (preview)", "chat", 2.00, 0.50, 12.00),
     ModelInfo(
-        "gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash-Lite (preview)", "filter", 0.25, 0.0625, 1.50
+        "gemini-3.1-pro-preview",
+        "Gemini 3.1 Pro — frontier (preview)",
+        "chat",
+        2.00,
+        0.50,
+        12.00,
+        context_window=1_000_000,
     ),
-    ModelInfo("gemini-2.5-pro", "Gemini 2.5 Pro — deep reasoning", "chat", 1.25, 0.31, 10.00),
-    ModelInfo("gemini-2.5-flash", "Gemini 2.5 Flash — balanced", "chat", 0.30, 0.075, 2.50),
-    ModelInfo("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite — cheapest", "filter", 0.10, 0.025, 0.40),
+    ModelInfo(
+        "gemini-3.1-flash-lite-preview",
+        "Gemini 3.1 Flash-Lite (preview)",
+        "filter",
+        0.25,
+        0.0625,
+        1.50,
+        context_window=1_000_000,
+    ),
+    ModelInfo(
+        "gemini-2.5-pro",
+        "Gemini 2.5 Pro — deep reasoning",
+        "chat",
+        1.25,
+        0.31,
+        10.00,
+        context_window=1_000_000,
+    ),
+    ModelInfo(
+        "gemini-2.5-flash",
+        "Gemini 2.5 Flash — balanced",
+        "chat",
+        0.30,
+        0.075,
+        2.50,
+        context_window=1_000_000,
+    ),
+    ModelInfo(
+        "gemini-2.5-flash-lite",
+        "Gemini 2.5 Flash-Lite — cheapest",
+        "filter",
+        0.10,
+        0.025,
+        0.40,
+        context_window=1_000_000,
+    ),
 )
 
 
@@ -90,15 +160,69 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
 # other vendor/model alias.
 
 _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
-    ModelInfo("openai/gpt-5.5", "OpenRouter → GPT-5.5", "chat", 5.00, 0.50, 30.00),
-    ModelInfo("openai/gpt-5.4-mini", "OpenRouter → GPT-5.4 mini", "chat", 0.75, 0.075, 4.50),
-    ModelInfo("openai/gpt-5.4-nano", "OpenRouter → GPT-5.4 nano", "filter", 0.20, 0.02, 1.25),
-    ModelInfo("anthropic/claude-opus-4-7", "OpenRouter → Claude Opus 4.7", "chat", 5.00, 0.50, 25.00),
-    ModelInfo("anthropic/claude-sonnet-4-6", "OpenRouter → Claude Sonnet 4.6", "chat", 3.00, 0.30, 15.00),
-    ModelInfo("anthropic/claude-haiku-4-5", "OpenRouter → Claude Haiku 4.5", "filter", 1.00, 0.10, 5.00),
-    ModelInfo("google/gemini-2.5-flash", "OpenRouter → Gemini 2.5 Flash", "chat", 0.30, 0.075, 2.50),
+    ModelInfo("openai/gpt-5.5", "OpenRouter → GPT-5.5", "chat", 5.00, 0.50, 30.00, context_window=1_000_000),
     ModelInfo(
-        "google/gemini-2.5-flash-lite", "OpenRouter → Gemini 2.5 Flash-Lite", "filter", 0.10, 0.025, 0.40
+        "openai/gpt-5.4-mini",
+        "OpenRouter → GPT-5.4 mini",
+        "chat",
+        0.75,
+        0.075,
+        4.50,
+        context_window=400_000,
+    ),
+    ModelInfo(
+        "openai/gpt-5.4-nano",
+        "OpenRouter → GPT-5.4 nano",
+        "filter",
+        0.20,
+        0.02,
+        1.25,
+        context_window=400_000,
+    ),
+    ModelInfo(
+        "anthropic/claude-opus-4-7",
+        "OpenRouter → Claude Opus 4.7",
+        "chat",
+        5.00,
+        0.50,
+        25.00,
+        context_window=1_000_000,
+    ),
+    ModelInfo(
+        "anthropic/claude-sonnet-4-6",
+        "OpenRouter → Claude Sonnet 4.6",
+        "chat",
+        3.00,
+        0.30,
+        15.00,
+        context_window=200_000,
+    ),
+    ModelInfo(
+        "anthropic/claude-haiku-4-5",
+        "OpenRouter → Claude Haiku 4.5",
+        "filter",
+        1.00,
+        0.10,
+        5.00,
+        context_window=200_000,
+    ),
+    ModelInfo(
+        "google/gemini-2.5-flash",
+        "OpenRouter → Gemini 2.5 Flash",
+        "chat",
+        0.30,
+        0.075,
+        2.50,
+        context_window=1_000_000,
+    ),
+    ModelInfo(
+        "google/gemini-2.5-flash-lite",
+        "OpenRouter → Gemini 2.5 Flash-Lite",
+        "filter",
+        0.10,
+        0.025,
+        0.40,
+        context_window=1_000_000,
     ),
 )
 

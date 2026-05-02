@@ -122,6 +122,42 @@ def _safe_filename_component(name: str) -> str:
     return cleaned or "file"
 
 
+def _media_size_bytes(tel_msg) -> int:
+    """Best-effort byte-size estimate for a Telethon message's media.
+
+    Returns 0 when the size isn't readable off the object — caller
+    treats 0 as "unknown, don't enforce the cap" so we never refuse a
+    legitimate small file just because Telethon's payload shape
+    changed shape between SDK versions.
+    """
+    media = getattr(tel_msg, "media", None)
+    if media is None:
+        return 0
+    # Documents (videos, audio, generic files) carry an explicit `size`.
+    doc = getattr(tel_msg, "document", None) or getattr(media, "document", None)
+    if doc is not None:
+        size = getattr(doc, "size", None)
+        if isinstance(size, int) and size > 0:
+            return size
+    # Photos: pick the largest size variant Telegram offers.
+    photo = getattr(tel_msg, "photo", None) or getattr(media, "photo", None)
+    if photo is not None:
+        biggest = 0
+        for sz in getattr(photo, "sizes", None) or []:
+            for attr in ("size", "sizes"):
+                val = getattr(sz, attr, None)
+                if isinstance(val, int):
+                    biggest = max(biggest, val)
+                elif isinstance(val, list) and val:
+                    # `sizes: list[int]` for progressive JPEG variants.
+                    ints = [int(x) for x in val if isinstance(x, int)]
+                    if ints:
+                        biggest = max(biggest, *ints)
+        if biggest > 0:
+            return biggest
+    return 0
+
+
 def media_filename(msg: Message, tel_msg) -> str:
     """Pick a disk filename for a media message.
 
@@ -256,6 +292,25 @@ async def save_raw_media(
                         stats["skipped"] += 1
                         progress.advance(task)
                         return
+                    # Skip oversize downloads. Telegram permits up to 4 GB
+                    # per file; without a cap, a single big video can
+                    # silently fill the user's reports/ disk. Read the
+                    # size hint off the document/photo Telethon object;
+                    # fall through (no-op) when the attribute is absent.
+                    cap_mb = getattr(settings.media, "max_download_mb", 0) or 0
+                    if cap_mb > 0:
+                        size_bytes = _media_size_bytes(tel_msg)
+                        if size_bytes > cap_mb * 1024 * 1024:
+                            log.warning(
+                                "save_raw_media.too_large",
+                                chat_id=prepared.chat_id,
+                                msg_id=m.msg_id,
+                                size_mb=round(size_bytes / 1024 / 1024, 1),
+                                cap_mb=cap_mb,
+                            )
+                            stats["skipped"] += 1
+                            progress.advance(task)
+                            return
                     progress.update(task, label=f"[grey70]{filename}[/]")
                     await download_message(client, tel_msg, dest)
                     stats["done"] += 1

@@ -89,9 +89,7 @@ def test_help_overview_lists_visible_commands() -> None:
     # Use a strict match so we don't catch substrings like "settings".
     import re
 
-    assert not re.search(r"^\s*tg\s", out, re.MULTILINE), (
-        "`tg` should be a ref, not a subcommand row"
-    )
+    assert not re.search(r"^\s*tg\s", out, re.MULTILINE), "`tg` should be a ref, not a subcommand row"
 
 
 def test_help_overview_lists_every_ref_form() -> None:

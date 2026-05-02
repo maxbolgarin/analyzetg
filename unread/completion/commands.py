@@ -129,9 +129,7 @@ def _resolve_shell(shell: str | None) -> str:
     if shell:
         s = shell.strip().lower()
         if s not in _VALID_SHELLS:
-            console.print(
-                f"[red]Unknown shell: {shell!r}.[/]  Accepted: {', '.join(_VALID_SHELLS)}."
-            )
+            console.print(f"[red]Unknown shell: {shell!r}.[/]  Accepted: {', '.join(_VALID_SHELLS)}.")
             raise typer.Exit(1)
         return s
 
@@ -161,8 +159,7 @@ def _resolve_shell(shell: str | None) -> str:
 
     if not detected:
         console.print(
-            "[red]Could not auto-detect your shell.[/]  "
-            f"Pass it explicitly: {' | '.join(_VALID_SHELLS)}."
+            f"[red]Could not auto-detect your shell.[/]  Pass it explicitly: {' | '.join(_VALID_SHELLS)}."
         )
         raise typer.Exit(1)
 
@@ -200,8 +197,7 @@ def cmd_install(shell: str | None = None) -> None:
             raise typer.Exit(1) from e
         console.print(f"[green]✓[/] {shell_used} completion installed at [cyan]{path}[/]")
         console.print(
-            "[grey70]Restart your shell (or `exec $SHELL`) to pick it up. "
-            "Type `unread <Tab>` to test.[/]"
+            "[grey70]Restart your shell (or `exec $SHELL`) to pick it up. Type `unread <Tab>` to test.[/]"
         )
         return
 
@@ -214,8 +210,7 @@ def cmd_install(shell: str | None = None) -> None:
 
     console.print(f"[green]✓[/] {resolved} completion installed at [cyan]{script_path}[/]")
     console.print(
-        "[grey70]Restart your shell (or `exec $SHELL`) to pick it up. "
-        "Type `unread <Tab>` to test.[/]"
+        "[grey70]Restart your shell (or `exec $SHELL`) to pick it up. Type `unread <Tab>` to test.[/]"
     )
 
 
@@ -231,7 +226,7 @@ def cmd_show(shell: str | None = None) -> None:
     print(script)
 
 
-def _install_patched_script(shell: str) -> "Path":  # noqa: F821 — Path imported lazily
+def _install_patched_script(shell: str) -> Path:  # noqa: F821 — Path imported lazily
     """Write the patched script + add a source line to the shell's rc file.
 
     Mirrors `typer.completion._install_zsh` / `_install_fish` so the
@@ -274,7 +269,7 @@ def _install_patched_script(shell: str) -> "Path":  # noqa: F821 — Path import
     raise RuntimeError(f"unsupported patched shell: {shell!r}")
 
 
-def _append_to_rc(rc_path: "Path", marker: str, block: str) -> None:  # noqa: F821
+def _append_to_rc(rc_path: Path, marker: str, block: str) -> None:  # noqa: F821
     """Append ``block`` to ``rc_path`` if ``marker`` isn't already there."""
     existing = rc_path.read_text() if rc_path.is_file() else ""
     if marker in existing:

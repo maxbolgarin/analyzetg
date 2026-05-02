@@ -211,7 +211,6 @@ async def test_ask_wizard_preflights_tg_before_question_prompt() -> None:
 
     async def fake_collect(*args, **kwargs):
         call_order.append("collect")
-        return None
 
     # Run with a non-empty `question` so the prompt path is short-circuited;
     # we just want to verify the preflight ran first, before _collect_answers.

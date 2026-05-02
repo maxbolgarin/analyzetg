@@ -939,10 +939,22 @@ def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: i
         elif fmt == "csv":
             import csv as _csv
 
+            from unread.export.markdown import _csv_safe
+
             w = _csv.writer(buf)
             w.writerow(["msg_id", "date", "sender_name", "text", "transcript"])
             for m in msgs:
-                w.writerow([m.msg_id, m.date.isoformat(), m.sender_name, m.text, m.transcript])
+                # Defang spreadsheet formula injection on attacker-
+                # controlled fields (sender_name, text, transcript).
+                w.writerow(
+                    [
+                        m.msg_id,
+                        m.date.isoformat(),
+                        _csv_safe(m.sender_name),
+                        _csv_safe(m.text),
+                        _csv_safe(m.transcript),
+                    ]
+                )
         console.print(buf.getvalue(), highlight=False)
     console.print(Rule(style="cyan"))
     console.print(f"[grey70]{_tf('export_n_msgs', n=count)}[/]")
