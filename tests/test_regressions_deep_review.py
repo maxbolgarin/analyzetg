@@ -125,6 +125,10 @@ def test_load_dotenv_strips_utf8_bom(tmp_path: Path, monkeypatch) -> None:
     """Editors on Windows save .env with a BOM; the key must still parse."""
     env_path = tmp_path / ".env"
     env_path.write_bytes(b"\xef\xbb\xbfUNREAD_REGRESSION_KEY=ok\n")
+    # The pre-prod hardening rejects group/world-readable .env files;
+    # tmp files default to 0o644 under most umask settings, so chmod
+    # explicitly to 0o600 to match what `unread init` writes in prod.
+    env_path.chmod(0o600)
     monkeypatch.delenv("UNREAD_REGRESSION_KEY", raising=False)
     _load_dotenv(env_path)
     import os

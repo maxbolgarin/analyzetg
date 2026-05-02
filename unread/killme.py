@@ -47,6 +47,20 @@ class _Plan:
 def cmd_killme(yes: bool) -> int:
     """Show a deletion plan, confirm, then wipe everything. Returns the exit code."""
     plan = _build_plan()
+
+    # Refuse to run when the resolved install home looks dangerous (e.g.
+    # `UNREAD_HOME=/` or `UNREAD_HOME=$HOME`). Users who set the env var
+    # by mistake would otherwise lose their entire home directory or root
+    # filesystem to `shutil.rmtree` later in this function.
+    rejection = _reject_unsafe_home(plan.install_home)
+    if rejection is not None:
+        console.print(f"[bold red]Refusing to run killme:[/] {rejection}")
+        console.print(
+            "[yellow]If this is really the install you want to wipe, set UNREAD_HOME "
+            "to a deeper-nested path or remove it manually.[/]"
+        )
+        return 1
+
     _print_plan(plan)
 
     if not _confirm_killme(yes):
@@ -106,7 +120,10 @@ def cmd_killme(yes: bool) -> int:
         label, argv = plan.binary_uninstall
         console.print(f"\n[bold]Uninstalling binary via {label}…[/]")
         try:
-            res = subprocess.run(argv, check=False, capture_output=True, text=True)
+            # cwd=Path.home() because the install dir we just deleted may
+            # have been the user's CWD; subprocess inherits the parent's
+            # CWD and would fail with ENOENT before even running.
+            res = subprocess.run(argv, check=False, capture_output=True, text=True, cwd=str(Path.home()))
             stdout = (res.stdout or "").strip()
             stderr = (res.stderr or "").strip()
             if res.returncode == 0:
@@ -148,6 +165,70 @@ def cmd_killme(yes: bool) -> int:
         "[cyan]uv tool install unread[/].)"
     )
     return 0
+
+
+def _reject_unsafe_home(home: Path) -> str | None:
+    """Return a reason string if `home` is too dangerous to rmtree, else None.
+
+    A misconfigured `UNREAD_HOME` (e.g. `/`, the user's `$HOME`, `/usr`)
+    would, without this guard, take the user's entire home directory or
+    root filesystem with it on `killme`. We refuse outright when the
+    target:
+
+    * resolves to the filesystem root,
+    * is the user's home directory itself,
+    * is one of a handful of common system roots,
+    * has fewer than two path components after the root (so we never
+      operate on first-level dirs like `/usr`, `/etc`, `/var`).
+
+    The conservative bar — at least two components AND not the home dir —
+    matches the realistic install layouts (`~/.unread`, `~/projects/foo/.unread`,
+    `/opt/unread/install`) without false positives in tests where the
+    sandbox is several levels deep under `/tmp/`.
+    """
+    try:
+        resolved = home.resolve()
+    except OSError as e:
+        return f"could not resolve {home} ({e})"
+    parts = resolved.parts
+    if len(parts) <= 1:
+        return f"{resolved} resolves to the filesystem root"
+    try:
+        user_home = Path.home().resolve()
+    except OSError:
+        user_home = None
+    if user_home is not None and resolved == user_home:
+        return f"{resolved} is the user's home directory"
+    # Reject first-level system dirs on POSIX. On Windows `parts` looks
+    # like ('C:\\', 'Users', ...) so length≥3 implies safe.
+    dangerous = {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+        "/Users",
+        "/Applications",
+        "/System",
+        "/Library",
+    }
+    if str(resolved) in dangerous:
+        return f"{resolved} is a system directory"
+    if len(parts) < 3:
+        return f"{resolved} is a top-level directory; refusing to wipe"
+    return None
 
 
 def _build_plan() -> _Plan:

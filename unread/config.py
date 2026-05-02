@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tomllib
 from pathlib import Path
@@ -329,14 +330,55 @@ def _load_dotenv(path: Path) -> None:
     Populates os.environ for any keys not already set, so existing shell
     exports still win. Silently no-ops if the file doesn't exist.
     """
-    if not path.exists():
+    # Defenses (added pre-prod review):
+    #
+    # * O_NOFOLLOW so a symlink swap on a shared host can't redirect
+    #   reads to attacker-controlled content.
+    # * Refuses files with group/world bits set (mode & 0o077). The
+    #   wizard writes 0o600 from creation; anything looser is the user's
+    #   explicit choice and should be tightened, not silently consumed.
+    # * Strips trailing CR so CRLF-saved files don't leave a "\r" in
+    #   API keys (which then 401s and prints the value in tracebacks).
+    import sys
+
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        # ELOOP (symlink rejected) or EACCES — surface a warning so the
+        # user knows their .env was skipped instead of silently 401-ing
+        # later when the secret isn't loaded.
+        print(f"warning: refusing to load {path}: {e.strerror or e}", file=sys.stderr)
+        return
+    try:
+        st = os.fstat(fd)
+        if st.st_mode & 0o077:
+            print(
+                f"warning: refusing to load {path}: file is readable by group/other "
+                f"(mode {oct(st.st_mode & 0o777)}). chmod 600 to load.",
+                file=sys.stderr,
+            )
+            os.close(fd)
+            return
+        with os.fdopen(fd, "r", encoding="utf-8-sig") as fh:
+            text = fh.read()
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
         return
     # utf-8-sig transparently strips a UTF-8 BOM if present (common on
     # Windows editors) — without this, the first line parses as
     # "\ufeffTELEGRAM_API_ID" and Telegram login fails with "no API id"
     # with no hint as to why.
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
+    for raw_line in text.splitlines():
+        # rstrip("\r") for CRLF-saved files — splitlines() consumes the
+        # \n, but a stray \r before stripping ends up inside any quoted
+        # value at the end of the line.
+        line = raw_line.rstrip("\r").strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
@@ -345,7 +387,7 @@ def _load_dotenv(path: Path) -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip()
+        value = value.strip().rstrip("\r")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
         if key and key not in os.environ:

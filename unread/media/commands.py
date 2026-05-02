@@ -48,13 +48,78 @@ log = get_logger(__name__)
 VALID_TYPES = ("voice", "videonote", "video", "photo", "doc")
 
 
-def _safe_filename_component(name: str) -> str:
-    """Strip anything that could escape the destination dir.
+_SAFE_FILENAME_MAX_LEN = 200
+_WINDOWS_RESERVED = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+)
 
-    Not a full sanitizer — just enough to prevent `../../etc/passwd` shenanigans
-    in Telegram filename attributes, which come from arbitrary senders.
+
+def _safe_filename_component(name: str) -> str:
+    """Sanitize a Telegram-supplied filename to a safe disk component.
+
+    Telegram filename attributes come from arbitrary senders, so this is
+    a hostile-input boundary. Whitelist `[A-Za-z0-9._-]` and replace
+    everything else with `_`. That removes:
+
+      * Path separators (`/`, `\\`) and drive colons (`C:`) so we can't
+        escape the destination dir or land in an NTFS alternate data
+        stream.
+      * NUL and other control chars that some filesystems accept but
+        downstream tooling parses as terminators.
+      * RTL-override / bidi marks (`\\u202e` etc.) that visually disguise
+        the extension (`safe.exe` → `safe.txt`).
+
+    Then:
+      * Collapses runs of `_` so the filename stays readable.
+      * Strips leading dots so a hostile sender can't create hidden files.
+      * Caps at 200 chars (ext4 dirent limit is 255 bytes; UTF-8 encoding
+        of trailing chars could push over otherwise).
+      * Reserves Windows device names (`CON`, `NUL`, `COM1`...).
     """
-    return name.replace("/", "_").replace("\\", "_").lstrip(".") or "file"
+    if not name:
+        return "file"
+    # Whitelist; everything else → "_". Per-codepoint test so multibyte
+    # chars (Cyrillic, CJK) collapse into "_" rather than fragmenting
+    # into per-byte underscores.
+    cleaned_chars = [c if (c.isascii() and (c.isalnum() or c in "._-")) else "_" for c in name]
+    cleaned = "".join(cleaned_chars)
+    # Collapse runs of underscores for readability.
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    # Strip leading dots (hidden-file trick) and trailing dots (Windows
+    # silently drops them, so "evil.exe." would survive as "evil.exe").
+    cleaned = cleaned.lstrip(".").rstrip(".")
+    # Also strip a leading "_" that would otherwise mark this as a
+    # hidden-ish-looking filename, but keep at least one if everything
+    # was non-ASCII (so "файл.txt" survives as "_.txt", not just "txt").
+    if cleaned.startswith("_") and "." in cleaned:
+        # Keep one leading underscore so the dot/extension is preserved.
+        pass
+    if not cleaned:
+        return "file"
+    # Cap length — keep the extension if any, since the tail is what most
+    # tools key on.
+    if len(cleaned) > _SAFE_FILENAME_MAX_LEN:
+        if "." in cleaned:
+            stem, _, ext = cleaned.rpartition(".")
+            ext = ext[: _SAFE_FILENAME_MAX_LEN // 4]
+            stem = stem[: _SAFE_FILENAME_MAX_LEN - len(ext) - 1]
+            cleaned = f"{stem}.{ext}" if ext else stem
+        else:
+            cleaned = cleaned[:_SAFE_FILENAME_MAX_LEN]
+    # Refuse Windows reserved device names; the OS treats `CON`, `NUL`,
+    # etc. as devices regardless of extension.
+    stem_upper = cleaned.split(".", 1)[0].upper()
+    if stem_upper in _WINDOWS_RESERVED:
+        cleaned = f"_{cleaned}"
+    return cleaned or "file"
 
 
 def media_filename(msg: Message, tel_msg) -> str:
@@ -202,9 +267,12 @@ async def save_raw_media(
                         media_type=m.media_type,
                         err=str(e)[:300],
                     )
-                    partial = output_dir / f"{m.msg_id}.partial"
-                    with contextlib.suppress(FileNotFoundError):
-                        partial.unlink()
+                    # `download_message` writes to `<final>.part` and
+                    # atomic-renames on success, so on failure clean up
+                    # any leftover `.part` for this msg_id.
+                    for leftover in output_dir.glob(f"{m.msg_id}.*.part"):
+                        with contextlib.suppress(FileNotFoundError):
+                            leftover.unlink()
                     stats["failed"] += 1
                 finally:
                     progress.advance(task)

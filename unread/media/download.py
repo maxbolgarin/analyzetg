@@ -78,12 +78,34 @@ async def _ffmpeg_present(path: str) -> bool:
 
 
 async def download_message(client: TelegramClient, msg_obj, out_path: Path) -> Path:
-    """Download a Telethon message's media to `out_path`."""
+    """Download a Telethon message's media to `out_path`.
+
+    Writes to a sibling `.part` file first and atomic-renames on success.
+    A Ctrl-C / network drop mid-download then leaves only the `.part`,
+    which the caller cleans up — *not* a truncated `out_path` that
+    `_existing_for_msg` would later mistake for a finished download and
+    skip on the next run.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    result = await client.download_media(msg_obj, file=str(out_path))
+    tmp_path = out_path.with_suffix(out_path.suffix + ".part")
+    # Clear any leftover .part from a previous interrupted run so we
+    # don't append to / read back stale bytes.
+    with contextlib.suppress(FileNotFoundError):
+        tmp_path.unlink()
+    try:
+        result = await client.download_media(msg_obj, file=str(tmp_path))
+    except BaseException:
+        # Includes CancelledError / KeyboardInterrupt — clean up before
+        # propagating so `_existing_for_msg` doesn't lock us out.
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+        raise
     if result is None:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
         raise RuntimeError(f"download_media returned None for msg={msg_obj.id}")
-    return Path(result)
+    Path(result).replace(out_path)
+    return out_path
 
 
 async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> list[Path]:
