@@ -85,6 +85,58 @@ def test_safe_filename_rejects_path_traversal():
     assert not _safe_filename_component("..hidden").startswith(".")
 
 
+def test_safe_filename_strips_nul_and_control_chars():
+    # NUL and control chars terminate strings in some C-level tooling;
+    # they must not survive sanitization.
+    got = _safe_filename_component("foo\x00bar.pdf")
+    assert "\x00" not in got
+    assert got.endswith(".pdf")
+
+
+def test_safe_filename_strips_rtl_override():
+    # Bidi-override is the classic "exe disguised as txt" attack.
+    rtl = chr(0x202E)
+    got = _safe_filename_component(f"safe{rtl}txt.exe")
+    assert rtl not in got
+
+
+def test_safe_filename_strips_drive_colon():
+    # Colons on NTFS create alternate data streams. Whitelist must reject.
+    got = _safe_filename_component("C:evil.exe")
+    assert ":" not in got
+
+
+def test_safe_filename_caps_length():
+    # ext4 dirent limit is 255 bytes; we cap conservatively at 200 chars.
+    got = _safe_filename_component("a" * 5000 + ".pdf")
+    assert len(got) <= 200
+    assert got.endswith(".pdf")
+
+
+def test_safe_filename_reserves_windows_devices():
+    # Windows treats CON / NUL / COM1 as devices regardless of extension.
+    assert _safe_filename_component("CON.txt") != "CON.txt"
+    assert _safe_filename_component("NUL") != "NUL"
+    assert _safe_filename_component("com1.log").upper() != "COM1.LOG"
+
+
+def test_safe_filename_collapses_underscores():
+    # After replacing all non-whitelist chars with `_`, runs collapse so
+    # the result stays human-readable.
+    got = _safe_filename_component("a///b\\\\c")
+    assert "__" not in got
+
+
+def test_safe_filename_unicode_collapses_to_underscore():
+    # Cyrillic / CJK / other non-ASCII glyphs all collapse to `_` rather
+    # than survive byte-by-byte (which would corrupt rendering on some
+    # terminals and is a fingerprinting vector).
+    got = _safe_filename_component("файл.txt")
+    assert got.endswith(".txt")
+    # Underscores collapse, but at least one survives from the prefix.
+    assert "_" in got
+
+
 def test_existing_for_msg_finds_any_extension(tmp_path: Path):
     # --overwrite=false should skip a previously-downloaded file even if
     # the extension isn't what we'd pick today (e.g. earlier run saved

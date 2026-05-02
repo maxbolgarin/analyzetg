@@ -121,12 +121,16 @@ def test_killme_yes_wipes_everything(fresh_install_home):
     assert rc == 0
     assert not home.exists(), "install dir should be gone"
     assert keychain_deletions == ["openai.api_key"]
-    fake_run.assert_called_once_with(
-        ["/fake/uv", "tool", "uninstall", "unread"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    fake_run.assert_called_once()
+    args, kwargs = fake_run.call_args
+    assert args[0] == ["/fake/uv", "tool", "uninstall", "unread"]
+    assert kwargs["check"] is False
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    # cwd is set to Path.home() because the install dir we just deleted
+    # may have been the user's CWD; subprocess inherits the parent's
+    # CWD and would fail with ENOENT before even running.
+    assert "cwd" in kwargs
 
 
 def test_killme_without_yes_refuses_in_non_tty(fresh_install_home):
@@ -263,3 +267,69 @@ def test_detect_binary_uninstall_returns_argv_when_unread_listed(monkeypatch):
 
     result = km._detect_binary_uninstall()
     assert result == ("uv tool", ["/fake/uv", "tool", "uninstall", "unread"])
+
+
+# ---------------------------------------------------------------------
+# `_reject_unsafe_home` — refuse to rmtree dangerous paths.
+# ---------------------------------------------------------------------
+
+
+def test_reject_unsafe_home_rejects_filesystem_root():
+    """A misconfigured `UNREAD_HOME=/` would, without this guard, take
+    the entire root filesystem with it on `killme`."""
+    from unread.killme import _reject_unsafe_home
+
+    assert _reject_unsafe_home(Path("/")) is not None
+
+
+def test_reject_unsafe_home_rejects_user_home(tmp_path, monkeypatch):
+    """`UNREAD_HOME=$HOME` is a common misconfiguration."""
+    from unread.killme import _reject_unsafe_home
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert _reject_unsafe_home(tmp_path) is not None
+
+
+def test_reject_unsafe_home_rejects_system_dirs():
+    """First-level POSIX system dirs are unrecoverable if wiped."""
+    from unread.killme import _reject_unsafe_home
+
+    for d in ("/usr", "/etc", "/var", "/home", "/Applications"):
+        assert _reject_unsafe_home(Path(d)) is not None, d
+
+
+def test_reject_unsafe_home_rejects_top_level_dirs():
+    """Anything with fewer than 3 path components is treated as too risky."""
+    from unread.killme import _reject_unsafe_home
+
+    # `/foo` is 2 parts ('/', 'foo') — refuse.
+    assert _reject_unsafe_home(Path("/foo")) is not None
+
+
+def test_reject_unsafe_home_accepts_nested_install(tmp_path):
+    """A normal nested install dir under tmp passes the guard."""
+    from unread.killme import _reject_unsafe_home
+
+    nested = tmp_path / "user_home" / ".unread"
+    nested.mkdir(parents=True)
+    assert _reject_unsafe_home(nested) is None
+
+
+def test_killme_refuses_when_home_is_unsafe(monkeypatch):
+    """End-to-end: `cmd_killme` returns 1 and never invokes rmtree when
+    the resolved install home is dangerous (e.g. `UNREAD_HOME=/`)."""
+    from unittest.mock import patch
+
+    from unread import killme as km
+    from unread.core import paths as _paths
+
+    monkeypatch.setattr(_paths, "unread_home", lambda: Path("/"))
+    from unread.config import reset_settings
+
+    reset_settings()
+
+    with patch.object(km.shutil, "rmtree") as fake_rm:
+        rc = km.cmd_killme(yes=True)
+
+    assert rc == 1
+    fake_rm.assert_not_called()
