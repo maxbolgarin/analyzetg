@@ -854,12 +854,16 @@ def _print_config_status() -> None:
 
 # Single source of truth for the `<ref>` cheat-sheet shown in the help
 # overview AND in `unread help flags`. Each row: (form, description).
+# `tg` is the magic ref token (see `TG_INTERACTIVE_REF`); listing it
+# first surfaces the interactive picker as the friendliest entry-point
+# for users who don't yet have a chat handle / link in hand.
 # Fuzzy chat-title match is intentionally NOT in this table — the bare
 # `unread <ref>` form rejects free-form strings to avoid the
-# "why does my random text try to log into Telegram?" surprise. Users
-# who want the fuzzy lookup go through `unread tg "title"` (see
-# the matching `<ref>` table inside `unread tg --help`).
+# "why does my random text try to log into Telegram?" surprise. The
+# interactive picker (`unread tg`) is the supported route for browsing
+# chats by name.
 _REF_TYPES: tuple[tuple[str, str], ...] = (
+    ("tg", "interactive Telegram chat picker (also: `ask tg`, `dump tg`)"),
     ("@username", "Telegram handle"),
     ("t.me/c/<id>/<msg>", "Telegram link (channel post, topic, message)"),
     ("-1001234567890", "numeric Telegram chat id (use `--` to separate from flags)"),
@@ -937,11 +941,21 @@ def _format_command_table(rows: list[tuple[str, str]], indent: str = "    ") -> 
     return "\n".join(lines)
 
 
+_COMMON_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("unread <ref>", "analyze (default action)"),
+    ('unread ask <ref> "question"', "ask a question about the ref"),
+    ("unread dump <ref>", "export the ref's messages to disk"),
+    ("unread tg", "open the interactive Telegram picker"),
+    ("unread <ref> --folder NAME", "batch-analyze every chat in a folder"),
+)
+
+
 def _print_usage_and_refs() -> None:
-    """Usage line + `<ref> can be` cheat-sheet. Shared by bare
-    `unread` and `unread help` so both surfaces give the user a
-    consistent description of what the binary does and what `<ref>`
-    accepts."""
+    """Usage line + `<ref> can be` cheat-sheet + common `<command> <ref>`
+    patterns. Shared by bare `unread` and `unread help` so both
+    surfaces give the user a consistent description of what the binary
+    does, what `<ref>` accepts, and how `<ref>` composes with
+    subcommands."""
     console.print(
         "\n[bold]Usage[/]\n"
         "  [cyan]unread <ref> [OPTIONS][/]              analyze a chat / file / URL / stdin\n"
@@ -952,16 +966,21 @@ def _print_usage_and_refs() -> None:
     for form, desc in _REF_TYPES:
         console.print(f"  [cyan]{form:<{width}}[/]  [grey70]{desc}[/]")
 
+    console.print("\n[bold]Common patterns[/]")
+    pw = max(len(left) for left, _ in _COMMON_PATTERNS)
+    for left, desc in _COMMON_PATTERNS:
+        console.print(f"  [cyan]{left:<{pw}}[/]  [grey70]{desc}[/]")
+
 
 def _print_help_overview() -> None:
     """Full help screen shown by `unread help` and `unread --help`.
 
-    Order: header → status → usage → ref types → commands → footer.
-    No analyze flag dump — that lives behind `unread help flags` and
-    `unread <cmd> --help` for individual commands.
+    Order: usage → ref types → patterns → commands → footer. Header
+    + status panel are intentionally absent — they belong on the bare
+    `unread` orientation snapshot, not on the catalogue page. No
+    analyze flag dump either — that lives behind `unread help flags`
+    and `unread <cmd> --help` for individual commands.
     """
-    console.print("[bold]unread[/] — Telegram / YouTube / web-page analyzer\n")
-    _print_config_status()
     _print_usage_and_refs()
     console.print("")
 
