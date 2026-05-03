@@ -152,7 +152,7 @@ with contextlib.suppress(Exception):
 # Panel names — looked up once at import-time so each Typer-decorated
 # command can pin its panel to the right localized header.
 PANEL_MAIN = _t("cli_panel_main")
-PANEL_SYNC = _t("cli_panel_sync")
+PANEL_TELEGRAM = _t("cli_panel_telegram")
 PANEL_MAINT = _t("cli_panel_maint")
 
 # `no_args_is_help` removed: the root callback handles the no-arg case
@@ -185,7 +185,7 @@ backup_app = _UnreadTyper(help=_t("cmd_backup"), no_args_is_help=True, cls=_Unre
 # / `describe` / `folders`).
 TG_INTERACTIVE_REF = "tg"
 
-app.add_typer(chats_app, name="chats", rich_help_panel=PANEL_SYNC)
+app.add_typer(chats_app, name="chats", rich_help_panel=PANEL_TELEGRAM)
 app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 app.add_typer(backup_app, name="backup", rich_help_panel=PANEL_MAINT)
 
@@ -994,7 +994,7 @@ def _print_help_overview() -> None:
         by_panel.setdefault(effective_panel, []).append((name, help_str))
 
     console.print("[bold]Commands[/]")
-    for panel in (PANEL_MAIN, PANEL_SYNC, PANEL_MAINT):
+    for panel in (PANEL_MAIN, PANEL_TELEGRAM, PANEL_MAINT):
         items = by_panel.get(panel, [])
         if not items:
             continue
@@ -1362,7 +1362,7 @@ def _print_provider_credentials_banner(provider: str) -> None:
     )
 
 
-@app.command("describe", rich_help_panel=PANEL_MAIN, help=_t("cmd_describe"))
+@app.command("describe", rich_help_panel=PANEL_TELEGRAM, help=_t("cmd_describe"))
 def describe(
     ref: str | None = typer.Argument(
         None,
@@ -1608,7 +1608,7 @@ async def _list_folders() -> None:
 # ================================================================ 5.3 Sync
 
 
-@app.command(rich_help_panel=PANEL_SYNC, help=_t("cmd_sync"))
+@app.command(rich_help_panel=PANEL_TELEGRAM, help=_t("cmd_sync"))
 def sync(
     chat: int | None = typer.Option(
         None,
@@ -3688,7 +3688,7 @@ def init_cmd(
 
 @app.command(
     name="login",
-    rich_help_panel=PANEL_MAIN,
+    rich_help_panel=PANEL_TELEGRAM,
     help="Telegram log-in (and re-link with `--force`). Skips the AI-provider step.",
 )
 def login_cmd(
@@ -3716,7 +3716,7 @@ def login_cmd(
 
 @app.command(
     name="logout",
-    rich_help_panel=PANEL_MAIN,
+    rich_help_panel=PANEL_TELEGRAM,
     help="Clear the local Telegram session without touching credentials.",
 )
 def logout_cmd() -> None:

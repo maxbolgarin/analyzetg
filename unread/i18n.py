@@ -136,10 +136,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Загружай Telegram-чаты, обогащай медиа (голос/изображения/доки/ссылки) и анализируй через выбранного AI-провайдера.",
     },
     "cli_panel_main": {"en": "Main", "ru": "Основные"},
-    "cli_panel_sync": {
-        "en": "Sync & subscriptions (Telegram)",
-        "ru": "Синхронизация и подписки (Telegram)",
-    },
+    "cli_panel_telegram": {"en": "Telegram", "ru": "Telegram"},
     "cli_panel_maint": {"en": "Maintenance", "ru": "Обслуживание"},
     # Command one-liners (Typer reads from each command's docstring; we
     # set `help=` explicitly so the i18n lookup wins). Keys mirror the

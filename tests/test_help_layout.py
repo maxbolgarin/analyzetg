@@ -43,17 +43,19 @@ def _invoke(*args: str) -> str:
 def test_help_overview_lists_every_panel() -> None:
     """The no-arg help has the three panel headers in order.
 
-    The `(Telegram)` suffix on the Sync panel is the user-facing
-    signal that those commands need a Telegram session — pinned here
-    so the marker can't silently disappear.
+    The Telegram panel groups all TG-needing commands (describe, login,
+    logout, chats, sync) under a single header — pinned here so the
+    grouping can't silently disappear.
     """
     out = _invoke("help")
-    # Panel headers from i18n (en defaults).
-    assert "Main" in out
-    assert "Sync & subscriptions (Telegram)" in out
-    assert "Maintenance" in out
-    # Panel order: Main → Sync → Maintenance.
-    assert out.index("Main") < out.index("Sync & subscriptions (Telegram)") < out.index("Maintenance")
+    # Panel headers are rendered as "  <Name>\n" in the overview.
+    # Use the indented form to avoid matching "Telegram" inside command
+    # descriptions that appear before the panel section.
+    assert "  Main\n" in out
+    assert "  Telegram\n" in out
+    assert "  Maintenance\n" in out
+    # Panel order: Main → Telegram → Maintenance.
+    assert out.index("  Main\n") < out.index("  Telegram\n") < out.index("  Maintenance\n")
 
 
 def test_help_overview_lists_visible_commands() -> None:
