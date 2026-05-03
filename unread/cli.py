@@ -1364,7 +1364,6 @@ def _print_provider_credentials_banner(provider: str) -> None:
 
 describe_app = _UnreadTyper(
     help=_t("cmd_describe"),
-    invoke_without_command=True,
     cls=_UnreadGroup,
 )
 app.add_typer(describe_app, name="describe", rich_help_panel=PANEL_TELEGRAM)

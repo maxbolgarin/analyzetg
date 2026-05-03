@@ -38,5 +38,6 @@ def test_describe_with_ref_calls_cmd_describe() -> None:
         mock_cmd.side_effect = _noop
         result = runner.invoke(app, ["describe", "@somegroup"])
     assert result.exit_code == 0, result.output
+    mock_cmd.assert_called_once()
     args, kwargs = mock_cmd.call_args
     assert (args[0] if args else kwargs.get("ref")) == "@somegroup"
