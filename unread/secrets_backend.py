@@ -95,7 +95,7 @@ def keychain_available() -> bool:
 
         active = keyring.get_keyring()
     except Exception as e:
-        log.debug("secrets_backend.keychain_probe_failed", err=str(e)[:200])
+        log.debug("secrets_backend.keychain_probe_failed", err_type=type(e).__name__)
         return False
     return not isinstance(active, fail.Keyring | null.Keyring)
 
@@ -131,7 +131,7 @@ def keychain_read(key: str) -> str | None:
 
         return keyring.get_password(KEYCHAIN_SERVICE, key)
     except Exception as e:
-        log.warning("secrets_backend.keychain_read_failed", key=key, err=str(e)[:200])
+        log.warning("secrets_backend.keychain_read_failed", key=key, err_type=type(e).__name__)
         return None
 
 
@@ -150,7 +150,7 @@ def keychain_write(key: str, value: str) -> bool:
         keyring.set_password(KEYCHAIN_SERVICE, key, value)
         return True
     except Exception as e:
-        log.warning("secrets_backend.keychain_write_failed", key=key, err=str(e)[:200])
+        log.warning("secrets_backend.keychain_write_failed", key=key, err_type=type(e).__name__)
         return False
 
 
@@ -168,7 +168,7 @@ def keychain_delete(key: str) -> bool:
             return False
         return True
     except Exception as e:
-        log.warning("secrets_backend.keychain_delete_failed", key=key, err=str(e)[:200])
+        log.warning("secrets_backend.keychain_delete_failed", key=key, err_type=type(e).__name__)
         return False
 
 

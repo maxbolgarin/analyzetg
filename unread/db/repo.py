@@ -10,6 +10,7 @@ would otherwise skip.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 from collections.abc import AsyncIterator, Iterable, Sequence
@@ -234,7 +235,25 @@ class Repo:
         await self._conn.execute("DROP TABLE media_transcripts")
 
     async def _apply_additive_migrations(self) -> None:
-        """Apply forward-compatible column additions for pre-schema.sql DBs."""
+        """Apply forward-compatible column additions for pre-schema.sql DBs.
+
+        Wrapped in a single explicit transaction so two simultaneous
+        `unread` invocations against a brand-new DB don't both try to
+        apply the same ALTER concurrently. SQLite's implicit locking
+        handles this for individual writes, but the ALTER stream is
+        long enough that a concurrent reader can wedge it; BEGIN
+        IMMEDIATE up front grabs the writer lock cleanly.
+        """
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self._apply_additive_migrations_body()
+            await self._conn.commit()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self._conn.rollback()
+            raise
+
+    async def _apply_additive_migrations_body(self) -> None:
         await self._add_missing_columns("chats", {"linked_chat_id": "INTEGER"})
         await self._add_missing_columns(
             "subscriptions",

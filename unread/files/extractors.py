@@ -128,6 +128,12 @@ class ExtractResult:
 # ---- sync extractors (text / PDF / DOCX) -------------------------------
 
 
+# Hard cap on local file reads so a `unread ./giant.log` doesn't OOM
+# the process. 100 MB is generous for a code/text file but well below
+# disaster on constrained machines.
+_MAX_EXTRACT_BYTES = 100 * 1024 * 1024
+
+
 def extract_text(path: Path) -> ExtractResult:
     """Read a plain-text / code / markup file.
 
@@ -135,9 +141,24 @@ def extract_text(path: Path) -> ExtractResult:
     falling back to UTF-8 with replacement. Same encoding ladder as
     `enrich/document.py:_extract_plain` so behaviour is identical
     across the local-file path and the Telegram-doc enrichment path.
+
+    Refuses files over `_MAX_EXTRACT_BYTES` to avoid OOM. Pre-prod
+    review: a 1+ GB log file used to be slurped into memory in one
+    call.
     """
     import contextlib
 
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        raise ValueError(f"cannot stat {path}: {e}") from e
+    if size > _MAX_EXTRACT_BYTES:
+        mb = size / (1024 * 1024)
+        cap_mb = _MAX_EXTRACT_BYTES // (1024 * 1024)
+        raise ValueError(
+            f"file too large: {path} is {mb:.1f} MiB (cap {cap_mb} MiB). "
+            "Pre-process or split before passing to unread."
+        )
     with path.open("rb") as f:
         raw = f.read()
     for enc in ("utf-8", "utf-16", "cp1251", "latin-1"):

@@ -49,7 +49,22 @@ log = get_logger(__name__)
 
 # Format / parameters --------------------------------------------------------
 
+# v1 envelope (legacy): `$u1$ || b64(salt[16] || nonce[12] || ct+tag)`,
+# encrypted with AEAD `associated_data=None`. Vulnerable to slot-swap:
+# attacker who can edit the DB (or a buggy migration) can move the
+# ciphertext from one secrets slot into another and the AEAD still
+# verifies because nothing binds the ciphertext to its slot name.
 ENCRYPTED_PREFIX = "$u1$"
+
+# v2 envelope: same body layout, but the AEAD `associated_data` carries
+# `unread:v2:<slot_name>` so the ciphertext is cryptographically bound
+# to its slot. A swap from `openai.api_key` into `telegram.api_hash`
+# now fails `InvalidTag` on read instead of silently decrypting.
+# Reads accept both prefixes; new writes always use v2 (when the
+# caller can supply `slot_name`).
+ENCRYPTED_PREFIX_V2 = "$u2$"
+_AAD_V2_PREFIX = b"unread:v2:"
+
 KEY_LEN = 32
 SALT_LEN = 16
 NONCE_LEN = 12
@@ -118,7 +133,29 @@ def _b64decode(text: str) -> bytes:
 
 
 def is_encrypted(value: str | None) -> bool:
-    return bool(value) and value.startswith(ENCRYPTED_PREFIX)
+    return bool(value) and (value.startswith(ENCRYPTED_PREFIX) or value.startswith(ENCRYPTED_PREFIX_V2))
+
+
+def envelope_version(value: str | None) -> int:
+    """Return 1 for `$u1$`, 2 for `$u2$`, 0 for plaintext / unknown."""
+    if not value:
+        return 0
+    if value.startswith(ENCRYPTED_PREFIX_V2):
+        return 2
+    if value.startswith(ENCRYPTED_PREFIX):
+        return 1
+    return 0
+
+
+def _aad_for(slot_name: str | None) -> bytes | None:
+    """AEAD additional-data binding for the v2 envelope.
+
+    None means "v1 / no slot binding" — kept so legacy readers of
+    `$u1$` blobs verify against the original AAD-less ciphertext.
+    """
+    if not slot_name:
+        return None
+    return _AAD_V2_PREFIX + slot_name.encode("utf-8")
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -134,14 +171,18 @@ def derive_key(passphrase: str, salt: bytes) -> bytes:
 _derive_key = derive_key
 
 
-def encrypt(plaintext: str, passphrase: str) -> str:
+def encrypt(plaintext: str, passphrase: str, *, slot_name: str | None = None) -> str:
     """Encrypt ``plaintext`` under a key derived from ``passphrase``.
 
     Each call generates a fresh salt + nonce so re-encrypting the same
-    value produces a different ciphertext. That defeats simple "did
-    this row change" diffs against a backup but doesn't matter for
-    correctness — the `secrets` table key (`openai.api_key` etc.)
-    already tells the reader which slot it is.
+    value produces a different ciphertext.
+
+    `slot_name` opts into the v2 (`$u2$`) envelope: the slot name is
+    bound as AEAD `associated_data` so a copy-paste of the ciphertext
+    into a different slot fails `InvalidTag`. Writers that know which
+    slot they're targeting (`put_secrets`, the session-string write
+    path, `_persist_upgrade`) always pass it. Legacy callers that
+    don't pass `slot_name` keep emitting `$u1$` for backward compat.
     """
     if not plaintext:
         # Encrypting an empty string is a smell — empty values are
@@ -151,18 +192,27 @@ def encrypt(plaintext: str, passphrase: str) -> str:
     nonce = _stdsecrets.token_bytes(NONCE_LEN)
     key = _derive_key(passphrase, salt)
     aead = ChaCha20Poly1305(key)
-    ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=None)
+    aad = _aad_for(slot_name)
+    ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=aad)
     blob = salt + nonce + ct
-    return f"{ENCRYPTED_PREFIX}{_b64encode(blob)}"
+    prefix = ENCRYPTED_PREFIX_V2 if slot_name else ENCRYPTED_PREFIX
+    return f"{prefix}{_b64encode(blob)}"
 
 
-def encrypt_with_key(plaintext: str, key: bytes, salt: bytes | None = None) -> str:
+def encrypt_with_key(
+    plaintext: str,
+    key: bytes,
+    salt: bytes | None = None,
+    *,
+    slot_name: str | None = None,
+) -> str:
     """Variant that reuses a precomputed key (skip the Scrypt step).
 
     Used by the migration commands (`upgrade`, `rotate-passphrase`)
     where we encrypt many slots in one go and want amortized cost.
     Caller is responsible for keeping the matching salt around if
     they want decrypt-with-key to work without a re-derivation.
+    `slot_name` enables the v2 envelope (see :func:`encrypt`).
     """
     if len(key) != KEY_LEN:
         raise ValueError(f"key must be {KEY_LEN} bytes")
@@ -172,16 +222,27 @@ def encrypt_with_key(plaintext: str, key: bytes, salt: bytes | None = None) -> s
         raise ValueError(f"salt must be {SALT_LEN} bytes")
     nonce = _stdsecrets.token_bytes(NONCE_LEN)
     aead = ChaCha20Poly1305(key)
-    ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=None)
+    aad = _aad_for(slot_name)
+    ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=aad)
     blob = salt + nonce + ct
-    return f"{ENCRYPTED_PREFIX}{_b64encode(blob)}"
+    prefix = ENCRYPTED_PREFIX_V2 if slot_name else ENCRYPTED_PREFIX
+    return f"{prefix}{_b64encode(blob)}"
 
 
 def parse_envelope(ciphertext: str) -> CryptoEnvelope:
-    """Strip the prefix, decode base64, split into (salt, nonce, ciphertext)."""
+    """Strip the prefix, decode base64, split into (salt, nonce, ciphertext).
+
+    Accepts either the legacy `$u1$` envelope (no slot binding) or the
+    v2 `$u2$` envelope (slot bound via AEAD `associated_data`). The
+    body layout is identical between the two; the version flag lives
+    in the prefix and the AAD requirement is enforced by the caller.
+    """
     if not is_encrypted(ciphertext):
-        raise NotEncryptedError("missing $u1$ prefix; not an encrypted record")
-    body = _b64decode(ciphertext[len(ENCRYPTED_PREFIX) :])
+        raise NotEncryptedError("missing $u1$/$u2$ prefix; not an encrypted record")
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V2):
+        body = _b64decode(ciphertext[len(ENCRYPTED_PREFIX_V2) :])
+    else:
+        body = _b64decode(ciphertext[len(ENCRYPTED_PREFIX) :])
     if len(body) < SALT_LEN + NONCE_LEN + 16:  # 16 = AEAD tag minimum
         raise PassphraseError("ciphertext is too short to be a valid record")
     salt = body[:SALT_LEN]
@@ -190,19 +251,27 @@ def parse_envelope(ciphertext: str) -> CryptoEnvelope:
     return CryptoEnvelope(salt=salt, nonce=nonce, ciphertext=ct)
 
 
-def decrypt(ciphertext: str, passphrase: str) -> str:
-    """Decrypt a single ``$u1$``-prefixed record. Wrong passphrase → ``PassphraseError``."""
+def decrypt(ciphertext: str, passphrase: str, *, slot_name: str | None = None) -> str:
+    """Decrypt a single `$u1$`/`$u2$`-prefixed record.
+
+    Wrong passphrase → ``PassphraseError``. For `$u2$` envelopes the
+    caller MUST supply the matching `slot_name`; without it the AEAD
+    verify fails and the read raises. Reading `$u1$` ignores
+    `slot_name` for back-compat — the legacy envelope has no slot
+    binding to verify against.
+    """
     env = parse_envelope(ciphertext)
     key = _derive_key(passphrase, env.salt)
     aead = ChaCha20Poly1305(key)
+    aad = _aad_for(slot_name) if ciphertext.startswith(ENCRYPTED_PREFIX_V2) else None
     try:
-        plaintext = aead.decrypt(env.nonce, env.ciphertext, associated_data=None)
+        plaintext = aead.decrypt(env.nonce, env.ciphertext, associated_data=aad)
     except InvalidTag as e:
         raise PassphraseError("passphrase didn't decrypt") from e
     return plaintext.decode("utf-8")
 
 
-def decrypt_with_key(ciphertext: str, key: bytes) -> str:
+def decrypt_with_key(ciphertext: str, key: bytes, *, slot_name: str | None = None) -> str:
     """Decrypt with a precomputed (salt-bound) key.
 
     Only correct when the salt baked into the ciphertext matches the
@@ -210,13 +279,18 @@ def decrypt_with_key(ciphertext: str, key: bytes) -> str:
     passphrase has been entered once: the reader derives one key per
     distinct salt and reuses it across slots that share that salt
     (the common case — `upgrade` writes all slots with the same salt).
+
+    For `$u2$` envelopes, `slot_name` MUST match the slot the
+    ciphertext was originally written under, otherwise the AEAD
+    verify fires.
     """
     if len(key) != KEY_LEN:
         raise ValueError(f"key must be {KEY_LEN} bytes")
     env = parse_envelope(ciphertext)
     aead = ChaCha20Poly1305(key)
+    aad = _aad_for(slot_name) if ciphertext.startswith(ENCRYPTED_PREFIX_V2) else None
     try:
-        plaintext = aead.decrypt(env.nonce, env.ciphertext, associated_data=None)
+        plaintext = aead.decrypt(env.nonce, env.ciphertext, associated_data=aad)
     except InvalidTag as e:
         raise PassphraseError("key didn't decrypt") from e
     return plaintext.decode("utf-8")
@@ -367,6 +441,7 @@ __all__ = [
     "APP_SETTING_SALT",
     "DEFAULT_KEY_CACHE_TTL_SEC",
     "ENCRYPTED_PREFIX",
+    "ENCRYPTED_PREFIX_V2",
     "KEY_LEN",
     "NONCE_LEN",
     "SALT_LEN",
@@ -380,6 +455,7 @@ __all__ = [
     "derive_key",
     "encrypt",
     "encrypt_with_key",
+    "envelope_version",
     "forget_cached_key",
     "forget_process_keys",
     "is_encrypted",

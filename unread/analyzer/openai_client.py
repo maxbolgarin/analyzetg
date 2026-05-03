@@ -140,14 +140,34 @@ def _is_auth_error(provider_name: str, exc: BaseException) -> bool:
     the same fundamental shape (HTTP 401/403). Rather than import every
     SDK's exception type at the top (and pay the import cost / version
     skew), inspect the exception class name and any ``status_code``
-    attribute. False positives are tolerable here — the worst case is
-    we surface a "key invalid" hint when something else went wrong.
+    attribute.
+
+    Pre-prod review: 403 is overloaded across providers — Anthropic
+    returns 403 for *content-policy refusals* (CSAM-shaped chat
+    content, etc.) and Google returns 403 for *quota / billing
+    disabled*. Telling the user "your key is bad" in those cases is
+    the wrong remediation. So we narrow 403 routing per provider:
+    treat it as auth only on OpenAI/OpenRouter/Local; for Anthropic
+    and Google, require an obvious auth-class name (or a 401) to
+    classify as auth.
     """
     cls = type(exc).__name__
-    if cls in {"AuthenticationError", "PermissionDeniedError", "PermissionDenied"}:
+    if cls in {"AuthenticationError"}:
         return True
     status = getattr(exc, "status_code", None)
-    return isinstance(status, int) and status in {401, 403}
+    if not isinstance(status, int):
+        return False
+    if status == 401:
+        return True
+    if status == 403:
+        provider = (provider_name or "").strip().lower()
+        if provider in {"openai", "openrouter", "local"}:
+            # PermissionDeniedError on the OpenAI SDK does mean auth.
+            return True
+        # Anthropic: 403 + an auth-shape class name = auth. Anything
+        # else (BadRequestError-style for content policy) is not.
+        return cls in {"PermissionDeniedError", "PermissionDenied"}
+    return False
 
 
 def _friendly_auth_message(provider_name: str) -> str:

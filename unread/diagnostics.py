@@ -164,10 +164,17 @@ async def build_bug_report() -> str:
     _tg_cmds.console = captured  # type: ignore[assignment]
     try:
         # doctor raises `typer.Exit(1)` on FAIL — that's a
-        # `click.exceptions.Exit` which subclasses RuntimeError, not
-        # SystemExit. We want the bundle regardless (a failing doctor
-        # is the most useful bug report).
-        with contextlib.suppress(SystemExit, RuntimeError):
+        # `click.exceptions.Exit`, NOT a subclass of RuntimeError.
+        # Pre-prod review: the original suppress(SystemExit,
+        # RuntimeError) was wrong about the class hierarchy and a
+        # real `typer.Exit(1)` propagated out of the bundle, aborting
+        # the bug report for exactly the users who needed it most.
+        # Catch the typed exception explicitly.
+        try:
+            from click.exceptions import Exit as _ClickExit
+        except ImportError:  # pragma: no cover — click is a Typer dep
+            _ClickExit = ()  # type: ignore[assignment,misc]
+        with contextlib.suppress(SystemExit, RuntimeError, _ClickExit):
             await cmd_doctor()
     finally:
         _tg_cmds.console = saved  # type: ignore[assignment]

@@ -229,10 +229,13 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
             out[key] = value
             continue
         env = parse_envelope(value)
+        # `slot_name=key` is the AAD binding for v2 envelopes. Passing
+        # it for v1 reads is harmless (decrypt ignores it when the
+        # prefix is `$u1$`) and means we don't need a per-row branch.
         cached_key = lookup_key_for_salt(env.salt)
         if cached_key is not None:
             try:
-                out[key] = decrypt_with_key(value, cached_key)
+                out[key] = decrypt_with_key(value, cached_key, slot_name=key)
                 continue
             except PassphraseError:
                 # Unlikely (cached key already validated against this
@@ -249,9 +252,9 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
 
             install_key = derive_key(passphrase, install_salt)
             remember_key_for_salt(install_salt, install_key)
-            out[key] = decrypt_with_key(value, install_key)
+            out[key] = decrypt_with_key(value, install_key, slot_name=key)
         else:
-            out[key] = decrypt(value, passphrase)
+            out[key] = decrypt(value, passphrase, slot_name=key)
 
     # Zeroize the per-process passphrase once the keys are cached. A
     # later read that doesn't need the passphrase (cached_key hits) is

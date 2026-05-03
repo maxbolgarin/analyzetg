@@ -123,7 +123,18 @@ def cmd_killme(yes: bool) -> int:
             # cwd=Path.home() because the install dir we just deleted may
             # have been the user's CWD; subprocess inherits the parent's
             # CWD and would fail with ENOENT before even running.
-            res = subprocess.run(argv, check=False, capture_output=True, text=True, cwd=str(Path.home()))
+            # env=clean_subprocess_env() so we don't hand the user's
+            # API keys to `uv tool uninstall` along the way out.
+            from unread.util.subprocess_env import clean_subprocess_env
+
+            res = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=str(Path.home()),
+                env=clean_subprocess_env(),
+            )
             stdout = (res.stdout or "").strip()
             stderr = (res.stderr or "").strip()
             if res.returncode == 0:
