@@ -22,6 +22,8 @@ avoid hitting SQLite on every secret lookup during a single CLI run.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import sqlite3
 from pathlib import Path
 
@@ -30,12 +32,40 @@ from unread.util.logging import get_logger
 
 log = get_logger(__name__)
 
-# Identifiers used when calling into `keyring`. The service name groups
-# all of unread's slots under a single Keychain item / Secret-Service
-# collection entry, making it easy for the user to inspect or revoke
-# them ("unread" appears once in Keychain Access, with one row per
-# allowlisted key).
-KEYCHAIN_SERVICE = "unread"
+# Identifiers used when calling into `keyring`. Two installs on the
+# same OS user otherwise share a flat `unread` namespace and silently
+# clobber each other's keychain entries. We append a short hash of the
+# install home so dev + prod (or two cwd-bound installs) coexist
+# cleanly. Default-install hosts (the overwhelming majority) keep the
+# bare "unread" name so existing entries continue to resolve.
+_KEYCHAIN_BASE = "unread"
+
+
+def _keychain_service_name() -> str:
+    """Return `unread` for default installs, `unread:<hash>` for custom paths.
+
+    The discriminator is the first 8 hex chars of `sha256(install_home)`.
+    Stable across runs, fits in any keyring backend's service-name
+    field, and short enough to read in Keychain Access.
+    """
+    try:
+        from unread.core.paths import unread_home
+
+        home = unread_home().resolve()
+    except Exception:
+        return _KEYCHAIN_BASE
+    default_home = (Path(os.path.expanduser("~")) / ".unread").resolve()
+    if home == default_home:
+        return _KEYCHAIN_BASE
+    suffix = hashlib.sha256(str(home).encode("utf-8")).hexdigest()[:8]
+    return f"{_KEYCHAIN_BASE}:{suffix}"
+
+
+# Module-level constant kept for back-compat with callers that import
+# `KEYCHAIN_SERVICE` directly. New code should call
+# `_keychain_service_name()` so a per-install path is honored even
+# when the env changes mid-process (tests, dev shell switching).
+KEYCHAIN_SERVICE = _keychain_service_name()
 
 # Backend identifiers persisted in `app_settings::secrets.backend`.
 # Phase 3 will add ``BACKEND_PASSPHRASE``; the constant is reserved

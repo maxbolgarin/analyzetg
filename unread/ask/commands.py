@@ -1017,11 +1017,16 @@ async def _refresh_chats(
                     "thread_id": thread_id,
                     "direction": "forward",
                 }
-                # Pass both bounds when available; backfill combines them
-                # (more restrictive wins). Critical when local_max is much
-                # older than since_date — without `since_date` the walk
-                # would pull every message since local_max (potentially
-                # the whole chat).
+                # Pass both bounds when available. Telethon's
+                # `iter_messages(min_id=..., offset_date=..., reverse=True)`
+                # is unreliable: `min_id` dominates and the date bound is
+                # silently dropped (see commit 466bf69). Until that's
+                # fixed upstream, backfill on a forward walk uses
+                # `offset_date` ALONE when `since_date` is set — at the
+                # cost of re-fetching messages older than `local_max`
+                # but younger than `since_date` (idempotent in the DB).
+                # Future work: pick the tighter bound at this call site
+                # by looking up `local_max`'s date and comparing.
                 if local_max:
                     kwargs["from_msg_id"] = local_max
                 if since_date is not None:

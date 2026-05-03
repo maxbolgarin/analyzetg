@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from unread import i18n
 from unread.config import get_settings, reset_settings
 
@@ -18,9 +16,14 @@ def test_t_falls_back_to_english_for_missing_lang():
     assert i18n.t("period_label", "de") == "Period"
 
 
-def test_t_unknown_key_raises():
-    with pytest.raises(KeyError, match="unknown key"):
-        i18n.t("does_not_exist", "en")
+def test_t_unknown_key_returns_sentinel():
+    """Pre-prod review: a missing key used to raise `KeyError`. Some
+    `_tf("…")` calls run at help-render time, so a single missing key
+    broke the entire CLI start-up. Now returns a `!key!` sentinel and
+    logs a warning so callers get a visible placeholder instead of a
+    crash."""
+    out = i18n.t("does_not_exist", "en")
+    assert out == "!does_not_exist!"
 
 
 def test_language_name_known_codes():

@@ -492,18 +492,19 @@ def cmd_upgrade() -> None:
         except OSError as e:
             console.print(f"[yellow]Could not remove {candidate}:[/] {e}")
 
-    # Cache the derived key so this same shell doesn't need to
-    # re-prompt on the next invocation. TTL=None means "until lock".
-    from unread.security.crypto import store_cached_key
-
-    try:
-        store_cached_key(key, salt, ttl_seconds=None)
-    except OSError as e:
-        console.print(f"[yellow]Couldn't write key cache:[/] {e} — you'll be prompted again next run.")
+    # Pre-prod review: do NOT auto-cache the derived key on disk after
+    # `upgrade`. The previous behavior (`ttl_seconds=None`) wrote the
+    # master key under `~/.unread/.runtime/key` forever, on macOS /
+    # Windows persisted across reboots and into the user's `~/`
+    # backup. Anyone reading the file got every secret. Users who want
+    # the convenience can opt in explicitly via `unread security
+    # unlock --keep 30m` once `upgrade` finishes.
 
     console.print(f"\n[green]✓ Encrypted {len(encrypted)} slot(s) with your passphrase.[/]")
     console.print(
-        "Active backend now: [cyan]passphrase[/]. Run `unread security lock` to forget the cached key."
+        "Active backend now: [cyan]passphrase[/]. "
+        "Run [cyan]unread security unlock --keep 30m[/] for cross-shell convenience, "
+        "or [cyan]unread security lock[/] to wipe the in-process key."
     )
 
 
@@ -543,7 +544,6 @@ def cmd_rotate_passphrase() -> None:
         forget_cached_key,
         forget_process_keys,
         remember_key_for_salt,
-        store_cached_key,
     )
 
     # Validate the OLD passphrase by decrypting the existing slots
@@ -586,17 +586,20 @@ def cmd_rotate_passphrase() -> None:
 
     _run_async(_persist_upgrade(db_path, new_salt, encrypted))
 
-    # Refresh the in-process / cross-invocation caches with the new key.
+    # Refresh the in-process key cache with the new key. Do NOT
+    # auto-write the cross-invocation (on-disk) cache — same reasoning
+    # as `cmd_upgrade`: on macOS/Windows it would persist across
+    # reboot. The user can opt in via `unread security unlock` if
+    # they want cross-shell convenience.
     forget_process_keys()
     remember_key_for_salt(new_salt, new_key)
     _secrets._PROCESS_PASSPHRASE = new_passphrase  # type: ignore[attr-defined]
     forget_cached_key()
-    import contextlib as _cl
-
-    with _cl.suppress(OSError):
-        store_cached_key(new_key, new_salt, ttl_seconds=None)
 
     console.print(f"[green]✓ Re-encrypted {len(encrypted)} slot(s) with the new passphrase.[/]")
+    console.print(
+        "  [grey70]Run [cyan]unread security unlock --keep 30m[/] to cache the new key for cross-shell use.[/]"
+    )
 
 
 def cmd_downgrade() -> None:
@@ -705,17 +708,37 @@ def cmd_unlock(keep: str | None = None) -> None:
         console.print(f"[red]Decryption failed:[/] {e}")
         raise typer.Exit(1) from e
 
-    ttl = _parse_keep(keep) if keep else None
+    # Default TTL when --keep is omitted: pre-prod review flagged the
+    # old "until lock" default as a security regression (file lives on
+    # persistent disk on macOS/Windows). Users who want a longer
+    # window can pass `--keep 8h` etc.; --keep until-lock is still
+    # available for power users via the explicit `--keep until-lock`
+    # spelling parsed by `_parse_keep`.
+    from unread.security.crypto import DEFAULT_KEY_CACHE_TTL_SEC
+
+    ttl = _parse_keep(keep) if keep else DEFAULT_KEY_CACHE_TTL_SEC
     path = store_cached_key(key, salt, ttl_seconds=ttl)
-    suffix = f" (expires in {keep})" if keep else " (until `unread security lock`)"
+    if ttl is None:
+        suffix = " (until `unread security lock`)"
+    elif keep:
+        suffix = f" (expires in {keep})"
+    else:
+        suffix = f" (expires in {DEFAULT_KEY_CACHE_TTL_SEC // 60} minutes — default)"
     console.print(f"[green]✓ Cached key at {path}[/]{suffix}")
 
 
-def _parse_keep(spec: str) -> int:
-    """Parse '30m' / '2h' / '1d' into seconds. Default unit: minutes."""
+def _parse_keep(spec: str) -> int | None:
+    """Parse '30m' / '2h' / '1d' into seconds. Default unit: minutes.
+
+    `until-lock` returns None — caller stores the key with no expiry
+    (cache lives until `unread security lock` or reboot). Power-user
+    only because the cache file is on persistent disk on macOS/Windows.
+    """
     s = spec.strip().lower()
     if not s:
         raise typer.BadParameter("empty --keep value")
+    if s in {"until-lock", "until_lock", "forever", "session"}:
+        return None
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     last = s[-1]
     if last in units:

@@ -8,6 +8,11 @@ requires-python = ">=3.11"
 authors = [{ name = "Max Bolgarin", email = "mxbolgarin@gmail.com" }]
 dependencies = [
     "typer>=0.12",
+    # Click 9 changed `Context._protected_args` from a private attribute
+    # to a property; `_PreferSubcommandsGroup` in cli.py still writes
+    # to the underscore name. Pin <9 until that interaction is updated
+    # and validated end-to-end.
+    "click<9",
     "telethon>=1.36",
     "openai>=1.50",
     "pydantic>=2.7",
