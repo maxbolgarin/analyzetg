@@ -41,3 +41,31 @@ def test_describe_with_ref_calls_cmd_describe() -> None:
     mock_cmd.assert_called_once()
     args, kwargs = mock_cmd.call_args
     assert (args[0] if args else kwargs.get("ref")) == "@somegroup"
+
+
+def test_describe_folders_calls_list_folders() -> None:
+    """`unread describe folders` runs the folder listing helper."""
+    from unread.cli import app
+
+    runner = CliRunner()
+    with patch("unread.cli._list_folders") as mock_list:
+
+        async def _noop(*a, **kw):
+            return None
+
+        mock_list.side_effect = _noop
+        result = runner.invoke(app, ["describe", "folders"])
+    assert result.exit_code == 0, result.output
+    mock_list.assert_called_once()
+
+
+def test_top_level_folders_command_is_gone() -> None:
+    """`unread folders` no longer resolves to a command."""
+    from unread.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["folders"])
+    # `unread folders` previously ran the folder listing. After the move
+    # it must NOT silently succeed; either Click rejects it as no-such-
+    # command, or the analyze entry point rejects it via _exit_unrecognized_ref.
+    assert result.exit_code != 0, f"`unread folders` unexpectedly succeeded:\n{result.output}"

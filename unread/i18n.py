@@ -170,8 +170,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Управление подписками Telegram (что синхронизировать).",
     },
     "cmd_folders": {
-        "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`).",
-        "ru": "Список папок Telegram (для `unread --folder NAME` / `unread dump --folder NAME`).",
+        "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`). Invoke as `unread describe folders`.",
+        "ru": "Список папок Telegram (для `unread --folder NAME` / `unread dump --folder NAME`). Команда: `unread describe folders`.",
     },
     "cmd_stats": {
         "en": "Aggregate API spend, cache hit rate and run counts.",

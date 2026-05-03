@@ -1364,7 +1364,7 @@ def _print_provider_credentials_banner(provider: str) -> None:
 
 describe_app = _UnreadTyper(
     help=_t("cmd_describe"),
-    cls=_UnreadGroup,
+    cls=_UnreadRootGroup,
 )
 app.add_typer(describe_app, name="describe", rich_help_panel=PANEL_TELEGRAM)
 
@@ -1417,9 +1417,9 @@ def describe(
     )
 
 
-@app.command("folders", rich_help_panel=PANEL_MAIN, help=_t("cmd_folders"))
-def folders() -> None:
-    """List your Telegram folders (for use with `analyze --folder NAME` / `dump --folder NAME`)."""
+@describe_app.command("folders", help=_t("cmd_folders"))
+def describe_folders() -> None:
+    """List your Telegram folders (for use with `--folder NAME`)."""
     _run(_list_folders())
 
 
@@ -3931,7 +3931,6 @@ _RESERVED_TOP_LEVEL.update(
         "help",
         "migrate",
         "describe",
-        "folders",
         "sync",
         "chats",
         "cache",

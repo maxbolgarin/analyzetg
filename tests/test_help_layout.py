@@ -63,7 +63,8 @@ def test_help_overview_lists_visible_commands() -> None:
 
     `tg` is intentionally absent — it became a magic ref token (see the
     `<ref> can be` block), not a subcommand. The Telegram setup verbs
-    (`login`, `logout`, `describe`, `folders`) live at the top level.
+    (`login`, `logout`, `describe`) live at the top level; `folders` moved
+    under `describe` as `unread describe folders`.
     """
     out = _invoke("help")
     # Sample of commands we know are registered and visible.
@@ -74,7 +75,6 @@ def test_help_overview_lists_visible_commands() -> None:
         "login",
         "logout",
         "describe",
-        "folders",
         "sync",
         "chats",
         "stats",
@@ -214,7 +214,7 @@ def test_help_flags_exposes_root_options() -> None:
         ["login"],
         ["logout"],
         ["describe"],
-        ["folders"],
+        ["describe", "folders"],
         ["chats", "add"],
         ["chats", "manage"],
         ["chats", "run"],
@@ -268,7 +268,7 @@ def test_help_chats_lists_subcommands() -> None:
 def test_help_lists_telegram_setup_commands() -> None:
     """The promoted top-level Telegram commands all show up in the overview."""
     out = _invoke("help")
-    for cmd in ("login", "logout", "describe", "folders"):
+    for cmd in ("login", "logout", "describe"):
         assert cmd in out, f"top-level `{cmd}` missing from overview"
 
 
