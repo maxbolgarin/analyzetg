@@ -62,6 +62,9 @@ jobs:
           npm install -g semantic-release
           npm install -g @semantic-release/commit-analyzer
           npm install -g @semantic-release/release-notes-generator
+          npm install -g @semantic-release/changelog
+          npm install -g @semantic-release/exec
+          npm install -g @semantic-release/git
           npm install -g @semantic-release/github
           npm install -g conventional-changelog-conventionalcommits
 
@@ -70,8 +73,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The exec plugin's prepareCmd runs `python scripts/sync_version.py`
+          # to bump pyproject.toml + unread/__init__.py; the git plugin
+          # then commits those alongside CHANGELOG.md and pushes back to
+          # main. Capture the version semantic-release computed for the
+          # publish + verify steps below.
           npx semantic-release
-          # Extract version from latest git tag
           VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -n "$VERSION" ]; then
             echo "new_release_published=true" >> "$GITHUB_OUTPUT"
@@ -86,37 +93,34 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Sync version into package + pyproject
+      - name: Build wheel + sdist
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: uv build
+
+      - name: Verify wheel includes data files + correct version
         if: steps.semantic.outputs.new_release_published == 'true'
         env:
           NEW_VERSION: ${{ steps.semantic.outputs.new_release_version }}
         run: |
-          # semantic-release tags the commit but doesn't write the new
-          # version into pyproject.toml / __init__.py. We do that here so
-          # the wheel published below carries the correct number.
+          # Belt-and-braces guard: assert the wheel contains the ship-
+          # critical data files (schema.sql + every preset) and that its
+          # filename carries the version semantic-release just computed.
+          # A mismatch here means the version-sync or hatch include rules
+          # silently broke — fail loudly before publishing to PyPI.
+          set -euo pipefail
+          unzip -l dist/*.whl | grep -E "unread/db/schema\.sql$" \
+            || { echo "wheel missing schema.sql"; exit 1; }
+          unzip -l dist/*.whl | grep -E "presets/en/summary\.md$" \
+            || { echo "wheel missing presets/en/summary.md"; exit 1; }
           python - <<'PY'
-          import os, re, pathlib
+          import glob, os, sys
           version = os.environ["NEW_VERSION"]
-          for path, pattern in [
-              ("pyproject.toml", r'^version\s*=\s*"[^"]+"'),
-              ("unread/__init__.py", r'^__version__\s*=\s*"[^"]+"'),
-          ]:
-              p = pathlib.Path(path)
-              text = p.read_text()
-              new_text = re.sub(
-                  pattern,
-                  f'version = "{version}"' if path.endswith(".toml") else f'__version__ = "{version}"',
-                  text,
-                  count=1,
-                  flags=re.MULTILINE,
-              )
-              p.write_text(new_text)
-              print(f"updated {path} -> {version}")
+          wheels = glob.glob("dist/*.whl")
+          assert wheels, "no wheel built"
+          ok = any(version in w for w in wheels)
+          if not ok:
+              sys.exit(f"wheel filename {wheels} does not contain {version!r}")
           PY
-
-      - name: Build wheel + sdist
-        if: steps.semantic.outputs.new_release_published == 'true'
-        run: uv build
 
       - name: Publish to PyPI
         if: steps.semantic.outputs.new_release_published == 'true'
