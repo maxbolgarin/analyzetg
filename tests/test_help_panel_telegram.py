@@ -1,5 +1,6 @@
 # tests/test_help_panel_telegram.py
 """Help renderer groups Telegram commands under a 'Telegram' panel."""
+
 from __future__ import annotations
 
 from typer.testing import CliRunner
