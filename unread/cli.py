@@ -1362,8 +1362,17 @@ def _print_provider_credentials_banner(provider: str) -> None:
     )
 
 
-@app.command("describe", rich_help_panel=PANEL_TELEGRAM, help=_t("cmd_describe"))
+describe_app = _UnreadTyper(
+    help=_t("cmd_describe"),
+    invoke_without_command=True,
+    cls=_UnreadGroup,
+)
+app.add_typer(describe_app, name="describe", rich_help_panel=PANEL_TELEGRAM)
+
+
+@describe_app.callback(invoke_without_command=True)
 def describe(
+    ctx: typer.Context,
     ref: str | None = typer.Argument(
         None,
         help=(
@@ -1393,6 +1402,9 @@ def describe(
     --kind / --search / --limit. With a ref, forums get a topics table
     and channels get linked-discussion + subscriber count.
     """
+    if ctx.invoked_subcommand is not None:
+        # A subcommand was matched (e.g. `describe folders` once added in Task 4).
+        return
     from unread.tg.commands import cmd_describe
 
     _run(
