@@ -51,11 +51,16 @@ def _patch_flood_error(monkeypatch):
     yield
 
 
-async def test_final_attempt_converts_to_runtime_error():
+async def test_final_attempt_converts_to_runtime_error(monkeypatch):
     """When every retry hits FloodWait, the final attempt's FloodWait
     becomes a RuntimeError with a "rate-limited" message — not a raw
     telethon exception that bubbles to the user as a stacktrace.
     """
+    # Stub asyncio.sleep so the decorator's between-retry backoff
+    # (seconds=42 → ~43s × max_retries) doesn't slow the test.
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(_asyncio, "sleep", _no_sleep)
 
     @retry_on_flood(max_retries=2)
     async def always_floods():
