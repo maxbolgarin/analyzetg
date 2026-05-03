@@ -2832,6 +2832,88 @@ def ask(
       unread ask --folder Work "..." --last-days 7
       unread ask --global "..."                                  # all synced, no wizard
     """
+    # Pre-TG dispatch: file / YouTube / website refs route to dedicated
+    # adapters (mirrors cmd_dump's shape) so non-TG sources never trigger
+    # a Telegram session open. The detection helpers (_looks_like_local_file,
+    # is_youtube_url, is_website_url) are the same ones cmd_dump uses, so
+    # all three top-level ref-takers (analyze, dump, ask) recognize the
+    # same set of ref shapes.
+    if ref and ref != TG_INTERACTIVE_REF:
+        if ref == _STDIN_REF_SENTINEL or _looks_like_local_file(ref):
+            from unread.ask.sources.file import cmd_ask_file
+
+            _run(
+                cmd_ask_file(
+                    ref,
+                    question,
+                    model=model,
+                    output=output,
+                    console_out=console_out,
+                    max_cost=max_cost,
+                    yes=yes,
+                    language=language,
+                    content_language=content_language,
+                    no_followup=no_followup,
+                    semantic=semantic,
+                    build_index=build_index,
+                    rerank=rerank,
+                    limit=limit,
+                    show_retrieved=show_retrieved,
+                )
+            )
+            return
+        from unread.youtube.urls import is_youtube_url
+
+        if is_youtube_url(ref):
+            from unread.ask.sources.youtube import cmd_ask_youtube
+
+            _run(
+                cmd_ask_youtube(
+                    ref,
+                    question,
+                    model=model,
+                    output=output,
+                    console_out=console_out,
+                    max_cost=max_cost,
+                    yes=yes,
+                    language=language,
+                    content_language=content_language,
+                    no_followup=no_followup,
+                    semantic=semantic,
+                    build_index=build_index,
+                    rerank=rerank,
+                    limit=limit,
+                    show_retrieved=show_retrieved,
+                )
+            )
+            return
+        from unread.website.urls import is_telegram_url, is_website_url
+
+        if is_website_url(ref) and not is_telegram_url(ref):
+            from unread.ask.sources.website import cmd_ask_website
+
+            _run(
+                cmd_ask_website(
+                    ref,
+                    question,
+                    model=model,
+                    output=output,
+                    console_out=console_out,
+                    max_cost=max_cost,
+                    yes=yes,
+                    language=language,
+                    content_language=content_language,
+                    no_followup=no_followup,
+                    semantic=semantic,
+                    build_index=build_index,
+                    rerank=rerank,
+                    limit=limit,
+                    show_retrieved=show_retrieved,
+                )
+            )
+            return
+
+    # Fall through to the Telegram-archive ask (existing path).
     from unread.ask.commands import cmd_ask
 
     _run(
