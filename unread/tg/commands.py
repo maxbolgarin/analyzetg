@@ -916,12 +916,15 @@ async def cmd_doctor() -> None:
 
     if sys.platform == "darwin":
         try:
+            from unread.util.subprocess_env import clean_subprocess_env
+
             res = _subprocess.run(
                 ["fdesetup", "status"],
                 capture_output=True,
                 text=True,
                 timeout=5,
                 check=False,
+                env=clean_subprocess_env(),
             )
             out = (res.stdout or "").strip()
             if "FileVault is On" in out:

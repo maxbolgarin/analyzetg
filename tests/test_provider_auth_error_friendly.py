@@ -41,8 +41,18 @@ def test_is_auth_error_status_401():
     assert _is_auth_error("openai", _StatusError("nope", 401))
 
 
-def test_is_auth_error_status_403():
-    assert _is_auth_error("anthropic", _StatusError("forbidden", 403))
+def test_is_auth_error_status_403_on_openai_is_auth():
+    """OpenAI 403 is unambiguous auth (PermissionDeniedError)."""
+    assert _is_auth_error("openai", _StatusError("forbidden", 403))
+
+
+def test_is_auth_error_status_403_on_anthropic_with_generic_error_is_not_auth():
+    """Pre-prod review: Anthropic 403 is overloaded (content-policy
+    refusal). A generic-class 403 must NOT be classified as auth so
+    the user gets the right "your content was refused" message rather
+    than "your key is bad" (which sends them on a wild goose chase
+    re-running `unread init`)."""
+    assert _is_auth_error("anthropic", _StatusError("forbidden", 403)) is False
 
 
 def test_is_auth_error_negatives():

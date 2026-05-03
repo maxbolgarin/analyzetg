@@ -34,8 +34,16 @@ class NoAudioStream(RuntimeError):
 
 
 async def _run(cmd: list[str]) -> tuple[int, bytes, bytes]:
+    # env=clean_subprocess_env() so ffmpeg doesn't carry our API keys
+    # in its environment block — visible via /proc/<pid>/environ to
+    # other local users on shared hosts.
+    from unread.util.subprocess_env import clean_subprocess_env
+
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=clean_subprocess_env(),
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode or 0, stdout, stderr

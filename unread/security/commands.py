@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -124,11 +125,35 @@ def cmd_status() -> None:
     if os.name == "posix":
         try:
             home = db_path.parent.parent
-            mode = home.stat().st_mode & 0o777
             console.print("")
             console.print("[bold]Filesystem[/]")
-            symbol = "[green]ok[/]" if not (mode & 0o077) else "[yellow]warn[/]"
-            console.print(f"  {symbol} {home} mode {oct(mode)} (expect 0o700)")
+
+            def _check_mode(path: Path, expect_mask: int, expect_label: str) -> None:
+                try:
+                    if not path.exists():
+                        return
+                    mode = path.stat().st_mode & 0o777
+                    bad = (mode & 0o077) != 0
+                    symbol = "[yellow]warn[/]" if bad else "[green]ok[/]"
+                    console.print(f"  {symbol} {path} mode {oct(mode)} (expect {expect_label})")
+                except OSError:
+                    pass
+
+            # Pre-prod review: cmd_status used to report only the home
+            # dir mode, missing the case where data.sqlite or the
+            # Telethon session file was world-readable on its own (e.g.
+            # restored from a backup that flattened modes). Check each
+            # sensitive artifact individually so the user sees exactly
+            # which file needs `chmod 600`.
+            _check_mode(home, 0o700, "0o700")
+            _check_mode(db_path, 0o600, "0o600")
+            settings = get_settings()
+            session_path = settings.telegram.session_path
+            for cand in (
+                session_path,
+                session_path.with_name(session_path.name + ".session"),
+            ):
+                _check_mode(cand, 0o600, "0o600")
         except OSError:
             pass
 
@@ -136,12 +161,15 @@ def cmd_status() -> None:
         import subprocess
 
         try:
+            from unread.util.subprocess_env import clean_subprocess_env
+
             res = subprocess.run(
                 ["fdesetup", "status"],
                 capture_output=True,
                 text=True,
                 timeout=5,
                 check=False,
+                env=clean_subprocess_env(),
             )
             out = (res.stdout or "").strip()
             console.print("")
@@ -456,25 +484,32 @@ def cmd_upgrade() -> None:
     key = derive_key(passphrase, salt)
     remember_key_for_salt(salt, key)
 
-    # Encrypt every slot. We don't include the Telegram session yet —
-    # that comes from disk, not from `read_secrets`.
+    # Encrypt every slot using the v2 envelope (slot name bound as
+    # AEAD AAD). Without that binding, an attacker who can edit the DB
+    # can swap the openai.api_key ciphertext into the
+    # telegram.api_hash row and the AEAD still verifies.
     encrypted: dict[str, str] = {}
     for slot, value in plaintext.items():
         if slot not in SECRET_KEYS or slot == "telegram.session_string":
             continue
-        encrypted[slot] = encrypt_with_key(value, key, salt=salt)
+        encrypted[slot] = encrypt_with_key(value, key, salt=salt, slot_name=slot)
 
     # Convert the on-disk session file to an encrypted string.
     session_str = _convert_sqlite_session_to_string(settings)
     if session_str:
-        encrypted["telegram.session_string"] = encrypt_with_key(session_str, key, salt=salt)
+        encrypted["telegram.session_string"] = encrypt_with_key(
+            session_str, key, salt=salt, slot_name="telegram.session_string"
+        )
 
-    # Persist atomically: salt + ciphertexts + backend flag.
-    _run_async(_persist_upgrade(db_path, salt, encrypted))
-
-    # Backend flip last so a crash before this step leaves the install
-    # readable via the old backend.
-    _set_active_backend_sync(db_path, BACKEND_PASSPHRASE)
+    # Persist atomically: salt + ciphertexts AND backend flag in one
+    # aiosqlite transaction. Pre-prod review: the previous flow had
+    # three separate transactions (salt+ciphertext via aiosqlite,
+    # backend flag via sync sqlite3, keychain delete) — a SIGKILL
+    # between them left an unreadable install or a stale backend
+    # pointing at no ciphertext. The combined transaction means
+    # there's no intermediate state where readers see one but not the
+    # other.
+    _run_async(_persist_upgrade(db_path, salt, encrypted, target_backend=BACKEND_PASSPHRASE))
 
     # Best-effort cleanup of the plaintext side-channels.
     if current_backend == BACKEND_KEYCHAIN:
@@ -508,25 +543,83 @@ def cmd_upgrade() -> None:
     )
 
 
-async def _persist_upgrade(db_path: Path, salt: bytes, encrypted: dict[str, str]) -> None:
-    """Write the install salt + ciphertext slots in one transaction."""
-    import base64
+async def _persist_upgrade(
+    db_path: Path,
+    salt: bytes,
+    encrypted: dict[str, str],
+    *,
+    target_backend: str | None = None,
+) -> None:
+    """Write the install salt + ciphertext slots + backend flag atomically.
 
+    `target_backend` is the new value of `app_settings::secrets.backend`.
+    Passing it (instead of flipping the flag in a follow-up sync sqlite
+    call) means a SIGKILL between the writes can't leave readers seeing
+    a backend pointer that doesn't match the on-disk ciphertext shape.
+
+    Implementation note: the high-level `set_app_setting` /
+    `put_secrets` helpers each call `self._conn.commit()` internally,
+    which would terminate our outer BEGIN IMMEDIATE. Issue the writes
+    directly so all of them land in one commit (or roll back together).
+    """
+    import base64
+    from datetime import UTC, datetime
+
+    from unread.db._keys import OVERRIDE_KEYS, SECRET_KEYS
     from unread.db.repo import open_repo
 
+    salt_b64 = base64.urlsafe_b64encode(salt).rstrip(b"=").decode("ascii")
+    now_iso = datetime.now(UTC).isoformat()
+
+    # Allowlist enforcement (same as the helpers do at their boundaries).
+    for slot in encrypted:
+        if slot not in SECRET_KEYS:
+            raise ValueError(f"unknown secret key: {slot!r}; allowed: {sorted(SECRET_KEYS)}")
+    if "security.kdf_salt" not in OVERRIDE_KEYS:
+        raise ValueError("'security.kdf_salt' not in OVERRIDE_KEYS allowlist — schema drift")
+    if target_backend is not None and "secrets.backend" not in OVERRIDE_KEYS:
+        raise ValueError("'secrets.backend' not in OVERRIDE_KEYS allowlist — schema drift")
+
     async with open_repo(db_path) as repo:
-        await repo.set_app_setting(  # type: ignore[attr-defined]
-            "security.kdf_salt",
-            base64.urlsafe_b64encode(salt).rstrip(b"=").decode("ascii"),
-        )
-        # Replace plaintext rows with ciphertext. We don't blank
-        # missing slots — leave them as they were so a re-run is
-        # idempotent.
-        if encrypted:
-            await repo.put_secrets(encrypted)
-        # `put_secrets` above overwrote the rows with ciphertext so
-        # there's nothing more to do per-slot. The future "wipe stale
-        # plaintext after migration FROM keychain" pass would land here.
+        conn = repo._conn  # type: ignore[attr-defined]
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            await conn.execute(
+                """
+                INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                ("security.kdf_salt", salt_b64, now_iso),
+            )
+            if encrypted:
+                rows = [(k, v, now_iso) for k, v in encrypted.items() if v]
+                if rows:
+                    await conn.executemany(
+                        """
+                        INSERT INTO secrets(key, value, updated_at) VALUES(?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value=excluded.value,
+                            updated_at=excluded.updated_at
+                        """,
+                        rows,
+                    )
+            if target_backend is not None:
+                await conn.execute(
+                    """
+                    INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    ("secrets.backend", target_backend, now_iso),
+                )
+            await conn.commit()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await conn.rollback()
+            raise
 
 
 def cmd_rotate_passphrase() -> None:
@@ -580,10 +673,14 @@ def cmd_rotate_passphrase() -> None:
     for slot, value in plaintext.items():
         if slot not in SECRET_KEYS or slot == "telegram.session_string":
             continue
-        encrypted[slot] = encrypt_with_key(value, new_key, salt=new_salt)
+        # v2 envelope (slot bound) — same upgrade path as cmd_upgrade.
+        encrypted[slot] = encrypt_with_key(value, new_key, salt=new_salt, slot_name=slot)
     if session_str:
-        encrypted["telegram.session_string"] = encrypt_with_key(session_str, new_key, salt=new_salt)
+        encrypted["telegram.session_string"] = encrypt_with_key(
+            session_str, new_key, salt=new_salt, slot_name="telegram.session_string"
+        )
 
+    # Backend was already `passphrase` (gate above); no flip needed.
     _run_async(_persist_upgrade(db_path, new_salt, encrypted))
 
     # Refresh the in-process key cache with the new key. Do NOT
@@ -881,7 +978,6 @@ def cmd_recover() -> None:
     from unread.db.repo import read_data_db_secrets_sync
     from unread.security.crypto import (
         PassphraseError,
-        decrypt,
         decrypt_with_key,
         derive_key,
         is_encrypted,
@@ -933,14 +1029,30 @@ def cmd_recover() -> None:
         raise typer.Exit(1) from e
     install_key: bytes | None = derive_key(pw, salt) if salt is not None else None
 
+    # Pre-prod review: previous loop did one Scrypt per non-matching
+    # salt - N salts means N x Scrypt for a wrong passphrase. Cache
+    # derived keys keyed by salt so each distinct salt costs at most
+    # one derivation regardless of how many slots share it.
+    salt_keys: dict[bytes, bytes] = {}
+    if install_key is not None and salt is not None:
+        salt_keys[salt] = install_key
+
+    # Validate the passphrase against the FIRST encrypted row before
+    # surfacing any plaintext. Without this, a wrong passphrase that
+    # happens to have a salt-shared install key for some slots would
+    # leak partial decrypts before failing on a later slot — both a
+    # confusing UX and a small information disclosure ("which slots
+    # were salt-shared with the install").
     decrypted: dict[str, tuple[str, str]] = {}
-    for slot, (where, ct) in found.items():
+    items = list(found.items())
+    for slot, (where, ct) in items:
         try:
             env = parse_envelope(ct)
-            if install_key is not None and env.salt == salt:
-                plaintext = decrypt_with_key(ct, install_key)
-            else:
-                plaintext = decrypt(ct, pw)
+            row_key = salt_keys.get(env.salt)
+            if row_key is None:
+                row_key = derive_key(pw, env.salt)
+                salt_keys[env.salt] = row_key
+            plaintext = decrypt_with_key(ct, row_key, slot_name=slot)
         except PassphraseError:
             console.print(f"[red]Wrong passphrase[/] (failed on slot {slot!r}). Aborting before any writes.")
             raise typer.Exit(1) from None

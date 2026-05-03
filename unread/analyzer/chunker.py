@@ -113,10 +113,33 @@ def build_chunks(
     prev_date = None
     soft_break = timedelta(minutes=soft_break_minutes)
     min_roll_tokens = max(soft_break_min_tokens, min(budget // 3, 4000))
+    oversize_warned = False
 
     for m in msgs:
         line = _fmt_line(m) + "\n"
         t = count_tokens(line, model)
+        if t > budget and not oversize_warned:
+            # Pre-prod review: a single message larger than the body
+            # budget gets emitted as a chunk that the provider rejects
+            # with "prompt is too long". We can't safely truncate the
+            # body here without mutating shared `Message` objects, so
+            # emit a one-shot warning per chunker call so the operator
+            # sees this at the top of their run instead of debugging a
+            # mysterious 4xx from the provider. Once-per-call so a
+            # chat with N oversized messages doesn't spam.
+            oversize_warned = True
+            log.warning(
+                "chunker.message_exceeds_budget",
+                msg_id=m.msg_id,
+                chat_id=m.chat_id,
+                tokens=t,
+                budget=budget,
+                hint=(
+                    "Message body alone exceeds chunk budget — provider will "
+                    "reject. Raise output_budget_tokens / max_chunk_input_tokens "
+                    "or pre-summarize this message."
+                ),
+            )
         if prev_date is not None:
             gap = m.date - prev_date
             if gap > soft_break and current.tokens >= min_roll_tokens:

@@ -1,8 +1,11 @@
 """ask + mark-read: CLI flag and wizard step.
 
 Covers the four behavioral surfaces:
-  (a) `--mark-read` + single-chat scope → calls `mark_as_read` with the
-      highest msg_id from the retrieved pool.
+  (a) `--mark-read` + single-chat scope → calls `mark_as_read` with
+      `repo.get_max_msg_id(chat)` (deterministic — pre-prod review:
+      previously used max(prior_pool.msg_id) which drifted across
+      re-runs because the pool composition depended on retrieval
+      scoring).
   (b) `--no-mark-read` (mark_read=False) is a no-op.
   (c) `--mark-read --global` (or any non-single-chat scope) is a no-op —
       there's no single chat to mark.
@@ -32,8 +35,15 @@ def _msg(chat_id: int, msg_id: int) -> Message:
 
 @pytest.mark.asyncio
 async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
-    """`unread ask "Q" --chat=@x --mark-read` calls send_read_acknowledge with
-    the resolved chat_id and the highest msg_id from the retrieved pool."""
+    """`unread ask "Q" --chat=@x --mark-read` calls send_read_acknowledge
+    with the resolved chat_id and `repo.get_max_msg_id(chat)`.
+
+    Pre-prod review: previously used max(prior_pool.msg_id) which
+    drifted across re-runs because the pool depended on retrieval
+    scoring. The deterministic `repo.get_max_msg_id` matches the
+    user's mental model ("I've now reviewed this chat") regardless
+    of which subset retrieval surfaced.
+    """
     from unread.ask import commands as ask_commands
 
     fake_client = MagicMock()
@@ -41,6 +51,8 @@ async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
 
     fake_repo = AsyncMock()
     fake_repo.get_chat = AsyncMock(return_value=None)
+    # The local DB max — what the marker should advance to.
+    fake_repo.get_max_msg_id = AsyncMock(return_value=99999)
 
     pool = [(_msg(123, 100), 90), (_msg(123, 12345), 95), (_msg(123, 7000), 80)]
 
@@ -76,7 +88,9 @@ async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
     args, kwargs = fake_client.send_read_acknowledge.call_args
     # Telethon: client.send_read_acknowledge(chat_id, max_id=...).
     assert args[0] == 123
-    assert kwargs.get("max_id") == 12345  # max msg_id in pool
+    # Deterministic — comes from get_max_msg_id, not from the pool max.
+    assert kwargs.get("max_id") == 99999
+    fake_repo.get_max_msg_id.assert_awaited()
 
 
 @pytest.mark.asyncio

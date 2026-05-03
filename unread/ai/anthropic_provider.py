@@ -14,13 +14,23 @@ translations relative to the OpenAI shape:
   - **Cached tokens**: Anthropic exposes `cache_read_input_tokens` on
     the usage object. We surface it as `cached_tokens` for parity with
     OpenAI's prompt-cache accounting.
+  - **Retries**: SDK retries are disabled (`max_retries=0`) and we run
+    our own backoff loop so the user sees the same yellow "retrying
+    in Ns" status they get for OpenAI 429s. Without this, an Anthropic
+    rate limit looks like a 30-60s freeze and gives no user feedback.
 """
 
 from __future__ import annotations
 
+import asyncio
+import random
 from typing import Any
 
 from unread.ai.providers import ChatResult, ProviderUnavailableError
+from unread.util.flood import _user_visible_retry_status
+from unread.util.logging import get_logger
+
+log = get_logger(__name__)
 
 
 def _split_system_and_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -63,15 +73,14 @@ class AnthropicProvider:
             raise ProviderUnavailableError(
                 "Anthropic provider selected but `anthropic.api_key` is empty. Run `unread init` to add one."
             )
-        # `max_retries` makes the SDK transparently re-issue the call on
-        # `RateLimitError` / `APIConnectionError` / 5xx with exponential
-        # backoff. We share the single `openai.max_retries` setting so a
-        # user moving between providers gets the same retry budget — no
-        # need to know which knob to flip.
+        # `max_retries=0` disables the SDK's silent transparent retries.
+        # We run our own backoff loop in `chat()` so the user sees the
+        # same yellow "Rate limited — retrying in Ns" status they get
+        # on the OpenAI path.
         self._client = AsyncAnthropic(
             api_key=settings.anthropic.api_key,
             timeout=settings.openai.request_timeout_sec,
-            max_retries=settings.openai.max_retries,
+            max_retries=0,
         )
         self._settings = settings
 
@@ -102,7 +111,57 @@ class AnthropicProvider:
         if system_prompt:
             kwargs["system"] = system_prompt
 
-        resp = await self._client.messages.create(**kwargs)
+        # Own retry loop (SDK retries are off — see __init__). Catches
+        # the typed `RateLimitError`, `APIStatusError` 5xx, and
+        # `APIConnectionError`. 4xx other than 429 propagates so a
+        # programmer / config bug surfaces immediately.
+        from anthropic import (  # type: ignore[import-not-found]
+            APIConnectionError,
+            APIStatusError,
+            RateLimitError,
+        )
+
+        max_retries = self._settings.openai.max_retries
+        resp = None
+        for attempt in range(max(1, max_retries)):
+            try:
+                resp = await self._client.messages.create(**kwargs)
+                break
+            except (RateLimitError, APIConnectionError) as e:
+                if attempt == max_retries - 1:
+                    raise
+                delay = min(1.5**attempt, 30.0) + random.uniform(0, 1)
+                log.warning(
+                    "anthropic.retry",
+                    attempt=attempt + 1,
+                    delay=round(delay, 2),
+                    err=type(e).__name__,
+                )
+                _user_visible_retry_status(
+                    f"Anthropic {type(e).__name__} — retrying in {delay:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries})…"
+                )
+                await asyncio.sleep(delay)
+            except APIStatusError as e:
+                # Retry only 5xx. 4xx (auth, validation, content
+                # policy) is user-actionable — propagate immediately.
+                if 500 <= int(getattr(e, "status_code", 0) or 0) < 600 and attempt < max_retries - 1:
+                    delay = min(1.5**attempt, 30.0) + random.uniform(0, 1)
+                    log.warning(
+                        "anthropic.retry_5xx",
+                        attempt=attempt + 1,
+                        delay=round(delay, 2),
+                        status=e.status_code,
+                    )
+                    _user_visible_retry_status(
+                        f"Anthropic {e.status_code} — retrying in {delay:.0f}s "
+                        f"(attempt {attempt + 1}/{max_retries})…"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        if resp is None:
+            raise RuntimeError("Anthropic call exhausted retries without a response")
 
         # Concatenate any text blocks (Anthropic returns a list of
         # content blocks; tool-use / thinking blocks are absent here

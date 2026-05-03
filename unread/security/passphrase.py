@@ -148,20 +148,22 @@ def read_session_string_sync(db_path: Path) -> str:
     if not is_encrypted(value):
         return value
     env = parse_envelope(value)
+    # `slot_name` binding for the v2 envelope; ignored for legacy $u1$.
+    slot = "telegram.session_string"
     cached = lookup_key_for_salt(env.salt)
     if cached is not None:
-        return decrypt_with_key(value, cached)
+        return decrypt_with_key(value, cached, slot_name=slot)
     # Need to derive — fetch the install key (this prompts once).
     key = ensure_install_key(db_path)
     # If the row was written before the salt was rotated, the cached
     # key won't match. Re-derive against the row's specific salt.
     try:
-        return decrypt_with_key(value, key)
+        return decrypt_with_key(value, key, slot_name=slot)
     except Exception:
         from unread.secrets import _ensure_passphrase
         from unread.security.crypto import decrypt
 
-        return decrypt(value, _ensure_passphrase())
+        return decrypt(value, _ensure_passphrase(), slot_name=slot)
 
 
 async def write_session_string_async(db_path: Path, session_string: str) -> None:
@@ -183,7 +185,9 @@ async def write_session_string_async(db_path: Path, session_string: str) -> None
     cached = lookup_key_for_salt(salt)
     if cached is None:
         cached = ensure_install_key(db_path)
-    blob = encrypt_with_key(session_string, cached, salt=salt)
+    # v2 envelope so a future copy-paste of this ciphertext into another
+    # `secrets` row fails AEAD verify rather than silently decrypting.
+    blob = encrypt_with_key(session_string, cached, salt=salt, slot_name="telegram.session_string")
     from unread.db.repo import open_repo
 
     async with open_repo(db_path) as repo:

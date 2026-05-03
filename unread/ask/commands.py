@@ -574,12 +574,17 @@ async def cmd_ask(
                 return
             try:
                 target_chat = chat_ids[0]
-                # Prefer the highest msg_id from the retrieved pool so we
-                # only mark what the user actually saw cited; fall back to
-                # the chat's local max if retrieval was empty / reused.
-                max_id = max((m.msg_id for m, _ in prior_pool), default=None)
-                if max_id is None:
-                    max_id = await repo.get_max_msg_id(target_chat, thread_id=thread)
+                # Pre-prod review: previously preferred max(prior_pool.msg_id)
+                # which depends on retrieval scoring — re-running the same
+                # question with a slightly different `--limit` advanced
+                # the marker to a different msg_id, so two consecutive
+                # `unread ask` runs marked different ranges as read.
+                # Use `repo.get_max_msg_id` deterministically: the
+                # marker advances to "everything we currently have
+                # locally," which matches the user's mental model
+                # ("I've now reviewed this chat") regardless of which
+                # subset retrieval surfaced.
+                max_id = await repo.get_max_msg_id(target_chat, thread_id=thread)
                 if not max_id:
                     return
                 from unread.tg.dialogs import mark_as_read as _mark_as_read
