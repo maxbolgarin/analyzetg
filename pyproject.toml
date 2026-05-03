@@ -78,6 +78,10 @@ dependencies = [
     # SDKs but pinned here so the encryption path doesn't suddenly
     # break if those drop the requirement.
     "cryptography>=42",
+    # PEP 440 version comparison for `unread update`. Transitively
+    # pulled by other deps but pinned here so the update path doesn't
+    # silently break if the chain shifts.
+    "packaging>=24",
 ]
 
 [project.optional-dependencies]

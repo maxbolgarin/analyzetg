@@ -419,6 +419,7 @@ doesn't replace it.
 | `unread cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
 | `unread cache stats / ls / show / purge / export` | Analysis-cache maintenance (`stats` also surfaces OpenAI prompt-cache hit rate). |
 | `unread doctor` | Preflight check — Telegram session, OpenAI key, ffmpeg, DB integrity, pricing, FDE, cloud-sync warnings. |
+| `unread update [--check] [-y]` | Check PyPI for a newer release and (optionally) install it. |
 | `unread security {status,set,unlock,lock,rotate-passphrase,revoke-session}` | Inspect / switch the credential-storage backend. See the [Security](#security) section. |
 | `unread backup up [out]` | Snapshot `storage/data.sqlite` via `VACUUM INTO`. |
 | `unread backup restore <file>` | Replace `data.sqlite` with a backup (current DB moved aside). |
@@ -841,6 +842,34 @@ unread dump --folder Work                     # batch-dump every unread chat in 
 | `--save-media [--save-media-types ...]` | Also save raw media files next to the dump. |
 | `--folder NAME` | Without `<ref>`: batch-dump every unread chat in folder. |
 | All period / forum / output / `--mark-read` flags | Same as `analyze`. |
+
+### `dump` for websites and YouTube
+
+`unread dump <url>` works for any HTTP(S) page or YouTube link too. No
+Telegram credentials needed — the URL is fetched and saved straight to
+`~/.unread/reports/`. Pick the artifact via `--mode` (or let the
+interactive picker choose on a TTY):
+
+| URL kind | Mode | What you get |
+|---|---|---|
+| Website  | `text` | `article.md` — readable text only. |
+| Website  | `full` | `article.md` + `_files/img-N.<ext>` — text plus every inlined image. Cap with `--max-images N` (default 50). |
+| YouTube  | `transcript` | `metadata.json` + `transcript.md` (cue-tagged when captions are available). Honors `--youtube-source auto\|captions\|audio`. |
+| YouTube  | `audio` | `metadata.json` + `audio.mp3`. Needs ffmpeg. |
+| YouTube  | `video` | `metadata.json` + `video.mp4` (or `.mkv`/`.webm` fallback). Needs ffmpeg. |
+
+```bash
+unread dump https://example.com/article --mode=text
+unread dump https://example.com/article --mode=full --max-images 20
+unread dump https://youtu.be/<id> --mode=transcript
+unread dump https://youtu.be/<id> --mode=audio
+unread dump https://youtu.be/<id> --mode=video
+```
+
+`--mode` is required in non-TTY runs (CI, piped stdin); the interactive
+picker only fires on a real terminal. Telegram-only flags
+(`--folder`, `--since`, `--from-msg`, `--save-media`, `--mark-read`,
+…) are rejected with a clear error when used against a URL.
 
 ---
 

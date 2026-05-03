@@ -20,7 +20,7 @@ import pytest
 
 from unread.security.crypto import (
     DEFAULT_KEY_CACHE_TTL_SEC,
-    SCRYPT_N,
+    PRODUCTION_SCRYPT_N,
     PassphraseError,
     _b64decode,
     runtime_key_cache_path,
@@ -61,8 +61,14 @@ def test_default_key_cache_ttl_is_sane():
 
 
 def test_scrypt_n_is_modern():
-    """2026 recommendation is N >= 2^18 for high-value targets."""
-    assert SCRYPT_N >= 2**18
+    """2026 recommendation is N >= 2^18 for high-value targets.
+
+    We assert the production constant, not the runtime `SCRYPT_N` —
+    the test suite drops the runtime value via `UNREAD_SCRYPT_N` to
+    keep crypto round-trip tests fast. The production default is what
+    ships to users.
+    """
+    assert PRODUCTION_SCRYPT_N >= 2**18
 
 
 def test_keychain_service_default_install_uses_bare_name(monkeypatch, tmp_path):

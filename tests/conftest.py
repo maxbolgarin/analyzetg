@@ -38,6 +38,14 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-fake")
 os.environ.setdefault("TELEGRAM_API_ID", "111111")
 os.environ.setdefault("TELEGRAM_API_HASH", "fakehashfortests")
 
+# Drop the production Scrypt cost down to a test-friendly value. The
+# real KDF (n=2**18) runs at ~200 ms per derive — multiplied across the
+# crypto / passphrase-backend / aead-envelope test files this turns
+# into ~30 s of pure key derivation. The override still exercises real
+# Scrypt (i.e. the cryptography path), just with cheaper parameters.
+# `unread/security/crypto.py` reads this at import time.
+os.environ.setdefault("UNREAD_SCRYPT_N", str(2**10))
+
 # E402 (imports not at top): the `UNREAD_HOME` setdefault above MUST run
 # before `unread.config` is imported, otherwise the singleton resolves
 # to the developer's real ~/.unread/. Don't reorder.
