@@ -134,7 +134,7 @@ def cmd_status() -> None:
                         return
                     mode = path.stat().st_mode & 0o777
                     bad = (mode & 0o077) != 0
-                    symbol = "[yellow]warn[/]" if bad else "[green]ok[/]"
+                    symbol = "[yellow]![/]" if bad else "[green]✓[/]"
                     console.print(f"  {symbol} {path} mode {oct(mode)} (expect {expect_label})")
                 except OSError:
                     pass
@@ -175,10 +175,10 @@ def cmd_status() -> None:
             console.print("")
             console.print("[bold]Disk encryption[/]")
             if "FileVault is On" in out:
-                console.print("  [green]ok[/] FileVault is On")
+                console.print("  [green]✓[/] FileVault is On")
             elif "FileVault is Off" in out:
                 console.print(
-                    "  [yellow]warn[/] FileVault is Off — turn on in "
+                    "  [yellow]![/] FileVault is Off — turn on in "
                     "System Settings → Privacy & Security → FileVault"
                 )
             else:

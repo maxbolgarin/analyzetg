@@ -229,10 +229,7 @@ def _run(coro) -> None:
         # second run picks up where the first stopped without re-paying
         # for the work already done.
         console.print(
-            "\n[yellow]Cancelled — partial work was saved.[/]\n"
-            "[grey70]Re-run the same command to resume; cached enrichments "
-            "(transcripts / link summaries / YouTube transcripts) will be "
-            "reused.[/]"
+            f"\n[yellow]{_t('cli_cancelled_partial_saved')}[/]\n[grey70]{_t('cli_cancelled_resume_hint')}[/]"
         )
         raise typer.Exit(130) from None  # 128 + SIGINT
     except (typer.Exit, SystemExit):
@@ -249,11 +246,8 @@ def _run(coro) -> None:
         # users care about WHAT happened, not whether it was a
         # `ValueError` vs `RuntimeError`.
         msg = str(e).strip() or type(e).__name__
-        console.print(f"\n[red]Error:[/] {msg}")
-        console.print(
-            "[grey70]Run with [cyan]-v[/] for the full traceback, "
-            "or [cyan]unread bug-report[/] to share with maintainers.[/]"
-        )
+        console.print(f"\n[red]{_t('cli_error_prefix')}[/] {msg}")
+        console.print(f"[grey70]{_t('cli_error_traceback_hint')}[/]")
         raise typer.Exit(1) from None
 
 
@@ -371,43 +365,37 @@ def _print_first_run_banner(missing: str = "both") -> None:
     ensure_unread_home()
     env_path = default_env_path()
     if missing == "openai":
-        title = "OpenAI key missing."
+        title = _t("cred_banner_title_openai")
         env_lines = "  OPENAI_API_KEY=sk-…"
-        providers_note = (
-            "Or pick a different chat provider: Anthropic, Google, OpenRouter, or "
-            "a self-hosted server. Run `unread init` to choose."
-        )
+        providers_note = _t("cred_banner_alternative_providers")
     elif missing == "ai":
-        title = "No AI provider configured."
+        title = _t("cred_banner_title_ai")
         env_lines = "  # any of: OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENROUTER_API_KEY"
-        providers_note = (
-            "Pick one provider: OpenAI, Anthropic, Google, OpenRouter, or a "
-            "self-hosted OpenAI-compatible server (Ollama, LM Studio, vLLM)."
-        )
+        providers_note = _t("cred_banner_providers_note")
     elif missing == "telegram":
-        title = "Telegram credentials missing."
+        title = _t("cred_banner_title_telegram")
         env_lines = "  TELEGRAM_API_ID=…\n  TELEGRAM_API_HASH=…"
         providers_note = ""
     else:
-        title = "First-run setup needed."
+        title = _t("cred_banner_title_full")
         env_lines = "  OPENAI_API_KEY=sk-…\n  TELEGRAM_API_ID=…\n  TELEGRAM_API_HASH=…"
         providers_note = ""
     extra = f"\n\n{providers_note}" if providers_note else ""
     console.print(
         f"[bold yellow]{title}[/]\n"
         f"\n"
-        f"Run [cyan]unread init[/] to set up your install folder, "
-        f"AI provider, and (optionally) Telegram login.\n"
+        f"{_t('cred_banner_run_init')}\n"
         f"\n"
-        f"Or, for scripted / non-interactive setup, edit [bold]{env_path}[/] and fill in:\n"
+        f"{_tf('cred_banner_env_intro', env_path=f'[bold]{env_path}[/]')}\n"
         f"{env_lines}"
         f"{extra}\n"
         f"\n"
-        f"Telegram credentials: https://my.telegram.org → API development tools.\n"
-        f"OpenAI: https://platform.openai.com/api-keys.\n"
-        f"Anthropic: https://console.anthropic.com/settings/keys.\n"
-        f"Google: https://aistudio.google.com/app/apikey.\n"
-        f"OpenRouter: https://openrouter.ai/keys."
+        f"[bold]{_t('cred_banner_links_header')}[/]\n"
+        f"  Telegram   https://my.telegram.org → API development tools\n"
+        f"  OpenAI     https://platform.openai.com/api-keys\n"
+        f"  Anthropic  https://console.anthropic.com/settings/keys\n"
+        f"  Google     https://aistudio.google.com/app/apikey\n"
+        f"  OpenRouter https://openrouter.ai/keys"
     )
 
 
@@ -1321,18 +1309,18 @@ def _exit_unrecognized_ref(ref: str) -> None:
     front and point at the right entry point for each shape.
     """
     pretty = ref.strip()
-    console.print(f"[bold yellow]Couldn't route[/] [cyan]{pretty!r}[/] to a known input.\n")
-    console.print("[bold]For Telegram chats:[/]")
-    console.print("  [cyan]unread @username[/]               exact handle")
-    console.print("  [cyan]unread t.me/c/<id>/<msg>[/]       link")
-    console.print("  [cyan]unread -1001234567890[/]          numeric id")
-    console.print("  [cyan]unread tg[/]                       interactive chat picker")
-    console.print("\n[bold]For URLs:[/]")
+    console.print(f"[bold yellow]{_tf('err_route_title', ref=f'{pretty!r}')}[/]\n")
+    console.print(f"[bold]{_t('err_route_telegram_header')}[/]")
+    console.print(f"  [cyan]unread @username[/]               {_t('err_route_telegram_handle')}")
+    console.print(f"  [cyan]unread t.me/c/<id>/<msg>[/]       {_t('err_route_telegram_link')}")
+    console.print(f"  [cyan]unread -1001234567890[/]          {_t('err_route_telegram_id')}")
+    console.print(f"  [cyan]unread tg[/]                       {_t('err_route_telegram_picker')}")
+    console.print(f"\n[bold]{_t('err_route_url_header')}[/]")
     console.print("  [cyan]unread https://youtu.be/<id>[/]")
     console.print("  [cyan]unread https://example.com/article[/]")
-    console.print("\n[bold]For local files:[/]")
+    console.print(f"\n[bold]{_t('err_route_file_header')}[/]")
     console.print("  [cyan]unread ./path/to/notes.pdf[/]")
-    console.print("\n[bold]For raw text via stdin:[/]")
+    console.print(f"\n[bold]{_t('err_route_stdin_header')}[/]")
     console.print(f'  [cyan]echo "{pretty}" | unread[/]')
     console.print(f'  [cyan]unread - <<< "{pretty}"[/]')
     raise typer.Exit(1)
@@ -1353,11 +1341,11 @@ def _print_provider_credentials_banner(provider: str) -> None:
     }
     label, env_line = label_map.get(provider, (provider, "<provider-specific key>"))
     console.print(
-        f"[bold yellow]{label} key missing for the active chat provider.[/]\n"
+        f"[bold yellow]{_tf('cred_banner_title_provider', label=label)}[/]\n"
         f"\n"
-        f"Run [cyan]unread init[/] to add one (or pick a different provider).\n"
+        f"{_t('cred_banner_run_init_provider')}\n"
         f"\n"
-        f"Or, for scripted / non-interactive setup, edit [bold]{env_path}[/] and fill in:\n"
+        f"{_tf('cred_banner_env_intro', env_path=f'[bold]{env_path}[/]')}\n"
         f"  {env_line}"
     )
 
@@ -1824,56 +1812,56 @@ def _root(
     full_history: bool = typer.Option(
         False, "--full-history", help="Analyze the whole chat, not just unread."
     ),
-    since: str | None = typer.Option(None, "--since", help="YYYY-MM-DD"),
-    until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD"),
-    last_days: int | None = typer.Option(None, "--last-days"),
+    since: str | None = typer.Option(None, "--since", help="Start date (YYYY-MM-DD)."),
+    until: str | None = typer.Option(None, "--until", help="End date (YYYY-MM-DD)."),
+    last_days: int | None = typer.Option(
+        None,
+        "--last-days",
+        help="Restrict to messages newer than N days ago. Mutually exclusive with other window flags.",
+    ),
     last_hours: int | None = typer.Option(
         None,
         "--last-hours",
-        help=(
-            "Restrict to messages newer than N hours ago. Mutually "
-            "exclusive with --since/--until/--full-history; if combined "
-            "with --last-days, --last-hours wins (more specific)."
-        ),
+        help="Restrict to messages newer than N hours ago. Mutually exclusive with other window flags.",
     ),
     last_minutes: int | None = typer.Option(
         None,
         "--last-minutes",
-        help=(
-            "Restrict to messages newer than N minutes ago. Mutually "
-            "exclusive with --since/--until/--full-history; wins over "
-            "--last-hours / --last-days if combined (more specific)."
-        ),
+        help="Restrict to messages newer than N minutes ago. Mutually exclusive with other window flags.",
     ),
     last_msgs: int | None = typer.Option(
         None,
         "--last-msgs",
-        help=(
-            "Analyze the last N messages of the chat (any positive integer), "
-            "regardless of unread state. Mutually exclusive with "
-            "--since/--until/--last-days/--last-hours/--full-history/--from-msg/--msg."
-        ),
+        help="Analyze the last N messages, regardless of unread state. Mutually exclusive with other window flags.",
     ),
     preset: str | None = typer.Option(
         None,
         "--preset",
-        help="Analysis preset (default: 'summary' for chats, 'single_msg' when analyzing one message).",
+        help="Analysis preset (default: summary for chats, single_msg for one message).",
     ),
-    prompt_file: Path | None = typer.Option(None, "--prompt-file"),
-    model: str | None = typer.Option(None, "--model"),
-    filter_model: str | None = typer.Option(None, "--filter-model"),
-    output: Path | None = typer.Option(None, "--output", "-o"),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Path to a custom prompt body to use instead of a preset."
+    ),
+    model: str | None = typer.Option(
+        None, "--model", help="Override the chat model used for map + reduce passes."
+    ),
+    filter_model: str | None = typer.Option(
+        None, "--filter-model", help="Override the cheap model used for the pre-filter pass."
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Write the report to this path instead of the default reports folder."
+    ),
     console_out: bool = typer.Option(
         False,
         "--console",
         "-c",
-        help="[DEPRECATED] Same as --no-save. Reports always render in the terminal now; this flag only skips the file write.",
+        help="[DEPRECATED] Same as --no-save.",
     ),
     save: bool = typer.Option(
         False,
         "--save",
         "-s",
-        help="[DEPRECATED] No-op. Saving is now the default; pass --no-save to opt out.",
+        help="[DEPRECATED] No-op. Saving is the default; pass --no-save to opt out.",
     ),
     no_save: bool = typer.Option(
         False,
@@ -1883,18 +1871,12 @@ def _root(
     plain_citations: bool = typer.Option(
         False,
         "--plain-citations",
-        help=(
-            "Render `[#N](https://t.me/...)` citations as `#N (https://t.me/...)` "
-            "in the console so URLs are visible/copy-pasteable. Use this if your "
-            "terminal (e.g. macOS Terminal.app) does not handle OSC 8 hyperlinks. "
-            "The saved markdown file is unaffected. Persist via "
-            "`unread settings set analyze.plain_citations true`."
-        ),
+        help="Render citations as plain URLs in the console (use when your terminal can't handle OSC 8 hyperlinks). Saved markdown is unaffected.",
     ),
     mark_read: bool | None = typer.Option(
         None,
         "--mark-read/--no-mark-read",
-        help="Tri-state: --mark-read advances Telegram's marker; --no-mark-read explicitly keeps unread and skips the prompt; no flag → ask interactively.",
+        help="Advance Telegram's read marker after analysis. Without either flag, you'll be asked interactively.",
     ),
     all_flat: bool = typer.Option(
         False,
@@ -1906,27 +1888,28 @@ def _root(
         "--all-per-topic",
         help="Forum only: one report per topic. Reports land in reports/{chat}/.",
     ),
-    no_cache: bool = typer.Option(False, "--no-cache"),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Bypass the analysis cache for this run (still writes a fresh entry)."
+    ),
     redact: bool | None = typer.Option(
         None,
         "--redact/--no-redact",
-        help=(
-            "Scrub phone / email / IBAN / Luhn-valid card numbers from the prompt sent "
-            "to the LLM. The DB and saved report keep originals — only the API payload "
-            "is redacted. Defaults to `analyze.redact` in config (off by default)."
-        ),
+        help="Scrub phone/email/IBAN/card numbers from the LLM prompt. The DB and saved report keep originals.",
     ),
-    include_transcripts: bool = typer.Option(True, "--include-transcripts/--text-only"),
-    min_msg_chars: int | None = typer.Option(None, "--min-msg-chars"),
+    include_transcripts: bool = typer.Option(
+        True,
+        "--include-transcripts/--text-only",
+        help="Include voice/video transcripts and image descriptions in the analysis (default: on).",
+    ),
+    min_msg_chars: int | None = typer.Option(
+        None,
+        "--min-msg-chars",
+        help="Skip messages shorter than this many characters (after enrichment).",
+    ),
     enrich: str | None = typer.Option(
         None,
         "--enrich",
-        help=(
-            "Comma-separated media enrichments to enable: "
-            "voice, videonote, video, image, doc, link. "
-            "Overrides config defaults for this run. "
-            "Example: --enrich=voice,image,link"
-        ),
+        help="Comma-separated enrichments: voice, videonote, video, image, doc, link. E.g. --enrich=voice,image,link.",
     ),
     enrich_all: bool = typer.Option(
         False,
@@ -1942,128 +1925,72 @@ def _root(
         False,
         "--yes",
         "-y",
-        help="Skip interactive confirmations (per-topic Y/n, batch-of-N-chats Y/n). Useful for scripting or when the prompt-toolkit → typer.confirm handoff acts up in your terminal.",
+        help="Skip interactive confirmations. Useful for scripting and batch runs.",
     ),
     folder: str | None = typer.Option(
         None,
         "--folder",
-        help=(
-            "Batch-analyze all unread chats inside this Telegram folder "
-            "(dialog filter). Case-insensitive match on folder title. "
-            "Only meaningful without <ref>."
-        ),
+        help="Batch-analyze every unread chat in this Telegram folder. Case-insensitive on folder title; only meaningful without <ref>.",
     ),
     max_cost: float | None = typer.Option(
         None,
         "--max-cost",
-        help=(
-            "Abort if the upper-bound estimated USD cost of this run exceeds "
-            "N (estimate uses preset models, message count, and your pricing "
-            "table). Pass with --yes to abort silently; without --yes you'll "
-            "be asked to confirm an over-budget run."
-        ),
+        help="Abort (or confirm without --yes) if the estimated USD cost exceeds N.",
     ),
     post_saved: bool = typer.Option(
         False,
         "--post-saved",
-        help=(
-            "After analysis finishes, also post the result to your Telegram "
-            "Saved Messages chat (split into 4096-char chunks if needed). "
-            "Markdown-friendly: rendered as monospace by Telegram."
-        ),
+        help="After analysis, post the result to your Telegram Saved Messages chat. Sugar for --post-to=me.",
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help=(
-            "Resolve the chat, run backfill, count messages, print the cost estimate, "
-            "and exit. Skips both LLM analysis AND media/link enrichment "
-            "(Whisper/vision/link summarisation), so it never spends LLM money."
-        ),
+        help="Resolve, backfill, count, and print a cost estimate. Skips LLM and enrichment — no spend.",
     ),
     cite_context: int = typer.Option(
         0,
         "--cite-context",
-        help=(
-            "After analysis, append a `## Источники` section to the saved report "
-            "with N messages of context around every cited [#msg_id](url). "
-            "0 (default) = off; 3 = three before + three after. Capped at 30 citations."
-        ),
+        help="Append a Sources section with N messages of context around each citation. 0 = off; capped at 30 citations.",
     ),
     self_check: bool = typer.Option(
         False,
         "--self-check",
-        help=(
-            "After analysis, run a cheap-model audit pass that lists unsupported "
-            "claims under `## Verification`. Adds ~10% to cost. Useful when you'll "
-            "act on the report without re-reading the source messages."
-        ),
+        help="Run a cheap-model audit pass that lists unsupported claims. Adds ~10% to cost.",
     ),
     by: str | None = typer.Option(
         None,
         "--by",
-        help=(
-            "Filter to messages from one sender. Substring match on sender_name "
-            "(case-insensitive) or numeric sender_id. Composes with all other filters."
-        ),
+        help="Filter to one sender (substring on name or numeric sender_id). Composes with other filters.",
     ),
     post_to: str | None = typer.Option(
         None,
         "--post-to",
-        help=(
-            "After analysis, post the result to this chat (any chat ref: @user, "
-            "t.me link, fuzzy title, numeric id, or 'me' for Saved Messages). "
-            "Generalization of --post-saved (which is now sugar for --post-to=me)."
-        ),
+        help="After analysis, post the result to this chat (ref or 'me' for Saved Messages).",
     ),
     repeat_last: bool = typer.Option(
         False,
         "--repeat-last",
-        help=(
-            "Look up the saved flags from the most recent successful analyze on "
-            "<ref> and re-use them. Explicit CLI flags on this run still win "
-            "(e.g. `--repeat-last --no-cache` to bust the cache while keeping "
-            "everything else)."
-        ),
+        help="Re-use flags from the most recent successful analyze on <ref>. Explicit flags on this run still win.",
     ),
     with_comments: bool = typer.Option(
         False,
         "--with-comments",
-        help=(
-            "For a Telegram channel: also include messages from its linked "
-            "discussion group (comments) in the same analysis. Comments are "
-            "pulled for the same time window as the channel posts and go "
-            "through the SAME enrichment toggles. The report renders "
-            "channel posts and comments as two sections with their own "
-            "citation links. No-op for non-channel chats."
-        ),
+        help="For a channel: also include messages from its linked discussion group (comments). No-op for non-channel chats.",
     ),
     language: str | None = typer.Option(
         None,
         "--language",
-        help=(
-            "Output / report / UI language (en, ru, de, …). Picks the matching "
-            "presets/<lang>/ tree, formatter labels, and analysis output language. "
-            "Defaults to [locale] language in config (en)."
-        ),
+        help="Output / report / UI language (en, ru, de, …). Defaults to [locale] language in config.",
     ),
     content_language: str | None = typer.Option(
         None,
         "--content-language",
-        help=(
-            "Chat content language hint for cost estimation only. Defaults to "
-            "--language. Set explicitly when chats are predominantly one language "
-            "but the report should be in another."
-        ),
+        help="Chat content language hint for cost estimation only. Defaults to --language.",
     ),
     youtube_source: str = typer.Option(
         "auto",
         "--youtube-source",
-        help=(
-            "YouTube transcript source: auto (captions, fallback to Whisper), "
-            "captions (fail if none), audio (always Whisper). Used only when "
-            "<ref> is a YouTube URL."
-        ),
+        help="YouTube transcript source: auto (captions, fallback to Whisper), captions, or audio (always Whisper).",
     ),
 ) -> None:
     """Default action: analyze a chat / YouTube video / web page.

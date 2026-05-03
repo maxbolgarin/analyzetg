@@ -19,6 +19,8 @@ from __future__ import annotations
 import typer
 from rich.console import Console
 
+from unread.i18n import t as _t
+from unread.i18n import tf as _tf
 from unread.util.logging import get_logger
 
 console = Console()
@@ -129,7 +131,10 @@ def _resolve_shell(shell: str | None) -> str:
     if shell:
         s = shell.strip().lower()
         if s not in _VALID_SHELLS:
-            console.print(f"[red]Unknown shell: {shell!r}.[/]  Accepted: {', '.join(_VALID_SHELLS)}.")
+            console.print(
+                f"[red]{_t('cli_error_prefix')}[/] "
+                f"{_tf('err_completion_unknown_shell', shell=repr(shell), shells=', '.join(_VALID_SHELLS))}"
+            )
             raise typer.Exit(1)
         return s
 

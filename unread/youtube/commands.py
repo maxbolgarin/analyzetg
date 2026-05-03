@@ -471,7 +471,7 @@ async def cmd_analyze_youtube(
             )
 
         if not transcript_text.strip():
-            console.print("[red]Empty transcript — nothing to analyze.[/]")
+            console.print(f"[red]{_t('cli_error_prefix')}[/] {_t('err_files_empty_transcript')}")
             raise typer.Exit(2)
 
         messages = _build_synthetic_messages(metadata, transcript_text, timed_cues=timed_cues)
@@ -519,7 +519,7 @@ async def cmd_analyze_youtube(
                         f"(transcript ${transcript_cost:.4f} + analysis ≤ ${hi:.4f})[/]"
                     )
                     if yes:
-                        console.print("[red]Aborting (--yes set).[/]")
+                        console.print(f"[red]{_t('aborting_yes_set')}[/]")
                         raise typer.Exit(2)
                     from unread.util.prompt import confirm as _confirm
 
@@ -566,15 +566,18 @@ async def cmd_analyze_youtube(
             result.enrich_kinds = list({*result.enrich_kinds, transcript_source})
 
         if self_check and result.final_result and messages:
-            verification = await _self_check(
+            verification, verification_err = await _self_check(
                 result=result,
                 messages=messages,
                 repo=repo,
                 content_language=content_language,
             )
+            heading = _t("verification_heading", language)
             if verification:
-                heading = _t("verification_heading", language)
                 result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + verification
+            elif verification_err:
+                failure_line = _t("verification_failed", language).format(err=verification_err)
+                result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + failure_line
 
         if cite_context > 0 and result.final_result:
             # No Telegram chat → citations have no surrounding context to

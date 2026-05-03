@@ -365,11 +365,26 @@ async def cmd_ask(
 
                 row = await repo.get_chat(resolved.chat_id)
                 linked_id = (row or {}).get("linked_chat_id")
+                linked_lookup_err: str | None = None
                 if linked_id is None and (row or {}).get("kind") == "channel":
                     try:
                         linked_id = await get_linked_chat_id(client, resolved.chat_id)
-                    except Exception:
+                    except Exception as e:
                         linked_id = None
+                        linked_lookup_err = f"{type(e).__name__}: {str(e)[:120]}"
+                        # Don't bury this — the user explicitly asked for
+                        # comments scope and is otherwise about to get a
+                        # generic "no linked discussion group" message
+                        # that hides a real failure (network blip, perms).
+                        log.warning(
+                            "ask.linked_chat_resolve_failed",
+                            chat_id=resolved.chat_id,
+                            err=str(e)[:200],
+                        )
+                        console.print(
+                            f"[yellow]→ --with-comments: couldn't resolve linked discussion "
+                            f"group ({linked_lookup_err}); proceeding without comments.[/]"
+                        )
                     if linked_id is not None:
                         await repo.upsert_chat(
                             resolved.chat_id,
@@ -386,7 +401,10 @@ async def cmd_ask(
                         f"[grey70]→ Including comments from linked chat[/] "
                         f"[bold]{chat_titles[linked_id]}[/] ({linked_id})"
                     )
-                else:
+                elif linked_lookup_err is None:
+                    # Only print the "no linked group" message when the
+                    # lookup actually succeeded with a None result — the
+                    # error path above already printed its own message.
                     console.print(
                         "[yellow]→ --with-comments: chat is not a channel "
                         "or has no linked discussion group; ignoring.[/]"

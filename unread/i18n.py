@@ -50,6 +50,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     # ---- Citation / verification headings ----
     "sources_heading": {"en": "Sources", "ru": "Источники"},
     "verification_heading": {"en": "Verification", "ru": "Проверка"},
+    "verification_failed": {
+        "en": "_Verification step failed ({err}); the primary report is unaffected._",
+        "ru": "_Шаг проверки не удался ({err}); основной отчёт не затронут._",
+    },
     "truncation_warning": {
         "en": "**⚠ Output truncated** — the model hit its output limit.",
         "ru": "**⚠ Вывод обрезан** — модель упёрлась в лимит длины ответа.",
@@ -1818,6 +1822,118 @@ _STRINGS: dict[str, dict[str, str]] = {
     "youtube_no_audio_track": {
         "en": "YouTube video {video_id} has no audio track.",
         "ru": "У видео YouTube {video_id} нет звуковой дорожки.",
+    },
+    # ---- Generic CLI error / status prefixes ---------------------------
+    "cli_error_prefix": {"en": "Error:", "ru": "Ошибка:"},
+    "cli_warning_prefix": {"en": "Warning:", "ru": "Предупреждение:"},
+    "cli_error_traceback_hint": {
+        "en": "Run with -v for the full traceback, or `unread bug-report` to share with maintainers.",
+        "ru": "Запустите с -v для полного traceback или используйте `unread bug-report`, чтобы поделиться с разработчиками.",
+    },
+    "cli_cancelled_partial_saved": {
+        "en": "Cancelled — partial work was saved.",
+        "ru": "Отменено — частичные результаты сохранены.",
+    },
+    "cli_cancelled_resume_hint": {
+        "en": "Re-run the same command to resume; cached enrichments (transcripts, link summaries, YouTube transcripts) will be reused.",
+        "ru": "Запустите ту же команду повторно, чтобы продолжить; кэшированные обогащения (транскрипты, сводки ссылок, YouTube-транскрипты) будут переиспользованы.",
+    },
+    # ---- Canonical credentials banner ----------------------------------
+    "cred_banner_title_full": {
+        "en": "First-run setup needed.",
+        "ru": "Нужна первичная настройка.",
+    },
+    "cred_banner_title_ai": {
+        "en": "No AI provider configured.",
+        "ru": "AI-провайдер не настроен.",
+    },
+    "cred_banner_title_openai": {
+        "en": "OpenAI key missing.",
+        "ru": "Не задан ключ OpenAI.",
+    },
+    "cred_banner_title_telegram": {
+        "en": "Telegram credentials missing.",
+        "ru": "Не заданы учётные данные Telegram.",
+    },
+    "cred_banner_title_provider": {
+        "en": "{label} key missing for the active chat provider.",
+        "ru": "Нет ключа для активного провайдера: {label}.",
+    },
+    "cred_banner_run_init": {
+        "en": "Run `unread init` to set up your install folder, AI provider, and (optionally) Telegram login.",
+        "ru": "Запустите `unread init`, чтобы настроить папку установки, AI-провайдера и (опционально) Telegram.",
+    },
+    "cred_banner_run_init_provider": {
+        "en": "Run `unread init` to add a key (or pick a different provider).",
+        "ru": "Запустите `unread init`, чтобы добавить ключ (или выберите другого провайдера).",
+    },
+    "cred_banner_env_intro": {
+        "en": "Or, for scripted / non-interactive setup, edit {env_path} and fill in:",
+        "ru": "Либо для скриптовой / неинтерактивной настройки отредактируйте {env_path} и заполните:",
+    },
+    "cred_banner_providers_note": {
+        "en": "Pick one provider: OpenAI, Anthropic, Google, OpenRouter, or a self-hosted OpenAI-compatible server (Ollama, LM Studio, vLLM).",
+        "ru": "Выберите провайдера: OpenAI, Anthropic, Google, OpenRouter или self-hosted (Ollama, LM Studio, vLLM).",
+    },
+    "cred_banner_alternative_providers": {
+        "en": "Or pick a different chat provider: Anthropic, Google, OpenRouter, or a self-hosted server. Run `unread init` to choose.",
+        "ru": "Или выберите другого провайдера: Anthropic, Google, OpenRouter или self-hosted. Запустите `unread init`, чтобы выбрать.",
+    },
+    "cred_banner_links_header": {
+        "en": "API key links:",
+        "ru": "Ссылки для получения ключей:",
+    },
+    # ---- Routing failure ("unread <ref>" doesn't match any input) ------
+    "err_route_title": {
+        "en": "Couldn't route {ref} to a known input.",
+        "ru": "Не удалось распознать ввод {ref}.",
+    },
+    "err_route_telegram_header": {
+        "en": "For Telegram chats:",
+        "ru": "Для Telegram-чатов:",
+    },
+    "err_route_url_header": {
+        "en": "For URLs:",
+        "ru": "Для ссылок:",
+    },
+    "err_route_file_header": {
+        "en": "For local files:",
+        "ru": "Для локальных файлов:",
+    },
+    "err_route_stdin_header": {
+        "en": "For raw text via stdin:",
+        "ru": "Для текста через stdin:",
+    },
+    "err_route_telegram_handle": {"en": "exact handle", "ru": "точный handle"},
+    "err_route_telegram_link": {"en": "message link", "ru": "ссылка на сообщение"},
+    "err_route_telegram_id": {"en": "numeric id", "ru": "числовой id"},
+    "err_route_telegram_picker": {
+        "en": "interactive chat picker",
+        "ru": "интерактивный выбор чата",
+    },
+    # ---- Hard-coded errors migrated to i18n -----------------------------
+    "err_files_empty_transcript": {
+        "en": "Empty transcript — nothing to analyze.",
+        "ru": "Пустой транскрипт — анализировать нечего.",
+    },
+    "err_files_empty_page": {
+        "en": "Empty page — nothing to analyze.",
+        "ru": "Пустая страница — анализировать нечего.",
+    },
+    "err_completion_unknown_shell": {
+        "en": "Unknown shell {shell}. Accepted: {shells}.",
+        "ru": "Неизвестная оболочка {shell}. Поддерживаются: {shells}.",
+    },
+    # ---- Status verbs (canonical set for status lines) -----------------
+    "status_resolving": {"en": "→ Resolving {object}…", "ru": "→ Определяем {object}…"},
+    "status_fetching": {"en": "→ Fetching {object}…", "ru": "→ Загружаем {object}…"},
+    "status_loading": {"en": "→ Loading {object}…", "ru": "→ Загружаем {object}…"},
+    "status_saving": {"en": "→ Saving {object}…", "ru": "→ Сохраняем {object}…"},
+    "status_posting": {"en": "→ Posting {object}…", "ru": "→ Публикуем {object}…"},
+    "status_running": {"en": "→ Running {object}…", "ru": "→ Запускаем {object}…"},
+    "analyze_detected_video_reframing": {
+        "en": "Detected {kind} — analyzing as a video transcript.",
+        "ru": "Определено: {kind} — анализируем как транскрипт видео.",
     },
 }
 

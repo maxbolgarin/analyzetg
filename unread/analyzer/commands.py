@@ -107,7 +107,7 @@ async def _self_check(
     messages,
     repo: Repo,
     content_language: str = "en",
-) -> str:
+) -> tuple[str, str | None]:
     """Cheap-model audit pass over an analysis report.
 
     Sends source messages + the produced analysis to `filter_model_default`
@@ -122,8 +122,11 @@ async def _self_check(
     analysis report being audited so the auditor and the report speak
     the same language.
 
-    Failures (network blip, parse glitch) return empty string — the
-    primary report is what the user paid for; verification is a bonus.
+    Returns ``(text, error)``. On success: ``(verification_text, None)``.
+    On failure (network blip, parse glitch, provider error) the broad
+    catch keeps the primary report intact, but ``error`` is a short
+    human-readable description so the caller can surface that the
+    audit step did NOT silently pass.
     """
     from unread.analyzer.formatter import format_messages
     from unread.analyzer.openai_client import build_messages, chat_complete, make_client
@@ -144,10 +147,10 @@ async def _self_check(
             max_tokens=1500,
             context={"phase": "self_check", "preset": result.preset},
         )
-        return (res.text or "").strip()
+        return ((res.text or "").strip(), None)
     except Exception as e:
-        log.warning("analyze.self_check_failed", err=str(e)[:200])
-        return ""
+        log.error("analyze.self_check_failed", err=str(e)[:200], exc_info=True)
+        return ("", f"{type(e).__name__}: {str(e)[:120]}")
 
 
 async def _expand_citations(
@@ -1114,7 +1117,7 @@ async def _run_single_msg(
     if inferred_source_kind == "video" and preset == "single_msg":
         # Tiny UX touch — surface the auto-detected reframing so users
         # know why the report looks like a video summary.
-        console.print(f"[grey70]Detected {loaded.media_type} — analyzing as a video transcript[/]")
+        console.print(f"[grey70]{_tf('analyze_detected_video_reframing', kind=loaded.media_type)}[/]")
     opts = AnalysisOptions(
         preset=preset,
         prompt_file=prompt_file,
@@ -1379,7 +1382,7 @@ async def _run_single(
     )
 
     if self_check and result.final_result and prepared.messages:
-        verification = await _self_check(
+        verification, verification_err = await _self_check(
             result=result,
             messages=prepared.messages,
             repo=repo,
@@ -1387,9 +1390,12 @@ async def _run_single(
             # → language.
             content_language=content_language,
         )
+        heading = _t("verification_heading", language)
         if verification:
-            heading = _t("verification_heading", language)
             result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + verification
+        elif verification_err:
+            failure_line = _t("verification_failed", language).format(err=verification_err)
+            result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + failure_line
 
     if cite_context > 0 and result.final_result:
         result.final_result = await _expand_citations(

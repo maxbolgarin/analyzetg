@@ -54,6 +54,31 @@ def _from_ts(val: Any) -> datetime | None:
     return datetime.fromisoformat(val)
 
 
+# Internal invariant: any identifier we splice into PRAGMA / DDL strings
+# must match this. SQL parameter binding doesn't work for table or
+# column names, so we validate instead. Callers today pass only
+# hardcoded literals — this keeps it that way under future refactors.
+_SAFE_SQL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Column definitions are wider — they include type names, constraints,
+# and DEFAULT values like `INTEGER NOT NULL DEFAULT 0` or
+# `TEXT DEFAULT 'summary'`. The allowlist permits SQL keyword-ish
+# tokens, integer defaults, and single-quoted string defaults, but
+# rejects ``;`` (statement break), ``--`` / ``/*`` (SQL comments that
+# could swallow a trailing clause), ``"`` (quoted-identifier injection),
+# and any whitespace beyond a plain space.
+_SAFE_SQL_DEFINITION = re.compile(r"^[A-Za-z0-9_ ()']+$")
+
+
+def _assert_safe_sql_name(name: str) -> None:
+    if not isinstance(name, str) or not _SAFE_SQL_NAME.match(name):
+        raise ValueError(f"refusing unsafe SQL identifier: {name!r}")
+
+
+def _assert_safe_column_definition(definition: str) -> None:
+    if not isinstance(definition, str) or not _SAFE_SQL_DEFINITION.match(definition):
+        raise ValueError(f"refusing unsafe SQL column definition: {definition!r}")
+
+
 class Repo:
     """Async repository. Construct with `await Repo.open(path)`."""
 
@@ -178,16 +203,25 @@ class Repo:
         await self._warn_on_schema_drift(sql)
 
     async def _table_columns(self, table: str) -> set[str]:
+        # Identifier interpolation can't use SQL parameters (PRAGMA / DDL
+        # don't accept them). Today every caller passes a hardcoded
+        # literal, but enforce the invariant explicitly so a future
+        # refactor that pipes in user-controlled names fails loudly
+        # instead of silently exposing DDL injection.
+        _assert_safe_sql_name(table)
         cur = await self._conn.execute(f"PRAGMA table_info({table})")
         rows = await cur.fetchall()
         await cur.close()
         return {str(row["name"]) for row in rows}
 
     async def _add_missing_columns(self, table: str, columns: dict[str, str]) -> None:
+        _assert_safe_sql_name(table)
         existing = await self._table_columns(table)
         if not existing:
             return
         for name, definition in columns.items():
+            _assert_safe_sql_name(name)
+            _assert_safe_column_definition(definition)
             if name not in existing:
                 await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 

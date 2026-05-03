@@ -588,9 +588,12 @@ async def cmd_doctor() -> None:
     from pathlib import Path as _Path
 
     settings = get_settings()
-    ok = "[green]OK[/]"
-    warn = "[yellow]WARN[/]"
-    fail = "[red]FAIL[/]"
+    # Standard status markers: ✓ (success) / ! (warning) / ✗ (failure).
+    # Replaces the older OK/WARN/FAIL words for visual consistency with
+    # the rest of the CLI (init wizard, settings, killme cleanup).
+    ok = "[green]✓[/]"
+    warn = "[yellow]![/]"
+    fail = "[red]✗[/]"
     statuses: list[str] = []
     # Track every issue by (severity, label, detail) so the summary
     # block can surface concrete next-steps instead of an opaque
@@ -598,11 +601,14 @@ async def cmd_doctor() -> None:
     issues: list[tuple[str, str, str]] = []
 
     def _line(status: str, label: str, detail: str = "") -> None:
-        console.print(f"  {status:<24} {label}{(' — ' + detail) if detail else ''}")
+        # Status markup is short (✓ / ! / ✗) — three trailing spaces give
+        # the labels a stable left edge regardless of how Rich renders
+        # the colored marker glyph.
+        console.print(f"  {status}   {label}{(' — ' + detail) if detail else ''}")
         statuses.append(status)
-        if "FAIL" in status:
+        if fail in status:
             issues.append(("fail", label, detail))
-        elif "WARN" in status:
+        elif warn in status:
             issues.append(("warn", label, detail))
 
     console.print(f"[bold]{_t('tg_doctor_banner')}[/]")
@@ -1140,8 +1146,8 @@ async def cmd_doctor() -> None:
     # a screen of OK/WARN/FAIL lines to find what to fix. Now we lead
     # with the count, then list the top 5 actionable issues so the most
     # useful copy-paste lives at the bottom of the output.
-    fails = sum(1 for s in statuses if "FAIL" in s)
-    warns = sum(1 for s in statuses if "WARN" in s)
+    fails = sum(1 for s in issues if s[0] == "fail")
+    warns = sum(1 for s in issues if s[0] == "warn")
     actionable = [i for i in issues if i[0] == "fail"] + [i for i in issues if i[0] == "warn"]
     if actionable:
         console.print(f"\n[bold]{_t('doctor_next_steps_header')}[/]")

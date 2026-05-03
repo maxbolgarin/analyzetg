@@ -21,6 +21,7 @@ ignore it; that's fine — there's nothing to navigate to).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sys
 from datetime import datetime
@@ -226,13 +227,18 @@ def _build_synthetic_messages(
 
 
 async def _extract_for_kind(path: Path, kind: FileKind) -> ExtractResult:
-    """Dispatch to the right extractor based on detected kind."""
+    """Dispatch to the right extractor based on detected kind.
+
+    Sync extractors (``extract_text`` is RAM-only; pdf/docx hit disk via
+    pypdf / python-docx) get pushed onto a worker thread so they don't
+    block the event loop while a large PDF is parsed.
+    """
     if kind == "text":
-        return extract_text(path)
+        return await asyncio.to_thread(extract_text, path)
     if kind == "pdf":
-        return extract_pdf(path)
+        return await asyncio.to_thread(extract_pdf, path)
     if kind == "docx":
-        return extract_docx(path)
+        return await asyncio.to_thread(extract_docx, path)
     if kind == "audio":
         return await extract_audio(path)
     if kind == "video":
@@ -385,7 +391,7 @@ async def cmd_analyze_file(
                     f"[bold yellow]Estimated upper-bound cost ${hi:.4f} exceeds --max-cost ${max_cost:.4f}[/]"
                 )
                 if yes:
-                    console.print("[red]Aborting (--yes set).[/]")
+                    console.print(f"[red]{_t('aborting_yes_set')}[/]")
                     raise typer.Exit(2)
                 from unread.util.prompt import confirm as _confirm
 
@@ -424,15 +430,18 @@ async def cmd_analyze_file(
         )
 
         if self_check and result.final_result and messages:
-            verification = await _self_check(
+            verification, verification_err = await _self_check(
                 result=result,
                 messages=messages,
                 repo=repo,
                 content_language=content_language,
             )
+            heading = _t("verification_heading", language)
             if verification:
-                heading = _t("verification_heading", language)
                 result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + verification
+            elif verification_err:
+                failure_line = _t("verification_failed", language).format(err=verification_err)
+                result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + failure_line
 
         if output is None and not console_out:
             output_path: Path | None = file_report_path(
