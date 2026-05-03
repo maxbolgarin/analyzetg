@@ -83,6 +83,21 @@ filter_model_default = "gpt-5.4-nano"
 #                           # and `language` is something else — affects
 #                           # cost estimates only.
 
+# ======================================================================== Ask
+
+# [ask]
+# Whole-doc-vs-retrieval cutoff for `unread ask <url|file>`.
+# Below: send the full extracted text in one LLM call.
+# Above: chunk + retrieve top-K (same path used for chat-archive ask).
+# doc_full_text_cutoff_tokens = 32000
+
+# Retrieval / rerank pipeline knobs (also applies to chat-archive ask):
+# rerank_enabled = true
+# rerank_top_k = 500        # candidate pool before rerank
+# rerank_keep = 50          # what survives rerank → flagship model
+# rerank_batch_size = 50    # messages per cheap-model call
+# rerank_model = ""         # empty → falls back to filter_model
+
 # =================================================================== Analyze
 
 [analyze]

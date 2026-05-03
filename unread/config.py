@@ -182,6 +182,11 @@ class AskCfg(_StrictCfg):
     rerank_keep: int = 50  # what survives rerank → flagship
     rerank_batch_size: int = 50  # messages per cheap-model call
     rerank_model: str | None = None  # None → falls back to filter_model_default
+    # Whole-doc-vs-retrieval cutoff for `unread ask <url|file>`. When
+    # the extracted text fits under this many tokens, ask sends the
+    # entire document in one LLM call. Above the cutoff, ask falls back
+    # to chunked retrieval (same machinery the chat-archive path uses).
+    doc_full_text_cutoff_tokens: int = 32000
 
 
 class EnrichCfg(_StrictCfg):
