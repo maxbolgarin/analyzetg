@@ -86,10 +86,15 @@ def test_help_overview_lists_visible_commands() -> None:
     ):
         assert name in out, f"`{name}` missing from overview"
     # `tg` should NOT appear as a Commands-table entry — it's a ref now.
-    # Use a strict match so we don't catch substrings like "settings".
+    # Scope the check to the Commands section so we don't false-positive on
+    # the legitimate `tg` row inside `<ref> can be` / `Common patterns`.
     import re
 
-    assert not re.search(r"^\s*tg\s", out, re.MULTILINE), "`tg` should be a ref, not a subcommand row"
+    commands_idx = out.index("Commands")
+    commands_section = out[commands_idx:]
+    assert not re.search(r"^\s*tg\s", commands_section, re.MULTILINE), (
+        "`tg` should be a ref, not a subcommand row"
+    )
 
 
 def test_help_overview_lists_every_ref_form() -> None:
@@ -113,15 +118,65 @@ def test_help_overview_omits_analyze_flag_dump() -> None:
         assert flag not in out, f"overview should not list `{flag}`; pin to `help flags`"
 
 
-def test_help_overview_shows_status() -> None:
-    """The Status block (full multi-line panel) leads the overview."""
-    out = _invoke("help")
+def test_quickstart_shows_status() -> None:
+    """The Status block leads bare `unread` (the orientation snapshot).
+
+    `unread help` is the catalogue page — it intentionally omits Status
+    so the actual help content (commands, refs, patterns) doesn't get
+    pushed below the fold. The Status panel lives on the bare-invocation
+    quickstart instead, where "what's wired up" is the whole point.
+    """
+    out = _invoke()
     assert "Status" in out
     assert "Install:" in out
     assert "AI provider:" in out
     assert "Telegram:" in out
-    # Status appears BEFORE the Commands section.
-    assert out.index("Status") < out.index("Commands")
+    # Status leads — comes before the Usage / ref blocks.
+    assert out.index("Status") < out.index("Usage")
+
+
+def test_help_overview_omits_status() -> None:
+    """Regression guard: `unread help` must NOT include the Status panel.
+
+    Status duplicates the bare-`unread` quickstart and pushes the actual
+    catalogue content below the fold. Pin the new contract.
+    """
+    out = _invoke("help")
+    assert "Status" not in out
+    # Spot-check: the Status panel's signature rows shouldn't leak in.
+    assert "Install:" not in out
+    assert "Security:" not in out
+
+
+def test_help_overview_shows_common_patterns() -> None:
+    """`unread help` documents how `<ref>` composes with subcommands.
+
+    The `Common patterns` block is the discoverable place to learn
+    `unread ask <ref> "Q"` / `unread dump <ref>` / `unread tg`.
+    """
+    out = _invoke("help")
+    assert "Common patterns" in out
+    assert "unread ask <ref>" in out
+    assert "unread dump <ref>" in out
+    assert "unread tg" in out
+
+
+def test_ref_table_lists_tg() -> None:
+    """`tg` appears in `<ref> can be` so users discover the picker.
+
+    Pinned because the magic ref is fully wired across analyze / ask /
+    dump but invisible to anyone who doesn't already know the trick.
+    """
+    out = _invoke("help")
+    ref_idx = out.index("<ref> can be")
+    # Scope to a generous slice after the header, ending at the next
+    # major heading so we don't catch the `unread tg` Common-patterns row.
+    section = out[ref_idx : ref_idx + 500]
+    import re
+
+    assert re.search(r"^\s*tg\s+interactive Telegram", section, re.MULTILINE), (
+        "`tg` row missing from <ref> can be section"
+    )
 
 
 def test_help_flags_exposes_root_options() -> None:
