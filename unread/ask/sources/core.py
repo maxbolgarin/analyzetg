@@ -15,12 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import typer
 from rich.console import Console
 
 from unread.ai.providers import resolve_chat_model
 from unread.analyzer.openai_client import chat_complete, make_client
 from unread.config import get_settings
 from unread.db.repo import open_repo
+from unread.util.pricing import chat_cost
 from unread.util.tokens import count_tokens
 
 console = Console()
@@ -43,16 +45,23 @@ class DocCitation:
     offset_end: int
 
 
-def _build_messages_whole_doc(
-    *, extracted_text: str, source_label: str, question: str, language: str
+def _build_doc_messages(
+    *,
+    source_text: str,
+    source_label: str,
+    question: str,
+    answer_language: str,
+    content_language: str,
 ) -> list[dict]:
-    """One-shot system+user pair for the whole-document path."""
+    """One-shot system+user pair. `source_text` is either the full extracted
+    text (whole-doc path) or the joined top-K chunks (retrieval path)."""
     system = (
         "Answer the user's question using ONLY the provided source text. "
         "If the answer is not in the source, say so. Cite by referring to "
-        f"the source label '{source_label}' inline. Respond in {language}."
+        f"the source label '{source_label}' inline. The source content is "
+        f"in {content_language}; respond in {answer_language}."
     )
-    user = f"Source ({source_label}):\n\n{extracted_text}\n\n---\n\nQuestion: {question}"
+    user = f"Source ({source_label}):\n\n{source_text}\n\n---\n\nQuestion: {question}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -142,43 +151,70 @@ async def cmd_ask_document(
     language: str | None = None,
     content_language: str | None = None,
     no_followup: bool = False,
-    semantic: bool = False,
-    build_index: bool = False,
-    rerank: bool | None = None,
+    semantic: bool = False,  # reserved for embedding-retrieval rewire (future task)
+    build_index: bool = False,  # reserved for embedding-index build (future task)
+    rerank: bool | None = None,  # reserved for cheap-model rerank pass (future task)
     limit: int = 200,
     show_retrieved: bool = False,
 ) -> None:
-    """Answer `question` over `extracted_text`. Picks whole-doc vs retrieval based on token count."""
+    """Answer `question` over `extracted_text`. Picks whole-doc vs retrieval based on token count.
+
+    `citations` are accepted for future inline-link rendering but are not
+    yet woven into the answer body — v1 cites by `source_label` only.
+    Adapters should still build them so the wiring drop-in is mechanical.
+    `no_followup` is accepted to match the chat-archive ask signature; the
+    doc-mode path is one-shot so there's no follow-up loop to skip.
+    """
     settings = get_settings()
     cutoff = settings.ask.doc_full_text_cutoff_tokens
-    used_language = language or settings.locale.language or "en"
+    used_answer_language = (language or settings.locale.language or "en").lower()
+    used_content_language = (
+        content_language or settings.locale.content_language or used_answer_language
+    ).lower()
     used_model = model or resolve_chat_model(settings)
 
     tokens = count_tokens(extracted_text)
     if tokens <= cutoff:
-        messages = _build_messages_whole_doc(
-            extracted_text=extracted_text,
-            source_label=source_label,
-            question=question,
-            language=used_language,
-        )
+        source_text = extracted_text
         phase = "ask_doc_full"
     else:
-        chunk_target = max(32, cutoff // 16)  # ~16 chunks per cutoff window
+        chunk_target = max(
+            64, cutoff // 16
+        )  # ~16 chunks per cutoff window; floor at 64 to avoid one-token shards
         chunks = _chunk_text(extracted_text, target_tokens=chunk_target)
         top_k = min(5, limit, len(chunks))  # cap at 5 chunks to keep context short
         top = _retrieve_top_k(chunks, question, k=top_k)
         if show_retrieved:
             for idx, chunk in top:
                 console.print(f"[grey70]chunk #{idx}[/]: {chunk[:120]}…")
-        retrieved_block = "\n\n---\n\n".join(c for _i, c in top)
-        messages = _build_messages_whole_doc(
-            extracted_text=retrieved_block,
-            source_label=source_label,
-            question=question,
-            language=used_language,
-        )
+        source_text = "\n\n---\n\n".join(c for _i, c in top)
         phase = "ask_doc_retrieval"
+
+    messages = _build_doc_messages(
+        source_text=source_text,
+        source_label=source_label,
+        question=question,
+        answer_language=used_answer_language,
+        content_language=used_content_language,
+    )
+
+    # Cost guard — mirrors the chat-archive ask path so `--max-cost` works
+    # symmetrically across all ask scopes.
+    prompt_tokens = sum(count_tokens(m["content"], used_model) for m in messages)
+    est_cost = chat_cost(used_model, prompt_tokens, 0, 2000, settings=settings)
+    if est_cost is not None and max_cost is not None and est_cost > max_cost:
+        console.print(
+            f"[bold yellow]Estimated cost ${est_cost:.4f} exceeds --max-cost ${max_cost:.4f} "
+            f"({prompt_tokens:,} prompt tokens × {used_model}, output capped at 2000).[/]"
+        )
+        if yes:
+            console.print("[red]Aborting (--yes set).[/]")
+            raise typer.Exit(2)
+        from unread.util.prompt import confirm as _confirm
+
+        if not _confirm("Run anyway?", default=False):
+            console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(0)
 
     oai = make_client()
     async with open_repo(settings.storage.data_path) as repo:
