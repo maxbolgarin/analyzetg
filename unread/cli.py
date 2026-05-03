@@ -728,22 +728,15 @@ def _is_uninitialized() -> bool:
 def _maybe_offer_init() -> None:
     """Friendly prompt: 'unread isn't set up yet — run setup now?'.
 
-    Shown only when bare `unread` is invoked, the install looks
-    unconfigured, AND stdin is a TTY (so we don't surprise scripts).
-    On Yes, runs the full `cmd_init` wizard. On No, the caller falls
-    through to the quickstart panel.
+    Caller (the bare-`unread` path) gates this to truly-first-run:
+    install pointer missing, active AI provider has no key, stdin is
+    a TTY. On Yes, runs the full `cmd_init` wizard. On No, the caller
+    falls through to the quickstart panel.
     """
-    from unread.core.paths import install_pointer_path
     from unread.tg.commands import cmd_init
     from unread.util.prompt import confirm as _confirm
 
-    pointer_missing = not install_pointer_path().is_file()
-    headline = (
-        "[bold yellow]Looks like unread isn't set up yet.[/]"
-        if pointer_missing
-        else "[bold yellow]No AI provider key configured.[/]"
-    )
-    console.print(headline)
+    console.print("[bold yellow]Looks like unread isn't set up yet.[/]")
     console.print(
         "[grey70]Setup picks an install folder, an AI provider, and (optionally) "
         "links Telegram. Takes about a minute.[/]\n"
@@ -2061,12 +2054,21 @@ def _root(
     ):
         _exit_unrecognized_ref(ref)
     if ref is None and not wants_tg_picker:
-        # If the install isn't usable yet (no install.toml or no chat
-        # provider key), prompt the user to run `unread init` instead
-        # of silently dropping them on the quickstart panel — the panel
-        # tells them which command to run, but one extra Y/N here gets
-        # them through the wizard immediately.
-        if _stdin_has_data() is False and _is_uninitialized():
+        # First-run nudge: if the install isn't usable yet (no AI key)
+        # AND the user has never run the wizard (no install.toml
+        # pointer), offer to run setup now instead of dropping them on
+        # the quickstart panel. Once the pointer exists the user has
+        # already been through the wizard and made their choices — even
+        # if they skipped AI / Telegram, don't re-prompt on every bare
+        # `unread`. The status panel below already lists missing pieces
+        # and points at `unread init`.
+        from unread.core.paths import install_pointer_path
+
+        if (
+            _stdin_has_data() is False
+            and _is_uninitialized()
+            and not install_pointer_path().is_file()
+        ):
             _maybe_offer_init()
             # Either the wizard ran (and we're now configured) or the
             # user said no. Either way, fall through to the quickstart
