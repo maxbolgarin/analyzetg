@@ -1364,6 +1364,11 @@ def _print_provider_credentials_banner(provider: str) -> None:
 
 describe_app = _UnreadTyper(
     help=_t("cmd_describe"),
+    # _UnreadRootGroup (not _UnreadGroup) because the callback declares
+    # an optional positional `ref`. Without _PreferSubcommandsGroup's
+    # peel logic, Click would consume "folders" as ref and never route
+    # to the subcommand. The chats/cache/backup sub-typers don't have
+    # this problem because their callbacks have no positional args.
     cls=_UnreadRootGroup,
 )
 app.add_typer(describe_app, name="describe", rich_help_panel=PANEL_TELEGRAM)
@@ -1402,7 +1407,7 @@ def describe(
     and channels get linked-discussion + subscriber count.
     """
     if ctx.invoked_subcommand is not None:
-        # A subcommand was matched (e.g. `describe folders` once added in Task 4).
+        # A subcommand was matched (e.g. `describe folders`).
         return
     from unread.tg.commands import cmd_describe
 
