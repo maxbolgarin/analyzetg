@@ -21,7 +21,9 @@ def test_panel_telegram_appears_in_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, result.output
     out = result.output
-    assert "Telegram" in out
+    # Pin the panel header itself, not just the word "Telegram" (which
+    # appears in many command descriptions and ref-table rows).
+    assert "  Telegram\n" in out
     for cmd in ("describe", "login", "logout", "chats", "sync"):
         assert cmd in out, f"command '{cmd}' missing from --help output"
 
