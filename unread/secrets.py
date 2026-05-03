@@ -181,6 +181,14 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     ``_ensure_passphrase`` raises on non-TTY contexts; lets a
     ``PassphraseError`` propagate so the caller can show a friendly
     "wrong passphrase" line and re-prompt.
+
+    On successful return, the per-process passphrase cache is cleared:
+    every distinct salt's derived key now lives in `_PROCESS_KEYS`,
+    which is sufficient for any further decrypts in this process.
+    Keeping the passphrase string around longer is a needless exposure
+    surface (Rich tracebacks, swap, core dumps). CLI commands that
+    need the raw passphrase (`rotate-passphrase`, `recover`) re-prompt
+    explicitly anyway.
     """
     from unread.db.repo import read_data_db_secrets_sync
     from unread.security.crypto import (
@@ -244,6 +252,14 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
             out[key] = decrypt_with_key(value, install_key)
         else:
             out[key] = decrypt(value, passphrase)
+
+    # Zeroize the per-process passphrase once the keys are cached. A
+    # later read that doesn't need the passphrase (cached_key hits) is
+    # free; one that does will re-prompt or pull from the disk cache.
+    # See docstring for the security rationale.
+    global _PROCESS_PASSPHRASE
+    if passphrase is not None:
+        _PROCESS_PASSPHRASE = None
     return out
 
 

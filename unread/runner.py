@@ -444,6 +444,7 @@ async def _cmd_run_flat(
     `chat_groups` so each chat keeps its own header + citation
     template in the report.
     """
+    from datetime import UTC as _UTC
     from datetime import datetime as _dt
 
     from unread.analyzer.formatter import build_link_template
@@ -575,6 +576,15 @@ async def _cmd_run_flat(
                     include_transcripts=True,
                     mark_read=mr_eff,
                     with_comments=with_comments,
+                    # Pre-prod review: language / content_language used to
+                    # be dropped on this code path even though
+                    # `prepare_chat_run` accepts them, so reports came
+                    # back in the default locale regardless of
+                    # `--language` / `--content-language`. Pull from
+                    # settings (which already reflects the CLI overrides)
+                    # so the run honors the user's choice.
+                    language=settings.locale.language,
+                    content_language=getattr(settings.locale, "content_language", None),
                 )
             except typer.Exit as e:
                 if e.exit_code == 0:
@@ -590,7 +600,12 @@ async def _cmd_run_flat(
             # backfill, so apply it post-iter (cheaper than another
             # call to prepare with since_dt).
             if period_kwargs.get("last_days"):
-                cutoff = _dt.utcnow().timestamp() - period_kwargs["last_days"] * 86400
+                # `datetime.utcnow()` is deprecated in 3.13 and returns a
+                # naive datetime; use a UTC-aware now() so the comparison
+                # against `m.date.timestamp()` is well-defined regardless
+                # of whether `m.date` is aware or naive (timestamp() of a
+                # naive datetime is interpreted as local time on POSIX).
+                cutoff = _dt.now(_UTC).timestamp() - period_kwargs["last_days"] * 86400
                 prepared.messages[:] = [m for m in prepared.messages if m.date.timestamp() >= cutoff]
 
             all_messages.extend(prepared.messages)

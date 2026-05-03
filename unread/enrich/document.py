@@ -243,11 +243,17 @@ async def enrich_document(
             text = text[: settings.enrich.max_doc_chars] + "\n…[truncated]"
             truncated = True
 
+        # `ext` is a filename suffix from arbitrary user-supplied
+        # filenames; embedding it in JSON via string concatenation
+        # explodes downstream parsers if the value contains `"` or `\`.
+        # `json.dumps` handles escaping correctly.
+        import json as _json
+
         await repo.put_media_enrichment(
             int(msg.media_doc_id),
             "doc_extract",
             text,
-            extra_json=f'{{"ext": "{ext}", "truncated": {str(truncated).lower()}}}',
+            extra_json=_json.dumps({"ext": ext, "truncated": truncated}),
         )
         msg.extracted_text = text
         return EnrichResult(kind="doc_extract", content=text)

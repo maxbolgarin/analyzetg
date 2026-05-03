@@ -210,6 +210,16 @@ async def chat_complete(
             new_max=bumped,
             completion=result.completion_tokens,
         )
+        # Surface the retry to the user — re-issuing the call re-bills
+        # the entire prompt (which can be 100k+ tokens for big map
+        # passes). The structured log was previously the only signal,
+        # invisible in non-verbose runs.
+        from unread.util.flood import _user_visible_retry_status
+
+        _user_visible_retry_status(
+            f"Output truncated at {max_tokens} tokens — retrying with {bumped} "
+            "(this re-bills the full prompt)"
+        )
         result = await _one_call(
             provider,
             repo=repo,

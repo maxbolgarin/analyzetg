@@ -1857,7 +1857,21 @@ def t(key: str, lang: str | None = None) -> str:
     effect immediately, without any module-level caching.
     """
     if key not in _STRINGS:
-        raise KeyError(f"i18n: unknown key {key!r}. Add it to unread/i18n.py.")
+        # Pre-prod review: a missing key used to raise `KeyError`. Some
+        # `_tf("…")` calls run at help-render / import time, so a single
+        # missing key broke the entire CLI start-up. Return a visible
+        # sentinel + log a structured warning instead — callers see a
+        # rendered placeholder, the user gets context-free output, and
+        # the developer sees the warning in logs.
+        try:
+            from unread.util.logging import get_logger
+
+            get_logger(__name__).warning("i18n.missing_key", key=key)
+        except Exception:
+            # Never let a logging hiccup turn into a hard import-time
+            # failure of the CLI.
+            pass
+        return f"!{key}!"
     if lang is None:
         from unread.config import get_settings
 

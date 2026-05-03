@@ -58,19 +58,31 @@ def _redact_processor(_logger: Any, _method_name: str, event_dict: dict) -> dict
     """structlog processor: mask secret-shaped values and known-secret keys.
 
     Last line of defense — modules should still avoid logging raw
-    credentials. Walks top-level keys only; nested dicts/lists are not
-    recursed (callers don't structure logs that way today, and the
-    cost of full-tree walking on every log call isn't worth it).
+    credentials. Walks one level into nested dicts/lists so common
+    `extra={"payload": {...}}` patterns and Telethon's nested error
+    structures don't bypass the filter. Stops at depth 2 to keep the
+    cost bounded on every log call.
     """
-    for key, value in list(event_dict.items()):
+
+    def _scrub(key: str | None, value: Any, depth: int) -> Any:
+        # Match by key first — covers Telethon session strings, api_hash,
+        # etc. that don't match the regex but live behind an obvious key.
         if isinstance(key, str) and key.lower() in _SECRET_KEYS:
-            if value:
-                event_dict[key] = _REDACTED
-            continue
+            return _REDACTED if value else value
         if isinstance(value, str) and value:
             masked = _SECRET_VALUE_RE.sub(_REDACTED, value)
-            if masked is not value:
-                event_dict[key] = masked
+            return masked
+        if depth <= 0:
+            return value
+        if isinstance(value, dict):
+            return {k: _scrub(k if isinstance(k, str) else None, v, depth - 1) for k, v in value.items()}
+        if isinstance(value, list | tuple):
+            cls = type(value)
+            return cls(_scrub(None, item, depth - 1) for item in value)
+        return value
+
+    for key, value in list(event_dict.items()):
+        event_dict[key] = _scrub(key, value, depth=2)
     return event_dict
 
 

@@ -471,7 +471,42 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
 
     from unread.secrets import read_secrets
 
-    persisted = read_secrets(settings)
+    # Pre-prod review: a corrupt secrets DB used to be silently masked
+    # by `if persisted:` and the user only saw the resulting 401 "your
+    # key is bad" later. Surface non-passphrase errors as a stderr
+    # warning so the failure is visible at startup. PassphraseError
+    # and "no passphrase available" RuntimeError still propagate —
+    # those are user-actionable (typo / missing UNREAD_PASSPHRASE) and
+    # shouldn't be downgraded to a warning that gets ignored.
+    from unread.security.crypto import PassphraseError as _PassphraseError
+
+    try:
+        persisted = read_secrets(settings)
+    except _PassphraseError:
+        raise
+    except RuntimeError as e:
+        # The "passphrase backend is active but no passphrase
+        # available" message comes through here. Re-raise so the user
+        # sees it; everything else falls through to the warning path.
+        if "passphrase" in str(e).lower():
+            raise
+        import sys
+
+        print(
+            f"warning: couldn't load persisted secrets ({type(e).__name__}: {e}); "
+            "continuing without the DB overlay. Re-run `unread doctor` to diagnose.",
+            file=sys.stderr,
+        )
+        persisted = {}
+    except Exception as e:
+        import sys
+
+        print(
+            f"warning: couldn't load persisted secrets ({type(e).__name__}: {e}); "
+            "continuing without the DB overlay. Re-run `unread doctor` to diagnose.",
+            file=sys.stderr,
+        )
+        persisted = {}
     if persisted:
         if not settings.telegram.api_id and (raw_id := persisted.get("telegram.api_id")):
             # Stale row from a corrupt write — ignore, keep going.

@@ -1794,9 +1794,21 @@ class Repo:
         """
         await self._conn.commit()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # SQLite refuses VACUUM INTO if the target exists. Quote the path
-        # for safety (escape single quotes by doubling per SQL convention).
-        target = str(dest).replace("'", "''")
+        # SQLite VACUUM INTO doesn't support parameter binding for the
+        # target path (it's parsed at SQL-prepare time, not at execute).
+        # That makes the path a SQL injection vector if `dest` ever
+        # carries user input. Reject the realistic attack chars (NUL,
+        # newline, single quote, control chars) outright before going
+        # near the SQL — a legitimate filesystem path never contains
+        # any of these anyway.
+        path_str = str(dest)
+        bad_chars = set(path_str) & set("\x00\r\n\t'\"")
+        if bad_chars:
+            raise ValueError(f"backup_to: refuses path with unsafe chars {sorted(bad_chars)!r}: {path_str!r}")
+        if any(ord(c) < 0x20 for c in path_str):
+            raise ValueError(f"backup_to: refuses path with control chars: {path_str!r}")
+        # Belt-and-braces SQL escape (double single-quotes).
+        target = path_str.replace("'", "''")
         await self._conn.execute(f"VACUUM INTO '{target}'")
         return dest.stat().st_size if dest.exists() else 0
 

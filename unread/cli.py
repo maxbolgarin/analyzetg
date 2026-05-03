@@ -142,8 +142,12 @@ class _UnreadTyper(typer.Typer):
 # names) at app-construction time. Without this early sync, `--help`
 # would render in the config-file language and ignore `unread settings`.
 # A read-only sqlite open is safe (~1ms) and degrades to no-op when the
-# DB doesn't exist yet (fresh install).
-apply_db_overrides_sync(get_settings())
+# DB doesn't exist yet (fresh install). Wrapped in `suppress(Exception)`
+# because a corrupt `data.sqlite` would otherwise crash `unread --help`
+# at import time, leaving the user with no way to even discover the
+# `doctor` / `killme` recovery commands.
+with contextlib.suppress(Exception):
+    apply_db_overrides_sync(get_settings())
 
 # Panel names — looked up once at import-time so each Typer-decorated
 # command can pin its panel to the right localized header.
@@ -422,9 +426,13 @@ def _seed_home_templates() -> None:
 
     Lets the user fill in credentials in-place after a first-run banner
     instead of hunting for the example files in the repo.
-    """
-    from shutil import copyfile
 
+    The `.env` write goes through `secret_write_text` so the file is
+    mode 0o600 from creation — without that, a brief world-readable
+    window exists between `copyfile` (which inherits umask, typically
+    0o644) and the follow-up `chmod`. The window is small but real on
+    multi-user hosts and the .env carries fresh API keys.
+    """
     from unread.core.paths import default_config_path, default_env_path, ensure_unread_home
 
     ensure_unread_home()
@@ -436,19 +444,18 @@ def _seed_home_templates() -> None:
     env_template = repo_root / ".env.example"
     cfg_template = repo_root / "config.toml.example"
     if not env_target.exists() and env_template.exists():
-        copyfile(env_template, env_target)
-        # Use the shared tighten helper so a failure is logged (and
-        # surfaced to the user via the warning channel) instead of
-        # silently leaving a 0o644 .env containing fresh secrets.
-        from unread.util.fsmode import tighten
+        from unread.util.fsmode import secret_write_text
 
-        if not tighten(env_target):
+        try:
+            secret_write_text(env_target, env_template.read_text(encoding="utf-8"))
+        except OSError as e:
             console.print(
-                f"[yellow]Couldn't restrict permissions on {env_target} — "
-                f"set them manually with `chmod 600 {env_target}` so other "
-                f"users on this machine can't read your secrets.[/]"
+                f"[yellow]Couldn't seed {env_target}: {e} — copy {env_template} "
+                f"manually and `chmod 600 {env_target}`.[/]"
             )
     if not cfg_target.exists() and cfg_template.exists():
+        from shutil import copyfile
+
         copyfile(cfg_template, cfg_target)
 
 
@@ -463,6 +470,19 @@ def _dispatch_analyze(**kwargs) -> None:
     from unread.analyzer.commands import cmd_analyze
 
     save_flag = kwargs.pop("save", False)
+    # Reject contradictory output flags up front so the user gets a
+    # clear error rather than discovering downstream that one of the
+    # three got silently dropped. `--save` is deprecated (`save_default`
+    # below threads it through for back-compat) and inherently
+    # conflicts with `--console`/`--no-save`.
+    no_save = kwargs.get("no_save", False)
+    console_out = kwargs.get("console_out", False)
+    if save_flag and (no_save or console_out):
+        import typer as _typer
+
+        raise _typer.BadParameter(
+            "--save conflicts with --no-save / --console; pass at most one of these flags."
+        )
     # `--plain-citations` flips a console-only rendering knob. It does
     # not change the LLM input, the cache key, or the saved file — so we
     # apply it as a one-shot override to the settings singleton instead

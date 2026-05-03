@@ -296,12 +296,14 @@ def _build_plan() -> _Plan:
             except Exception:
                 pass
 
-    # Runtime key cache.
+    # Runtime key cache. Uses the public `runtime_key_cache_path()`
+    # helper so a future rename of the underlying private function
+    # doesn't silently leave the cached key on disk after `killme`.
     runtime_key: Path | None = None
     try:
-        from unread.security.crypto import _cache_path  # type: ignore[attr-defined]
+        from unread.security.crypto import runtime_key_cache_path
 
-        cand = _cache_path()
+        cand = runtime_key_cache_path()
         if cand.is_file():
             runtime_key = cand
     except Exception:

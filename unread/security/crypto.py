@@ -54,12 +54,24 @@ KEY_LEN = 32
 SALT_LEN = 16
 NONCE_LEN = 12
 
-# Scrypt parameters. ``n=2**17`` lands at roughly 100 ms on a modern
-# laptop CPU (target: visible but tolerable). Tunable in the future
-# via ``app_settings::security.kdf_cost`` if we ever need to ramp it.
-SCRYPT_N = 2**17
+# Scrypt parameters. ``n=2**18`` lands at roughly 200 ms on a modern
+# laptop CPU — at the upper end of "perceptible but tolerable" for an
+# unlock prompt and the modern (2026) recommendation for a high-value
+# target with multiple LLM keys + a Telegram session in scope.
+# Tunable in the future via ``app_settings::security.kdf_cost`` if we
+# ever need to ramp it further.
+SCRYPT_N = 2**18
 SCRYPT_R = 8
 SCRYPT_P = 1
+
+# Default TTL for the cross-invocation key cache. The pre-prod review
+# flagged "no TTL" (== ttl_seconds=None) as a security regression: on
+# macOS / Windows the cache file lives on persistent disk, so a
+# never-expiring entry survives reboot and gets included in the user's
+# ~/ backup. 30 minutes is enough for a single CLI session of multiple
+# unread invocations without forcing a re-prompt mid-flow, and short
+# enough that an idle machine isn't carrying the master key forever.
+DEFAULT_KEY_CACHE_TTL_SEC = 30 * 60
 
 
 class PassphraseError(RuntimeError):
@@ -85,9 +97,24 @@ def _b64encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+_B64_URLSAFE_ALPHABET = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
+
+
 def _b64decode(text: str) -> bytes:
+    """Strict urlsafe base64 decode. Raises on stray non-base64 chars.
+
+    `urlsafe_b64decode` doesn't accept `validate=` (stdlib quirk), so
+    we hand-check the alphabet before decoding. A malformed envelope
+    errors at parse time instead of silently producing partial bytes
+    that later trip InvalidTag on the AEAD verify and waste a Scrypt.
+    """
+    if not all(c in _B64_URLSAFE_ALPHABET for c in text):
+        raise PassphraseError("malformed base64 in encrypted record: stray non-alphabet char")
     pad = "=" * (-len(text) % 4)
-    return base64.urlsafe_b64decode(text + pad)
+    try:
+        return base64.urlsafe_b64decode(text + pad)
+    except (ValueError, UnicodeEncodeError) as e:
+        raise PassphraseError(f"malformed base64 in encrypted record: {e}") from e
 
 
 def is_encrypted(value: str | None) -> bool:
@@ -247,6 +274,16 @@ def _cache_path() -> Path:
     return _runtime_dir() / "key"
 
 
+# Public alias — `killme` and other consumers used to reach in via
+# `_cache_path` with `# type: ignore[attr-defined]`. The private name
+# is retained for backwards compatibility with internal callers; new
+# code should use `runtime_key_cache_path` so a rename of the helper
+# doesn't silently break the killme cleanup.
+def runtime_key_cache_path() -> Path:
+    """Return the absolute path of the cross-invocation key cache file."""
+    return _cache_path()
+
+
 def store_cached_key(key: bytes, salt: bytes, ttl_seconds: int | None) -> Path:
     """Write the derived key to the runtime dir for cross-invocation reuse.
 
@@ -328,6 +365,7 @@ APP_SETTING_SALT = "security.kdf_salt"
 
 __all__ = [
     "APP_SETTING_SALT",
+    "DEFAULT_KEY_CACHE_TTL_SEC",
     "ENCRYPTED_PREFIX",
     "KEY_LEN",
     "NONCE_LEN",
@@ -349,5 +387,6 @@ __all__ = [
     "lookup_key_for_salt",
     "parse_envelope",
     "remember_key_for_salt",
+    "runtime_key_cache_path",
     "store_cached_key",
 ]
