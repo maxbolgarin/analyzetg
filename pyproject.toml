@@ -6,6 +6,36 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 authors = [{ name = "Max Bolgarin", email = "mxbolgarin@gmail.com" }]
+keywords = [
+    "telegram",
+    "cli",
+    "ai",
+    "openai",
+    "anthropic",
+    "google",
+    "summarize",
+    "digest",
+    "transcription",
+    "whisper",
+    "youtube",
+    "rag",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Text Processing :: Linguistic",
+    "Topic :: Utilities",
+]
 dependencies = [
     "typer>=0.12",
     # Click 9 changed `Context._protected_args` from a private attribute
@@ -56,6 +86,12 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/maxbolgarin/unread"
+Repository = "https://github.com/maxbolgarin/unread"
+Issues = "https://github.com/maxbolgarin/unread/issues"
+Changelog = "https://github.com/maxbolgarin/unread/blob/main/CHANGELOG.md"
 
 [project.scripts]
 unread = "unread.cli:main"
