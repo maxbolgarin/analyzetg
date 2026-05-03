@@ -76,6 +76,106 @@ async def cmd_export(*, chat: int, fmt: str, output: Path, since: str | None, un
         console.print(f"[green]{_tf('exported_n_to', n=len(msgs), path=output)}[/]")
 
 
+_WEBSITE_MODES = ("text", "full")
+_YOUTUBE_MODES = ("transcript", "audio", "video")
+
+
+def _check_telegram_only_flags(kind: str, flags: dict[str, object]) -> None:
+    rejected = [name for name, present in flags.items() if present]
+    if rejected:
+        raise typer.BadParameter(
+            f"{kind} URLs do not support {', '.join(rejected)}. These flags only apply to Telegram chats."
+        )
+
+
+def _resolve_dump_mode(
+    mode: str | None,
+    *,
+    kind: str,
+    valid: tuple[str, ...],
+    yes: bool,
+) -> str:
+    """Return a validated mode, prompting interactively if missing on a TTY."""
+    if mode is not None:
+        norm = mode.strip().lower()
+        if norm not in valid:
+            raise typer.BadParameter(
+                f"--mode={mode!r} is not valid for {kind} URLs. Valid: {', '.join(valid)}."
+            )
+        return norm
+    from unread.dump.prompts import pick_dump_mode
+
+    picked = pick_dump_mode(kind, yes=yes)  # type: ignore[arg-type]
+    if picked is None:
+        raise typer.BadParameter(
+            "--mode is required when running non-interactively. "
+            f"For {kind} URLs pick one of: {', '.join(valid)}."
+        )
+    return picked
+
+
+async def _dispatch_dump_youtube(
+    *,
+    ref: str,
+    mode: str | None,
+    youtube_source: str,
+    output: Path | None,
+    console_out: bool,
+    language: str,
+    content_language: str,
+    yes: bool,
+    telegram_only_flags: dict[str, object],
+) -> None:
+    _check_telegram_only_flags("YouTube", telegram_only_flags)
+    if youtube_source not in ("auto", "captions", "audio"):
+        raise typer.BadParameter(
+            f"Invalid --youtube-source={youtube_source!r}. Valid: auto, captions, audio."
+        )
+    chosen = _resolve_dump_mode(mode, kind="youtube", valid=_YOUTUBE_MODES, yes=yes)
+    from unread.youtube.dump import cmd_dump_youtube
+
+    await cmd_dump_youtube(
+        url=ref,
+        mode=chosen,  # type: ignore[arg-type]
+        youtube_source=youtube_source,  # type: ignore[arg-type]
+        output=output,
+        console_out=console_out,
+        language=language,
+        content_language=content_language,
+        yes=yes,
+    )
+
+
+async def _dispatch_dump_website(
+    *,
+    ref: str,
+    mode: str | None,
+    max_images: int,
+    output: Path | None,
+    console_out: bool,
+    language: str,
+    content_language: str,
+    yes: bool,
+    telegram_only_flags: dict[str, object],
+) -> None:
+    _check_telegram_only_flags("Website", telegram_only_flags)
+    if max_images < 0:
+        raise typer.BadParameter("--max-images must be >= 0.")
+    chosen = _resolve_dump_mode(mode, kind="website", valid=_WEBSITE_MODES, yes=yes)
+    from unread.website.dump import cmd_dump_website
+
+    await cmd_dump_website(
+        url=ref,
+        mode=chosen,  # type: ignore[arg-type]
+        max_images=max_images,
+        output=output,
+        console_out=console_out,
+        language=language,
+        content_language=content_language,
+        yes=yes,
+    )
+
+
 async def cmd_dump(
     *,
     ref: str | None,
@@ -107,6 +207,9 @@ async def cmd_dump(
     yes: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    mode: str | None = None,
+    youtube_source: str = "auto",
+    max_images: int = 50,
 ) -> None:
     """Pull chat history end-to-end and write it to a file. No OpenAI chat analysis.
 
@@ -194,6 +297,101 @@ async def cmd_dump(
             "an @user / t.me link / numeric id for a specific Telegram chat, "
             "or `--folder NAME` to batch-dump every unread chat in a folder."
         )
+
+    # Non-Telegram dispatch — mirrors the order in cmd_analyze. Local
+    # files / YouTube / website refs each get their own adapter that
+    # never opens tg_client. Without this fan-out, every non-TG ref
+    # tripped the "Telegram not configured" gate at the `async with
+    # tg_client(...)` below.
+    settings_for_lang = get_settings()
+    eff_lang_pre = (language or settings_for_lang.locale.language or "en").lower()
+    eff_clang_pre = (content_language or settings_for_lang.locale.content_language or eff_lang_pre).lower()
+
+    from unread.cli import _STDIN_REF_SENTINEL, _looks_like_local_file
+
+    if ref == _STDIN_REF_SENTINEL or _looks_like_local_file(ref):
+        # Files are their own dump artifact — refuse rather than alias
+        # to analyze (which would silently run the LLM).
+        raise typer.BadParameter(
+            "`unread dump` only supports Telegram, YouTube, and website refs. "
+            "Local files are already in their final form on disk; "
+            "use `unread <path>` (analyze) if you want a summary."
+        )
+
+    from unread.youtube.urls import is_youtube_url as _is_yt
+
+    if _is_yt(ref):
+        await _dispatch_dump_youtube(
+            ref=ref,
+            mode=mode,
+            youtube_source=youtube_source,
+            output=output,
+            console_out=console_out,
+            language=eff_lang_pre,
+            content_language=eff_clang_pre,
+            yes=yes,
+            telegram_only_flags={
+                "--folder": folder,
+                "--thread": thread is not None,
+                "--all-flat": all_flat,
+                "--all-per-topic": all_per_topic,
+                "--with-comments": with_comments,
+                "--from-msg": bool(from_msg),
+                "--full-history": full_history,
+                "--since": bool(since),
+                "--until": bool(until),
+                "--last-days": last_days is not None,
+                "--last-hours": last_hours is not None,
+                "--last-minutes": last_minutes is not None,
+                "--mark-read/--no-mark-read": mark_read is not None,
+                "--with-transcribe": with_transcribe,
+                "--enrich": bool(enrich),
+                "--enrich-all": enrich_all,
+                "--no-enrich": no_enrich,
+                "--save-media": save_media,
+                "--save-media-types": bool(save_media_types),
+                "--join": join,
+            },
+        )
+        return
+
+    from unread.website.urls import is_telegram_url as _is_tg_url
+    from unread.website.urls import is_website_url as _is_web
+
+    if _is_web(ref) and not _is_tg_url(ref):
+        await _dispatch_dump_website(
+            ref=ref,
+            mode=mode,
+            max_images=max_images,
+            output=output,
+            console_out=console_out,
+            language=eff_lang_pre,
+            content_language=eff_clang_pre,
+            yes=yes,
+            telegram_only_flags={
+                "--folder": folder,
+                "--thread": thread is not None,
+                "--all-flat": all_flat,
+                "--all-per-topic": all_per_topic,
+                "--with-comments": with_comments,
+                "--from-msg": bool(from_msg),
+                "--full-history": full_history,
+                "--since": bool(since),
+                "--until": bool(until),
+                "--last-days": last_days is not None,
+                "--last-hours": last_hours is not None,
+                "--last-minutes": last_minutes is not None,
+                "--mark-read/--no-mark-read": mark_read is not None,
+                "--with-transcribe": with_transcribe,
+                "--enrich": bool(enrich),
+                "--enrich-all": enrich_all,
+                "--no-enrich": no_enrich,
+                "--save-media": save_media,
+                "--save-media-types": bool(save_media_types),
+                "--join": join,
+            },
+        )
+        return
 
     # Direct path: treat mark_read=None as False (CLI tri-state default).
     mark_read_bool = bool(mark_read)

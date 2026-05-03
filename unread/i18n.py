@@ -214,6 +214,64 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Управление сохранёнными настройками (переопределения в БД).",
     },
     "cmd_reports": {"en": "Manage saved reports/", "ru": "Управление сохранёнными отчётами reports/"},
+    "cmd_update": {
+        "en": "Check PyPI for a newer release and (optionally) install it.",
+        "ru": "Проверить PyPI на новую версию и (по желанию) установить её.",
+    },
+    "cmd_update_check": {
+        "en": "Only check; don't install.",
+        "ru": "Только проверить; не устанавливать.",
+    },
+    "cmd_update_yes": {
+        "en": "Skip the install confirmation prompt.",
+        "ru": "Пропустить подтверждение установки.",
+    },
+    "update_up_to_date": {
+        "en": "✓ unread {version} is the latest release.",
+        "ru": "✓ unread {version} — это последняя версия.",
+    },
+    "update_available": {
+        "en": "! Newer version available: {latest} (you have {current}).",
+        "ru": "! Доступна новая версия: {latest} (у вас {current}).",
+    },
+    "update_install_prompt": {
+        "en": "Install now? [y/N]: ",
+        "ru": "Установить сейчас? [y/N]: ",
+    },
+    "update_install_running": {
+        "en": "Running: {cmd}",
+        "ru": "Запускаем: {cmd}",
+    },
+    "update_install_unknown_method": {
+        "en": (
+            "Couldn't detect how `unread` was installed. Run one of:\n"
+            "  uv tool upgrade unread\n"
+            "  pipx upgrade unread\n"
+            "  pip install --upgrade unread"
+        ),
+        "ru": (
+            "Не удалось определить способ установки `unread`. Запустите одну из команд:\n"
+            "  uv tool upgrade unread\n"
+            "  pipx upgrade unread\n"
+            "  pip install --upgrade unread"
+        ),
+    },
+    "update_check_failed": {
+        "en": "Couldn't reach PyPI: {error}",
+        "ru": "Не удалось обратиться к PyPI: {error}",
+    },
+    "update_install_skipped": {
+        "en": "Skipped install. Re-run `unread update` to install.",
+        "ru": "Установка отменена. Запустите `unread update` снова, чтобы установить.",
+    },
+    "doctor_update_label": {
+        "en": "latest release",
+        "ru": "последняя версия",
+    },
+    "doctor_update_newer": {
+        "en": "{latest} available — run `unread update`",
+        "ru": "доступна {latest} — запустите `unread update`",
+    },
     # ---- Repeated phrases ------------------------------------------------
     "cancelled": {"en": "Cancelled.", "ru": "Отменено."},
     "aborted": {"en": "Aborted.", "ru": "Прервано."},
@@ -1934,6 +1992,55 @@ _STRINGS: dict[str, dict[str, str]] = {
     "analyze_detected_video_reframing": {
         "en": "Detected {kind} — analyzing as a video transcript.",
         "ru": "Определено: {kind} — анализируем как транскрипт видео.",
+    },
+    # ---- `unread dump <url>` (non-Telegram refs) -----------------------
+    "dump_pick_mode_web": {
+        "en": "Pick the dump mode for this website:",
+        "ru": "Выберите режим дампа для сайта:",
+    },
+    "dump_pick_mode_yt": {
+        "en": "Pick the dump mode for this YouTube video:",
+        "ru": "Выберите режим дампа для видео YouTube:",
+    },
+    "dump_choice_web_text": {
+        "en": "text — readable article only",
+        "ru": "text — только текст статьи",
+    },
+    "dump_choice_web_full": {
+        "en": "full — article + inlined images",
+        "ru": "full — текст + встраиваемые изображения",
+    },
+    "dump_choice_yt_transcript": {
+        "en": "transcript — metadata + transcript",
+        "ru": "transcript — метаданные + транскрипт",
+    },
+    "dump_choice_yt_audio": {
+        "en": "audio — metadata + mp3",
+        "ru": "audio — метаданные + mp3",
+    },
+    "dump_choice_yt_video": {
+        "en": "video — metadata + mp4",
+        "ru": "video — метаданные + mp4",
+    },
+    "dump_website_text_done": {
+        "en": "Saved article to {path}",
+        "ru": "Статья сохранена в {path}",
+    },
+    "dump_website_full_done": {
+        "en": "Saved article + {images} image(s) to {path}",
+        "ru": "Статья и {images} изображ. сохранены в {path}",
+    },
+    "dump_youtube_transcript_done": {
+        "en": "Saved transcript + metadata to {path}",
+        "ru": "Транскрипт и метаданные сохранены в {path}",
+    },
+    "dump_youtube_audio_done": {
+        "en": "Saved audio + metadata to {path}",
+        "ru": "Аудио и метаданные сохранены в {path}",
+    },
+    "dump_youtube_video_done": {
+        "en": "Saved video + metadata to {path}",
+        "ru": "Видео и метаданные сохранены в {path}",
     },
 }
 

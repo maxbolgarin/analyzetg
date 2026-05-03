@@ -44,3 +44,29 @@ def website_report_path(
     when = stamp or datetime.now()
     ts = when.strftime("%Y-%m-%d_%H%M%S")
     return reports_dir() / "website" / _domain_slug(domain) / f"{_page_slug(title, page_id)}-{preset}-{ts}.md"
+
+
+def website_dump_dir(
+    *,
+    page_id: str,
+    title: str | None,
+    domain: str | None,
+    mode: str,
+    stamp: datetime | None = None,
+) -> Path:
+    """Output directory for `unread dump <url>`.
+
+    Layout: ``reports/website/<domain>/dump-<mode>/<page-slug>-<stamp>/``.
+    Both ``text`` and ``full`` modes write a directory (text writes one
+    file inside it; full writes article + a ``_files/`` image dir) so
+    the on-disk layout is symmetric.
+    """
+    when = stamp or datetime.now()
+    ts = when.strftime("%Y-%m-%d_%H%M%S")
+    return (
+        reports_dir()
+        / "website"
+        / _domain_slug(domain)
+        / f"dump-{mode}"
+        / f"{_page_slug(title, page_id)}-{ts}"
+    )

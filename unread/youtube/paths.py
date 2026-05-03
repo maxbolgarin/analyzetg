@@ -52,3 +52,30 @@ def youtube_report_path(
         / _channel_slug(channel_title, channel_id)
         / f"{_video_slug(title, video_id)}-{preset}-{ts}.md"
     )
+
+
+def youtube_dump_dir(
+    *,
+    video_id: str,
+    title: str | None,
+    channel_title: str | None,
+    channel_id: str | None,
+    mode: str,
+    stamp: datetime | None = None,
+) -> Path:
+    """Output directory for `unread dump <youtube-url>`.
+
+    Layout: ``reports/youtube/<channel>/dump-<mode>/<video-slug>-<stamp>/``.
+    Each mode writes only the files it needs (transcript.md /
+    metadata.json / audio.mp3 / video.mp4); the directory shape stays
+    the same so users learn one place to look.
+    """
+    when = stamp or datetime.now()
+    ts = when.strftime("%Y-%m-%d_%H%M%S")
+    return (
+        reports_dir()
+        / "youtube"
+        / _channel_slug(channel_title, channel_id)
+        / f"dump-{mode}"
+        / f"{_video_slug(title, video_id)}-{ts}"
+    )

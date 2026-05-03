@@ -75,7 +75,21 @@ NONCE_LEN = 12
 # target with multiple LLM keys + a Telegram session in scope.
 # Tunable in the future via ``app_settings::security.kdf_cost`` if we
 # ever need to ramp it further.
-SCRYPT_N = 2**18
+#
+# `UNREAD_SCRYPT_N` env override: the test suite sets this to a much
+# smaller value (e.g. 2**10 ≈ 5 ms) so encrypt/decrypt round-trips don't
+# burn 200 ms × N per file. Anything below 2**14 is unsafe for production
+# and we explicitly clamp to the production floor when the var is unset
+# or invalid. NOT documented for end users — production installs should
+# never touch this.
+import os as _os
+
+PRODUCTION_SCRYPT_N = 2**18
+try:
+    _override = _os.environ.get("UNREAD_SCRYPT_N")
+    SCRYPT_N = int(_override) if _override else PRODUCTION_SCRYPT_N
+except ValueError:
+    SCRYPT_N = PRODUCTION_SCRYPT_N
 SCRYPT_R = 8
 SCRYPT_P = 1
 

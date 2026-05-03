@@ -46,13 +46,17 @@ class _Plan:
 
 def cmd_killme(yes: bool) -> int:
     """Show a deletion plan, confirm, then wipe everything. Returns the exit code."""
-    plan = _build_plan()
-
     # Refuse to run when the resolved install home looks dangerous (e.g.
-    # `UNREAD_HOME=/` or `UNREAD_HOME=$HOME`). Users who set the env var
-    # by mistake would otherwise lose their entire home directory or root
-    # filesystem to `shutil.rmtree` later in this function.
-    rejection = _reject_unsafe_home(plan.install_home)
+    # `UNREAD_HOME=/` or `UNREAD_HOME=$HOME`) BEFORE building the plan.
+    # `_build_plan` walks the install dir to compute sizes; rooted at `/`
+    # that's a multi-minute (or OOM) filesystem walk on the way to a
+    # rejection that we already know is coming. Users who set the env
+    # var by mistake would otherwise lose their entire home directory
+    # or root filesystem to `shutil.rmtree` later in this function.
+    from unread.core.paths import unread_home
+
+    home_for_safety = unread_home().resolve()
+    rejection = _reject_unsafe_home(home_for_safety)
     if rejection is not None:
         console.print(f"[bold red]Refusing to run killme:[/] {rejection}")
         console.print(
@@ -60,6 +64,8 @@ def cmd_killme(yes: bool) -> int:
             "to a deeper-nested path or remove it manually.[/]"
         )
         return 1
+
+    plan = _build_plan()
 
     _print_plan(plan)
 
@@ -235,7 +241,12 @@ def _reject_unsafe_home(home: Path) -> str | None:
         "/System",
         "/Library",
     }
-    if str(resolved) in dangerous:
+    # Check both the literal `home` and the symlink-resolved variant.
+    # On macOS, `Path("/etc").resolve()` returns `/private/etc` (3 parts),
+    # which slips past both the dangerous-set membership and the
+    # len<3 fallback below — but the user clearly typed a system dir.
+    # Catch both spellings explicitly.
+    if str(home) in dangerous or str(resolved) in dangerous:
         return f"{resolved} is a system directory"
     if len(parts) < 3:
         return f"{resolved} is a top-level directory; refusing to wipe"

@@ -2064,11 +2064,7 @@ def _root(
         # and points at `unread init`.
         from unread.core.paths import install_pointer_path
 
-        if (
-            _stdin_has_data() is False
-            and _is_uninitialized()
-            and not install_pointer_path().is_file()
-        ):
+        if _stdin_has_data() is False and _is_uninitialized() and not install_pointer_path().is_file():
             _maybe_offer_init()
             # Either the wizard ran (and we're now configured) or the
             # user said no. Either way, fall through to the quickstart
@@ -3153,6 +3149,17 @@ def bug_report(
     _run(_run_bug_report())
 
 
+@app.command("update", rich_help_panel=PANEL_MAINT, help=_t("cmd_update"))
+def update_cmd(
+    check: bool = typer.Option(False, "--check", help=_t("cmd_update_check")),
+    yes: bool = typer.Option(False, "--yes", "-y", help=_t("cmd_update_yes")),
+) -> None:
+    """Check PyPI for a newer release and (optionally) install it."""
+    from unread.update import cmd_update
+
+    cmd_update(check=check, yes=yes)
+
+
 @app.command(
     name="killme",
     rich_help_panel=PANEL_MAINT,
@@ -3484,6 +3491,29 @@ def dump(
             "Chat content language — when set, image/link enricher prompts use this. Defaults to --language."
         ),
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help=(
+            "Non-Telegram only. Website: text|full (text-only or text+inlined images). "
+            "YouTube: transcript|audio|video. Required in non-TTY runs; "
+            "interactive prompt picks one when omitted on a TTY."
+        ),
+    ),
+    youtube_source: str = typer.Option(
+        "auto",
+        "--youtube-source",
+        help=(
+            "YouTube transcript-mode only. auto = captions then Whisper fallback "
+            "(requires OpenAI key); captions = skip if absent; audio = force Whisper. "
+            "Mirrors `unread <yt-url>` (analyze) behavior."
+        ),
+    ),
+    max_images: int = typer.Option(
+        50,
+        "--max-images",
+        help="Website --mode=full only: cap on inlined images downloaded per page.",
+    ),
 ) -> None:
     """Dump chat history to a file. Default window = messages since your Telegram read marker.
 
@@ -3531,6 +3561,9 @@ def dump(
             yes=yes,
             language=language,
             content_language=content_language,
+            mode=mode,
+            youtube_source=youtube_source,
+            max_images=max_images,
         )
     )
 

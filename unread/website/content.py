@@ -81,11 +81,37 @@ async def fetch_page(url: str, *, settings: Settings) -> WebsitePage:
     `settings.website.max_paragraphs` so a pathological page can't
     trigger thousands of synthetic messages.
     """
+    page, _html = await fetch_page_with_html(url, settings=settings)
+    return page
+
+
+async def fetch_page_with_html(url: str, *, settings: Settings) -> tuple[WebsitePage, str]:
+    """Same as :func:`fetch_page` but also returns the raw HTML.
+
+    The HTML is otherwise discarded inside ``fetch_page``.
+    ``unread dump <url>`` uses it to run a second-pass markdown
+    extraction (preserves heading / paragraph structure) and to walk
+    ``<img>`` tags for ``--mode=full``, all without paying for a second
+    HTTP round-trip.
+    """
     cfg = settings.website
     normalized = normalize_url(url)
-
     html, raw_size = await _http_get(url, cfg.fetch_timeout_sec, cfg.user_agent, cfg.max_html_bytes)
+    return _extract_page_from_html(
+        html, url=url, normalized=normalized, raw_size=raw_size, settings=settings
+    ), html
 
+
+def _extract_page_from_html(
+    html: str,
+    *,
+    url: str,
+    normalized: str,
+    raw_size: int,
+    settings: Settings,
+) -> WebsitePage:
+    """Run extractor + segmentation. Pure post-fetch logic — no I/O."""
+    cfg = settings.website
     metadata: WebsiteMetadata | None = None
     text: str = ""
     extractor_used = ""
@@ -137,6 +163,40 @@ async def fetch_page(url: str, *, settings: Settings) -> WebsitePage:
         content_hash=content_hash,
         extractor=extractor_used,
     )
+
+
+def extract_markdown_body(html: str, *, url: str) -> str:
+    """Trafilatura article extraction in markdown — preserves headings + paragraphs.
+
+    Used by ``unread dump <url>`` so the saved ``article.md`` keeps
+    ``# Title``, ``## Section``, paragraph breaks, and inline links.
+    Returns ``""`` on failure (caller can fall back to txt paragraphs).
+
+    Why this is separate from :func:`fetch_page`'s txt path: the LLM
+    side of the pipeline wants heading-mark-free, segmented chunks
+    (cheaper tokens, simpler analysis). Dump wants the inverse — a
+    human-readable markdown document. Running both extractions on the
+    same HTML costs nothing measurable next to the network fetch.
+    """
+    if not _HAS_TRAFILATURA:
+        return ""
+    try:
+        cfg = _traf_use_config()  # type: ignore[misc]
+        cfg.set("DEFAULT", "EXTRACTION_TIMEOUT", "30")
+        out = trafilatura.extract(  # type: ignore[union-attr]
+            html,
+            url=url,
+            output_format="markdown",
+            include_comments=False,
+            include_tables=True,
+            include_links=True,
+            favor_recall=True,
+            config=cfg,
+        )
+        return out or ""
+    except Exception as e:
+        log.warning("website.extract.markdown_failed", url=url, err=str(e)[:200])
+        return ""
 
 
 async def _http_get(

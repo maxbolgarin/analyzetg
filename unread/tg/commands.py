@@ -740,7 +740,8 @@ async def cmd_doctor() -> None:
         _line(
             warn,
             "ffmpeg not found",
-            "voice/videonote/video enrichment will skip; install ffmpeg or set [media] ffmpeg_path",
+            "voice/videonote/video enrichment will skip and `unread dump <yt-url> --mode=audio|video` "
+            "will refuse to run; install ffmpeg or set [media] ffmpeg_path",
         )
 
     # 3b. yt-dlp (YouTube analysis)
@@ -1139,6 +1140,22 @@ async def cmd_doctor() -> None:
                 f"got {conc}; >64 will likely flood-wait Telegram or 429 OpenAI",
             )
     except (AttributeError, TypeError, ValueError):
+        pass
+
+    # 11. Passive update check. Best-effort: any failure (offline, DNS,
+    # PyPI 5xx, slow network) is silently swallowed so doctor stays
+    # useful without a network. Tight 3 s timeout keeps doctor snappy.
+    try:
+        from unread import __version__ as _running_version
+        from unread.update import fetch_latest_version, is_newer
+
+        _latest = await fetch_latest_version(timeout=3.0)
+        if is_newer(_latest, _running_version):
+            _line(warn, _t("doctor_update_label"), _tf("doctor_update_newer", latest=_latest))
+        else:
+            _line(ok, _t("doctor_update_label"), _running_version)
+    except Exception:
+        # Offline / blocked / parse error — don't pollute doctor's output.
         pass
 
     # Summary + actionable next-steps. The legacy summary just stated
