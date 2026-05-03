@@ -205,3 +205,32 @@ def test_bare_unread_skips_prompt_with_key_but_no_pointer(monkeypatch, tmp_path)
     confirm.assert_not_called()
     assert "isn't set up yet" not in result.output
     assert "Status" in result.output
+
+
+def test_bare_unread_skips_prompt_after_user_skipped_keys_in_wizard(monkeypatch, tmp_path) -> None:
+    """Regression: pointer present + no AI key (user explicitly skipped during
+    `unread init`) must NOT re-prompt 'Run setup now?' on every bare invocation.
+
+    Reported scenario: user ran `unread init`, picked a folder (writes
+    `install.toml`), then skipped the AI-key and Telegram steps. Bare
+    `unread` should fall through to the status / quickstart panel —
+    the panel already lists missing pieces and points at `unread init`.
+    """
+    from unread.cli import app
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    # Seed install.toml — wizard's folder step writes this immediately.
+    pointer = tmp_path / "fakehome" / ".unread"
+    pointer.mkdir(parents=True, exist_ok=True)
+    (pointer / "install.toml").write_text('home = ""\n', encoding="utf-8")
+    # Drop the AI key — user skipped that step in the wizard.
+    _drop_openai(monkeypatch)
+
+    runner = CliRunner()
+    with patch("typer.confirm") as confirm:
+        result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.output
+    confirm.assert_not_called()
+    assert "Run setup now" not in result.output
+    assert "Status" in result.output
