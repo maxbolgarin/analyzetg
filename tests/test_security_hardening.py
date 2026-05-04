@@ -5,8 +5,10 @@ Covers:
   * `runtime_key_cache_path` is a public stable name (used by killme).
   * `DEFAULT_KEY_CACHE_TTL_SEC` is a sane positive number.
   * `SCRYPT_N` is at the modern (2026) recommended cost.
-  * `_keychain_service_name` namespaces by install home so two installs
-    on the same OS user don't clobber each other's keychain entries.
+  * `keychain_service` always namespaces by install home so two installs
+    on the same OS user don't clobber each other's keychain entries
+    AND no other Python process can `keyring.get_password("unread", ...)`
+    out of the user's keychain.
   * `_read_db_secrets_passphrase` zeroizes `_PROCESS_PASSPHRASE` after
     deriving the key.
 """
@@ -71,10 +73,11 @@ def test_scrypt_n_is_modern():
     assert PRODUCTION_SCRYPT_N >= 2**18
 
 
-def test_keychain_service_default_install_uses_bare_name(monkeypatch, tmp_path):
-    """Default install (`UNREAD_HOME` resolves under `~/.unread`) keeps
-    the bare `unread` service name so existing keychain entries from
-    older installs continue to resolve."""
+def test_keychain_service_default_install_is_namespaced(monkeypatch, tmp_path):
+    """Default install (`UNREAD_HOME` resolves under `~/.unread`) is
+    ALSO namespaced — every install gets `unread:<install_id>` so a
+    rogue Python process can't fetch credentials by guessing the bare
+    `"unread"` service name."""
     user_home = tmp_path / "home"
     (user_home / ".unread").mkdir(parents=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
@@ -83,29 +86,42 @@ def test_keychain_service_default_install_uses_bare_name(monkeypatch, tmp_path):
     from unread.config import reset_settings
 
     reset_settings()
-    from unread.secrets_backend import _keychain_service_name
+    from unread.secrets_backend import _reset_keychain_service_cache, keychain_service
 
-    assert _keychain_service_name() == "unread"
+    _reset_keychain_service_cache()
+    name = keychain_service()
+    assert name.startswith("unread:")
+    assert len(name.split(":")[1]) == 12  # 12-char sha256 prefix
 
 
-def test_keychain_service_custom_install_namespaces(monkeypatch, tmp_path):
-    """Custom-path install (e.g. dev shell with `UNREAD_HOME=$(pwd)`)
-    gets a `unread:<hash>` discriminator so dev + prod coexist."""
+def test_keychain_service_custom_install_differs_from_default(monkeypatch, tmp_path):
+    """Two installs at different paths get DIFFERENT service names so
+    dev + prod (or two cwd-bound installs) coexist on the same OS user
+    without clobbering each other's credentials."""
     user_home = tmp_path / "home"
     user_home.mkdir()
+    default_path = user_home / ".unread"
+    default_path.mkdir()
     custom = tmp_path / "dev_install"
     custom.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
     monkeypatch.setattr(os.path, "expanduser", lambda p: str(user_home) if p == "~" else p)
-    monkeypatch.setenv("UNREAD_HOME", str(custom))
     from unread.config import reset_settings
+    from unread.secrets_backend import _reset_keychain_service_cache, keychain_service
 
+    monkeypatch.setenv("UNREAD_HOME", str(default_path))
     reset_settings()
-    from unread.secrets_backend import _keychain_service_name
+    _reset_keychain_service_cache()
+    default_name = keychain_service()
 
-    name = _keychain_service_name()
-    assert name.startswith("unread:")
-    assert len(name.split(":")[1]) == 8  # 8-char sha256 prefix
+    monkeypatch.setenv("UNREAD_HOME", str(custom))
+    reset_settings()
+    _reset_keychain_service_cache()
+    custom_name = keychain_service()
+
+    assert default_name != custom_name
+    assert default_name.startswith("unread:")
+    assert custom_name.startswith("unread:")
 
 
 def test_passphrase_zeroized_after_decrypt(monkeypatch, tmp_path):
