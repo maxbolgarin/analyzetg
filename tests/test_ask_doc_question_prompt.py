@@ -12,9 +12,8 @@ def test_prompt_question_errors_on_non_tty() -> None:
     """Non-TTY + missing question → typer.Exit(2)."""
     from unread.ask.sources import file as file_mod
 
-    with patch.object(file_mod, "_is_tty", return_value=False):
-        with pytest.raises(typer.Exit) as excinfo:
-            file_mod._prompt_question("example.com")
+    with patch.object(file_mod, "_is_tty", return_value=False), pytest.raises(typer.Exit) as excinfo:
+        file_mod._prompt_question("example.com")
     assert excinfo.value.exit_code == 2
 
 
