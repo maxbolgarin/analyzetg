@@ -94,3 +94,44 @@ def test_ask_telegram_handle_still_uses_chat_archive_path(runner) -> None:
     mock_yt.assert_not_called()
     mock_web.assert_not_called()
     mock_file.assert_not_called()
+
+
+def test_ask_dash_ref_normalizes_to_stdin_sentinel(runner) -> None:
+    """`unread ask - "Q"` routes through the file adapter with the <stdin> sentinel."""
+    from unread.cli import _STDIN_REF_SENTINEL, app
+
+    with patch("unread.ask.sources.file.cmd_ask_file") as mock_file:
+
+        async def _noop(*a, **kw):
+            return None
+
+        mock_file.side_effect = _noop
+        result = runner.invoke(app, ["ask", "-", "What does it say?"])
+    assert result.exit_code == 0, result.output
+    mock_file.assert_called_once()
+    args, _kwargs = mock_file.call_args
+    assert args[0] == _STDIN_REF_SENTINEL
+
+
+def test_ask_doc_ref_with_chat_flag_is_rejected(runner, tmp_path) -> None:
+    """`unread ask <file> --chat @x` errors with a 'pick one scope' message."""
+    from unread.cli import app
+
+    f = tmp_path / "notes.md"
+    f.write_text("Hi.", encoding="utf-8")
+
+    result = runner.invoke(app, ["ask", str(f), "Q", "--chat", "@somegroup"])
+    assert result.exit_code != 0
+    out = (result.output + (result.stderr or "")).lower()
+    assert "--chat" in out
+    assert "pick one scope" in out or "doc ref" in out
+
+
+def test_ask_doc_ref_with_global_flag_is_rejected(runner) -> None:
+    """`unread ask <youtube> --global` errors instead of silently ignoring --global."""
+    from unread.cli import app
+
+    result = runner.invoke(app, ["ask", "https://youtu.be/X", "Q", "--global"])
+    assert result.exit_code != 0
+    out = (result.output + (result.stderr or "")).lower()
+    assert "--global" in out

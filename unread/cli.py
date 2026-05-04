@@ -2838,7 +2838,44 @@ def ask(
     # is_youtube_url, is_website_url) are the same ones cmd_dump uses, so
     # all three top-level ref-takers (analyze, dump, ask) recognize the
     # same set of ref shapes.
+
+    # Stdin normalization — match the analyze entry point's behavior:
+    # `unread ask -` and bare `unread ask "Q"` with piped stdin both route
+    # through the file dispatcher with the <stdin> sentinel ref. Skipped
+    # when the user already specified a scope (--chat/--folder/--global)
+    # or asked for the picker.
+    no_scope_set = chat is None and folder is None and not global_scope
+    if ref == "-" or (ref is None and no_scope_set and _stdin_has_data()):
+        ref = _STDIN_REF_SENTINEL
+
+    # Hard-reject doc-shaped refs combined with TG-only scope flags.
+    # `cmd_dump` does the same for its YouTube/website branches via
+    # `telegram_only_flags`; for ask we centralize the check on the
+    # entry guard.
     if ref and ref != TG_INTERACTIVE_REF:
+        from unread.website.urls import is_telegram_url as _is_tg_url_pre
+        from unread.website.urls import is_website_url as _is_web_pre
+        from unread.youtube.urls import is_youtube_url as _is_yt_pre
+
+        is_doc_ref = (
+            ref == _STDIN_REF_SENTINEL
+            or _looks_like_local_file(ref)
+            or _is_yt_pre(ref)
+            or (_is_web_pre(ref) and not _is_tg_url_pre(ref))
+        )
+        if is_doc_ref and (chat is not None or folder is not None or global_scope):
+            conflicting = []
+            if chat is not None:
+                conflicting.append("--chat")
+            if folder is not None:
+                conflicting.append("--folder")
+            if global_scope:
+                conflicting.append("--global")
+            raise typer.BadParameter(
+                f"Cannot combine a doc ref ({ref!r}) with {', '.join(conflicting)}. "
+                "A doc ref already names the source; pick one scope."
+            )
+
         if ref == _STDIN_REF_SENTINEL or _looks_like_local_file(ref):
             from unread.ask.sources.file import cmd_ask_file
 

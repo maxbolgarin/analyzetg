@@ -12,8 +12,6 @@ from unread.ask.sources.core import DocCitation, cmd_ask_document
 
 console = Console()
 
-_STDIN_REF_SENTINEL = "<stdin>"
-
 
 def _is_tty() -> bool:
     try:
@@ -53,6 +51,7 @@ async def cmd_ask_file(
     show_retrieved: bool = False,
 ) -> None:
     """Extract text from a local file (or stdin) and ask a question over it."""
+    from unread.cli import _STDIN_REF_SENTINEL
     from unread.files.commands import (
         _extract_for_kind,
         _file_id_for_path,
