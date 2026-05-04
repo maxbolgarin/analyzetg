@@ -1,203 +1,181 @@
 # unread
 
 [![CI](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/unread.svg)](https://pypi.org/project/unread/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A local Python CLI that pulls your Telegram chats (DMs, groups, forum
-topics, channels, channel comments) and analyzes them with GPT. Every
-message type flows through the analyzer: **text, voice, video notes,
-videos, photos, PDFs / docs, and external links** — each gets
-transformed into text before the LLM sees it. Voice/video notes are
-transcribed by default; images, docs, video audio, and link summaries
-are opt-in per run (they cost extra). By default `unread` starts from
-Telegram's **unread marker** — the spot where you stopped reading — and
-both **renders the Markdown report in the terminal** and saves a copy
-under `~/.unread/reports/...` with clickable links back to every cited
-message.
+> **Read less, know more.** A local CLI that pulls Telegram chats, YouTube
+> videos, web articles, and local files into one searchable archive — and
+> analyzes, queries, or dumps them through the AI provider you choose.
 
-`unread <ref>` also accepts **YouTube URLs** (captions or Whisper
-transcript → time-stamped citations) and **arbitrary web pages**
-(article-body extraction → paragraph-indexed citations). Same pipeline,
-same caches, same report layout — see [YouTube videos](#youtube-videos)
-and [Web pages](#web-pages) below.
+`unread` collapses the "I have too much to read" problem into three verbs:
 
-Everything is local. The only network calls are to Telegram (via
-[Telethon](https://docs.telethon.dev)), OpenAI, and — when link
-enrichment is enabled — the URLs shared in your chats.
+- `unread <ref>` — **analyze**: produce a structured Markdown report (digest, action items, decisions, …) with clickable citations back to every source message.
+- `unread ask <ref> "Q"` — **ask**: get a single-shot answer with citations from a chat archive, a video, an article, or a file.
+- `unread dump <ref>` — **dump**: save the source verbatim (the original file, the chat history, the transcript) to `~/.unread/reports/`.
+
+`<ref>` is **the same set of shapes** for all three commands: a Telegram
+handle / link, a YouTube URL, a web URL, a local file, or stdin.
 
 ```bash
-# First time — initializes ~/.unread/ and logs in to Telegram.
+unread @somegroup --last-days 7              # weekly digest of a Telegram group
+unread "https://youtu.be/jmzoJCn8evU"        # summarize a video
+unread "https://paulgraham.com/greatwork"    # summarize an article
+unread ./meeting.mp3                         # transcribe + analyze a recording
+unread ask "what did Bob decide?" @somegroup
+unread dump @somegroup -o history.md --last-days 30
+```
+
+## Why unread
+
+- **One CLI, every source.** Telegram chats / topics / channels, YouTube, websites, PDFs, DOCX, audio (Whisper), video (audio extracted then transcribed), images (vision), and stdin — same flags, same caches, same report shape.
+- **Bring your own model.** OpenAI, Anthropic (Claude), Google (Gemini), OpenRouter, or a local OpenAI-compatible server (Ollama, LM Studio, vLLM). Switch at any time with `unread settings`.
+- **Local-first.** Everything lives in `~/.unread/` (SQLite for chats, embeddings, analysis cache, secrets). The only network calls are to Telegram, your AI provider, and any URLs you point at.
+- **Cost-aware.** Per-call token + USD accounting, a `--max-cost` cap, two-layer caching (local content cache + provider prompt cache), and `unread stats` for spend reports. Re-running an unchanged chat is free; follow-ups are cheap.
+- **Citation-grounded.** Every claim in a report links back to the message / paragraph / timestamp that supports it. `--cite-context` adds an audit block under each citation so you can verify without leaving the terminal.
+
+## Quickstart (60 seconds)
+
+```bash
+# 1. Install (Python 3.11+; uv handles the venv and binary)
+curl -LsSf https://astral.sh/uv/install.sh | sh        # macOS / Linux
+uv tool install unread
+
+# 2. Set up — interactive wizard: install folder, AI provider key, optional Telegram login
 unread init
 
-# Most common: interactive wizard — pick a chat, pick a preset, done
-unread                            # pick chat → preset → period → enrich → run
-
-# Direct, when you know which chat — the bare ref is the analyze entry
-unread @somegroup                              # console-rendered + auto-saved
-unread @somegroup --no-save                    # render only, don't write a file
-unread @somegroup --last-days 7 --preset digest
-
-# `tg` / `telegram` aliases — same as above but auto-init on first use
-unread tg @somegroup
-unread telegram @somegroup
-
-# Other content sources — same command, different shape
-unread "https://www.youtube.com/watch?v=jmzoJCn8evU"   # YouTube video
-unread "https://www.paulgraham.com/greatwork.html"     # any web page (article)
-unread ./report.pdf                                    # local file
-unread ./meeting.mp3                                   # audio (Whisper)
-unread ./screenshot.png                                # image (vision)
-cat notes.txt | unread                                 # stdin (pipe)
-unread -                                               # stdin (explicit)
-
-# Q&A across your synced archive (no Telegram round-trip)
-unread ask                                              # opens the wizard
-unread ask "what did Bob say about migration?" @somegroup
-unread ask "open questions on the API" --folder Work
-unread ask "..." --global                               # all synced chats, no wizard
-
-# Cost-guarded run with citation audit blocks + Telegram Saved Messages delivery
-unread @somegroup --max-cost 0.10 --cite-context 3 --post-saved
-
-# Dump history to a file, no OpenAI
-unread dump @somegroup -o history.md --last-days 30
-
-# Help — `--help` and `help` both work; `help <cmd>` walks subcommands.
-unread help
-unread help describe
-unread help init
+# 3. Run something
+unread "https://paulgraham.com/greatwork.html"         # any web page
+unread @somegroup --last-days 7                        # last week of a chat
+unread ask "what did Bob decide?" @somegroup           # Q&A
+unread doctor                                          # verify the install
 ```
+
+That's it. No virtualenv to activate, no system packages to manage,
+no `pip` conflicts. `uv tool install` keeps `unread` and its deps in
+their own isolated environment.
+
+## Documentation
+
+| Topic | Section |
+|---|---|
+| All command flags + defaults | [`unread <ref>` flags](#unread-ref--flags), [`ask`](#unread-ask--qa-over-any-source), [`dump`](#unread-dump--history-and-extracted-text-to-a-file) |
+| Where files live | [Where does `unread` read config and write data?](#where-does-unread-read-config-and-write-data) |
+| Credential storage | [Security](#security) |
+| Telegram chat references | [Chat references](#chat-references) |
+| YouTube + web pages | [YouTube videos](#youtube-videos), [Web pages](#web-pages) |
+| Forum topics | [Forum chats (topics)](#forum-chats-topics) |
+| Voice / image / link enrichment | [Media enrichment](#media-enrichment) |
+| Output presets | [Presets](#presets) |
+| Languages | [Language](#language) |
+| Cost & caching | [Cost & caching](#cost--caching) |
+| Backups, cleanup, watch | [Maintenance](#maintenance) |
+| `config.toml` reference | [Configuration (`config.toml`)](#configuration-configtoml) |
+| Debugging | [Troubleshooting](#troubleshooting) |
+| Contributing | [Development](#development) |
 
 ---
 
 ## Installation
 
-Three steps. `unread` lives entirely under `~/.unread/` and works from
-any working directory.
-
-### 1. Install the prerequisites
-
-- **Python 3.11+**
-- **[`uv`](https://github.com/astral-sh/uv)** — install with
-  `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- **`ffmpeg`** on PATH — **only** if you want to enrich video / video
-  notes (voice messages, images, PDFs, and links work without it). PDF
-  and DOCX extraction, HTTP fetch, HTML parsing, and image-to-base64
-  are handled by `pypdf` / `python-docx` / `httpx` / `beautifulsoup4`,
-  all installed automatically.
-
-  Install `ffmpeg` per platform:
-
-  | OS | Command |
-  |---|---|
-  | macOS (Homebrew) | `brew install ffmpeg` |
-  | Linux (Debian/Ubuntu) | `sudo apt install ffmpeg` |
-  | Linux (Fedora/RHEL) | `sudo dnf install ffmpeg` |
-  | Linux (Arch) | `sudo pacman -S ffmpeg` |
-  | Windows (Scoop) | `scoop install ffmpeg` |
-  | Windows (Chocolatey) | `choco install ffmpeg` |
-
-  After install, `unread doctor` confirms the binary is found.
-
-> **Tested on:** macOS and Linux. Windows works for non-Telegram
-> features (file analysis, YouTube, websites) but signal handling and
-> a few file-path edge cases may differ — please file issues at
-> <https://github.com/maxbolgarin/unread/issues>.
-
-### 2. Install the CLI
-
-#### As a user (recommended)
-
-Install the `unread` command on your PATH directly from PyPI:
+### One line, all platforms
 
 ```bash
 uv tool install unread
 ```
 
-Or pull the bleeding edge straight from GitHub (no clone needed):
+`uv` provisions a private Python ≥ 3.11 environment for `unread`,
+isolated from your system Python and any other tools. Don't have `uv`?
 
 ```bash
-uv tool install git+https://github.com/maxbolgarin/unread.git
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Upgrade to the latest version with `uv tool upgrade unread`. This
-pinning is what most readers want — you get the CLI, you don't get a
-local working copy of the source. Confirm the version after install
-with `unread --version`.
+Verify with `unread --version`. Upgrade later with `uv tool upgrade unread`.
 
-#### As a contributor (editable install)
+### What works without extra dependencies
 
-If you plan to modify the code, clone and install in editable mode so
-edits to `unread/*.py` are picked up without a reinstall:
+The default install handles **text, PDF, DOCX, images, web pages, and
+YouTube captions** out of the box (extractors are bundled). The only
+optional system dependency is `ffmpeg` — and only if you want **audio
+or video transcription** (voice messages, video notes, podcasts,
+recordings):
+
+| OS | Install ffmpeg |
+|---|---|
+| macOS | `brew install ffmpeg` |
+| Debian / Ubuntu | `sudo apt install ffmpeg` |
+| Fedora / RHEL | `sudo dnf install ffmpeg` |
+| Arch | `sudo pacman -S ffmpeg` |
+| Windows (Scoop) | `scoop install ffmpeg` |
+| Windows (Chocolatey) | `choco install ffmpeg` |
+
+Without `ffmpeg`, audio/video paths skip with a clear warning instead
+of crashing — the rest of `unread` keeps working.
+
+### Other install methods
 
 ```bash
+# Bleeding-edge unreleased commits from GitHub:
+uv tool install git+https://github.com/maxbolgarin/unread.git
+
+# Editable / development install (source-linked, edits picked up live):
 git clone https://github.com/maxbolgarin/unread.git
 cd unread
-uv sync --extra dev          # dev deps for tests + ruff
-uv tool install --editable . # `unread` on PATH, source-linked
+uv sync --extra dev
+uv tool install --editable .
+
+# No global install — run from a cloned dir without putting anything on PATH:
+uv run unread @somegroup
 ```
 
-After a `git pull` that adds new Python dependencies, refresh with
-`uv tool install --editable . --reinstall`.
+After install, `unread doctor` verifies the binary, dependencies, and
+the install layout.
 
-> **Don't want anything global?** Skip both forms above and run via
-> `uv run unread @somegroup` from the cloned directory after
-> `uv sync --extra dev`.
+> **Tested on** macOS and Linux. Windows works for the non-Telegram
+> paths (files, YouTube, websites) — Telegram itself is supported via
+> Telethon but signal handling and a few file-path edge cases may
+> differ. Please file issues at
+> <https://github.com/maxbolgarin/unread/issues>.
 
-### 3. First-time setup
+
+## First-run setup
 
 ```bash
-unread init           # full wizard: install folder + AI provider + Telegram (optional)
+unread init
 ```
 
-Or just type `unread` — when nothing's set up yet, it prompts to run
-the wizard for you.
+Four-step interactive wizard:
 
-On a fresh install this is a four-step interactive wizard:
+1. **Install folder** — `~/.unread/` (default), current directory, or
+   a custom path. Recorded at `~/.unread/install.toml`.
+2. **AI provider** — pick one and paste its key:
+   - **openai** (default) — also backs Whisper, embeddings, and vision
+     used for media enrichment (`--enrich=voice`/`videonote`/`video`/`image`)
+     and `ask --semantic`.
+   - **anthropic** (Claude), **google** (Gemini), **openrouter** (many
+     models, one key), or **local** (Ollama / LM Studio / vLLM).
 
-1. **Pick where data lives.** Choose between `~/.unread/` (default), the
-   current directory, or a custom path. The choice is recorded at
-   `~/.unread/install.toml` and survives across runs.
-2. **AI provider + key.** Pick which provider drives `analyze` / `ask`:
-   - **openai** — vanilla OpenAI Chat Completions. Default. Also backs
-     Whisper transcription, embeddings, and vision (used by
-     `--enrich=voice`/`videonote`/`video`/`image` and `ask --semantic`).
-   - **openrouter** — single key, many models, via
-     <https://openrouter.ai>.
-   - **anthropic** — Claude (Sonnet / Haiku) directly.
-   - **google** — Gemini (2.5 Flash / Flash Lite).
-   - **local** — self-hosted OpenAI-compatible server (Ollama, LM Studio,
-     vLLM). No API key required.
-
-   Then paste the corresponding key — or press Enter to skip.
-   Skipping leaves the install usable for `dump`, `describe`, `sync`,
-   `describe folders`, `chats *`, `backup`/`restore`, etc.; only `analyze` /
-   `ask` need a key.
+   Press Enter to skip — `dump`, `describe`, and `sync` work without
+   any key; only `analyze` and `ask` need one.
 
    > **Capability gaps.** Whisper / embeddings / vision are OpenAI-only.
-   > If you pick Anthropic / Google / OpenRouter / Local as your chat
-   > provider but also want media transcription or `--semantic`
-   > retrieval, run `unread init` again and add an OpenAI key
-   > alongside — the chat provider stays unchanged. Without one, those
-   > features skip with a one-line warning.
-3. **Telegram login** (optional). Answer `y` to set up `api_id` /
-   `api_hash` from <https://my.telegram.org> → *API development tools*,
-   then complete Telethon's phone+code prompt. Answer `n` to skip —
-   you can still use `unread "<youtube-url>"` or
-   `unread "<website-url>"` with just the OpenAI key.
-4. **Done.** Credentials are persisted in
-   `<install>/storage/data.sqlite::secrets` so you can blow away `.env`
-   and the CLI keeps working.
+   > Pick Anthropic / Google / OpenRouter / local as your chat provider
+   > and you can still add an OpenAI key alongside for those features.
+   > Without one, they skip with a clear warning.
+3. **Telegram** (optional) — `api_id` / `api_hash` from
+   <https://my.telegram.org> → *API development tools*, then phone +
+   code login. Skip if you only want YouTube / web / file analysis.
+4. **Done.** Credentials persist in
+   `~/.unread/storage/data.sqlite::secrets`. Re-run `unread init` later
+   to fill in any step you skipped; only unsatisfied steps re-prompt.
 
-Re-run `unread init` to fill in any step you skipped — only the
-unsatisfied steps prompt. `unread init --force` (or `unread init
---force`) re-runs Telethon auth (useful when switching accounts)
-without re-prompting for folder or keys; to re-pick the install folder,
-delete `~/.unread/install.toml` first.
-
-**Non-interactive setup** (CI, scripts): pre-populate `~/.unread/.env`:
+**Non-interactive setup** (CI, scripts) — pre-populate `~/.unread/.env`:
 
 ```
 TELEGRAM_API_ID=1234567
@@ -205,15 +183,17 @@ TELEGRAM_API_HASH=abcdef0123456789abcdef0123456789
 OPENAI_API_KEY=sk-...
 ```
 
-Then `unread init` skips the wizard prompts and goes straight to
-Telethon auth. The `.env` values continue to win over anything
-persisted in the secrets DB, so rotating a key only needs an `.env`
-edit.
+Then `unread init` skips wizard prompts and runs Telethon auth only.
+`.env` values always win over anything in the secrets DB, so key
+rotation is a one-line edit.
 
-> Already running with a cwd-relative install from a previous version?
-> Run `unread migrate` from your old install directory to copy
-> `./.env`, `./config.toml`, `./storage/`, and `./reports/` into
-> `~/.unread/`. Pass `--move` to remove the originals after.
+`unread doctor` verifies the install at any time. `unread login --force`
+re-runs Telethon auth without touching keys.
+
+> **Migrating from a cwd-relative install** (older versions wrote into
+> the working directory)? Run `unread migrate` from the old install dir
+> to copy `./.env`, `./config.toml`, `./storage/`, and `./reports/`
+> into `~/.unread/`. Pass `--move` to delete originals after.
 
 ---
 
