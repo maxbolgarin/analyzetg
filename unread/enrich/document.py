@@ -217,7 +217,18 @@ async def enrich_document(
     src = tmp_dir / f"doc_{msg.chat_id}_{msg.msg_id}.{ext}"
     downloaded: Path | None = None
     try:
-        downloaded = await download_message(client, tel_msg, src)
+        from unread.media.download import MediaTooLarge
+
+        try:
+            downloaded = await download_message(client, tel_msg, src)
+        except MediaTooLarge as e:
+            log.warning(
+                "enrich.doc.too_large",
+                chat_id=msg.chat_id,
+                msg_id=msg.msg_id,
+                err=str(e),
+            )
+            return None
         try:
             if ext == "pdf":
                 text = _extract_pdf(downloaded, max_chars=settings.enrich.max_doc_chars)

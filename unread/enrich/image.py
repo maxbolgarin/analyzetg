@@ -147,7 +147,18 @@ async def enrich_image(
     src = tmp_dir / f"img_{msg.chat_id}_{msg.msg_id}"
     downloaded: Path | None = None
     try:
-        downloaded = await download_message(client, tel_msg, src)
+        from unread.media.download import MediaTooLarge
+
+        try:
+            downloaded = await download_message(client, tel_msg, src)
+        except MediaTooLarge as e:
+            log.warning(
+                "enrich.image.too_large",
+                chat_id=msg.chat_id,
+                msg_id=msg.msg_id,
+                err=str(e),
+            )
+            return None
         mime = _mime_from_path(downloaded)
         raw = downloaded.read_bytes()
         b64 = base64.b64encode(raw).decode("ascii")

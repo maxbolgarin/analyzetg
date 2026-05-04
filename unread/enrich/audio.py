@@ -135,7 +135,18 @@ async def enrich_audio(
     src = tmp_dir / f"{msg.chat_id}_{msg.msg_id}"
     produced: list[Path] = []
     try:
-        downloaded = await download_message(client, tel_msg, src)
+        from unread.media.download import MediaTooLarge
+
+        try:
+            downloaded = await download_message(client, tel_msg, src)
+        except MediaTooLarge as e:
+            log.warning(
+                "enrich.audio.too_large",
+                chat_id=msg.chat_id,
+                msg_id=msg.msg_id,
+                err=str(e),
+            )
+            return None
         produced.append(downloaded)
         try:
             parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir)
