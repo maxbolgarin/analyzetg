@@ -85,7 +85,52 @@ async def _ffmpeg_present(path: str) -> bool:
         return False
 
 
-async def download_message(client: TelegramClient, msg_obj, out_path: Path) -> Path:
+def media_size_bytes(msg_obj) -> int:
+    """Best-effort byte-size estimate for a Telethon message's media.
+
+    Returns 0 when the size isn't readable off the object — caller
+    treats 0 as "unknown, don't enforce the cap" so we never refuse a
+    legitimate small file just because Telethon's payload shape
+    changed between SDK versions.
+    """
+    media = getattr(msg_obj, "media", None)
+    if media is None:
+        return 0
+    # Documents (videos, audio, generic files) carry an explicit `size`.
+    doc = getattr(msg_obj, "document", None) or getattr(media, "document", None)
+    if doc is not None:
+        size = getattr(doc, "size", None)
+        if isinstance(size, int) and size > 0:
+            return size
+    # Photos: pick the largest size variant Telegram offers.
+    photo = getattr(msg_obj, "photo", None) or getattr(media, "photo", None)
+    if photo is not None:
+        biggest = 0
+        for sz in getattr(photo, "sizes", None) or []:
+            for attr in ("size", "sizes"):
+                val = getattr(sz, attr, None)
+                if isinstance(val, int):
+                    biggest = max(biggest, val)
+                elif isinstance(val, list) and val:
+                    ints = [int(x) for x in val if isinstance(x, int)]
+                    if ints:
+                        biggest = max(biggest, *ints)
+        if biggest > 0:
+            return biggest
+    return 0
+
+
+class MediaTooLarge(RuntimeError):
+    """Raised when a download is refused for exceeding the configured cap."""
+
+
+async def download_message(
+    client: TelegramClient,
+    msg_obj,
+    out_path: Path,
+    *,
+    max_bytes: int | None = None,
+) -> Path:
     """Download a Telethon message's media to `out_path`.
 
     Writes to a sibling `.part` file first and atomic-renames on success.
@@ -93,7 +138,29 @@ async def download_message(client: TelegramClient, msg_obj, out_path: Path) -> P
     which the caller cleans up — *not* a truncated `out_path` that
     `_existing_for_msg` would later mistake for a finished download and
     skip on the next run.
+
+    Pre-prod blocker: enforces a size cap before invoking
+    ``client.download_media`` so a 4 GB video can't silently fill the
+    user's disk. ``max_bytes`` defaults to
+    ``settings.media.max_download_mb * 1024 * 1024`` (0 disables);
+    callers can override per-call. Raises :class:`MediaTooLarge` when
+    the source exceeds the cap so the orchestrator can record the skip
+    rather than treating it as a generic download failure.
     """
+    if max_bytes is None:
+        try:
+            cap_mb = int(getattr(get_settings().media, "max_download_mb", 0) or 0)
+        except Exception:  # pragma: no cover - settings unreadable
+            cap_mb = 0
+        max_bytes = cap_mb * 1024 * 1024
+    if max_bytes and max_bytes > 0:
+        size_bytes = media_size_bytes(msg_obj)
+        if size_bytes > max_bytes:
+            raise MediaTooLarge(
+                f"media_too_large: {size_bytes} bytes exceeds cap {max_bytes} bytes "
+                f"(msg_id={getattr(msg_obj, 'id', '?')})"
+            )
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(out_path.suffix + ".part")
     # Clear any leftover .part from a previous interrupted run so we

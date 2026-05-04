@@ -123,39 +123,16 @@ def _safe_filename_component(name: str) -> str:
 
 
 def _media_size_bytes(tel_msg) -> int:
-    """Best-effort byte-size estimate for a Telethon message's media.
+    """Backwards-compatible alias for the public helper.
 
-    Returns 0 when the size isn't readable off the object — caller
-    treats 0 as "unknown, don't enforce the cap" so we never refuse a
-    legitimate small file just because Telethon's payload shape
-    changed shape between SDK versions.
+    Pre-prod hardening promoted ``media_size_bytes`` to
+    ``unread.media.download`` so the size cap could be enforced
+    centrally inside ``download_message``. This shim stays for any
+    external callers that imported the underscore name.
     """
-    media = getattr(tel_msg, "media", None)
-    if media is None:
-        return 0
-    # Documents (videos, audio, generic files) carry an explicit `size`.
-    doc = getattr(tel_msg, "document", None) or getattr(media, "document", None)
-    if doc is not None:
-        size = getattr(doc, "size", None)
-        if isinstance(size, int) and size > 0:
-            return size
-    # Photos: pick the largest size variant Telegram offers.
-    photo = getattr(tel_msg, "photo", None) or getattr(media, "photo", None)
-    if photo is not None:
-        biggest = 0
-        for sz in getattr(photo, "sizes", None) or []:
-            for attr in ("size", "sizes"):
-                val = getattr(sz, attr, None)
-                if isinstance(val, int):
-                    biggest = max(biggest, val)
-                elif isinstance(val, list) and val:
-                    # `sizes: list[int]` for progressive JPEG variants.
-                    ints = [int(x) for x in val if isinstance(x, int)]
-                    if ints:
-                        biggest = max(biggest, *ints)
-        if biggest > 0:
-            return biggest
-    return 0
+    from unread.media.download import media_size_bytes
+
+    return media_size_bytes(tel_msg)
 
 
 def media_filename(msg: Message, tel_msg) -> str:

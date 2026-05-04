@@ -46,7 +46,13 @@ def test_formatter_renders_link_summaries():
         link_summaries=[("https://example.com/a", "A news article about X.")],
     )
     out = format_messages([m])
-    assert "↳ https://example.com/a: A news article about X." in out
+    # The url prefix is trusted control structure (we extracted it
+    # ourselves), but the summary body is fetched third-party text and
+    # gets wrapped in untrusted-content sentinels — see Task 3.2.
+    assert "↳ https://example.com/a:" in out
+    assert "A news article about X." in out
+    assert "<<<UNTRUSTED_CONTENT id=10>>>" in out
+    assert "<<<END_UNTRUSTED>>>" in out
 
 
 def test_formatter_photo_without_description_shows_photo_tag():

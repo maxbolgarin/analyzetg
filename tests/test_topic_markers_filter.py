@@ -123,7 +123,7 @@ def test_filter_against_real_iter_messages_respects_thread_markers(repo):
             ]
         )
         # Floor = min(markers) = 75. iter_messages returns 100,150,200,300,400.
-        raw = await repo.iter_messages(-1, thread_id=None, min_msg_id=75)
+        raw = [m async for m in repo.iter_messages(-1, thread_id=None, min_msg_id=75)]
         assert {m.msg_id for m in raw} == {100, 150, 200, 300, 400}
 
         # Topic 1 read to 100, topic 2 read to 250. Expected survivors:

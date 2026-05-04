@@ -206,11 +206,7 @@ async def build_bug_report() -> str:
     parts.append("## recent logs (redacted)")
     parts.append("")
     parts.append("```")
-    log_path = getattr(settings, "logging_file_path", None)
-    if isinstance(log_path, str) and log_path:
-        log_path = Path(log_path)
-    elif not isinstance(log_path, Path):
-        log_path = None
+    log_path = settings.logging.file_path
     parts.append(collect_log_tail(log_path))
     parts.append("```")
     parts.append("")

@@ -969,12 +969,23 @@ async def _collect_answers(
                 # the cost estimate (analyze mode) has a number to work
                 # with. Cheap: 2 get_messages(limit=1) calls.
                 if period == "custom" and chat is not None and (custom_since or custom_until):
+                    # Pre-prod fix: build tz-aware UTC datetimes here too,
+                    # mirroring `_period_to_db_filters` at :252-254. The
+                    # naive datetimes that lived here previously got
+                    # interpreted as local time by Telethon's offset_date
+                    # parameter, skewing the confirm-screen count by the
+                    # host's TZ offset (a user in NZST seeing yesterday's
+                    # messages counted under today's date).
                     period_counts["custom"] = await _count_custom_range(
                         client,
                         chat_id=int(chat["chat_id"]),
                         thread_id=thread_id,
-                        since=datetime.strptime(custom_since, "%Y-%m-%d") if custom_since else None,
-                        until=datetime.strptime(custom_until, "%Y-%m-%d") if custom_until else None,
+                        since=datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
+                        if custom_since
+                        else None,
+                        until=datetime.strptime(custom_until, "%Y-%m-%d").replace(tzinfo=UTC)
+                        if custom_until
+                        else None,
                     )
                 # Ask mode skips output/mark_read but keeps enrich (so
                 # voice/image/link content becomes searchable mid-flow).

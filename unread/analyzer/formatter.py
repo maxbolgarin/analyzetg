@@ -88,9 +88,24 @@ def _body(m: Message) -> str:
 
 
 def _link_summary_block(m: Message) -> str:
+    """Render fetched-link summaries beneath the message body.
+
+    Each summary's text is wrapped in `<<<UNTRUSTED_CONTENT id=…>>> /
+    <<<END_UNTRUSTED>>>` sentinels so the model can syntactically tell
+    third-party fetched content apart from our control structure (the
+    `↳ url:` prefix, headers, etc.). The url itself is treated as
+    trusted metadata — we extracted/normalized it ourselves — but the
+    summary body comes from a remote page and may contain
+    prompt-injection attempts.
+    """
     if not m.link_summaries:
         return ""
-    lines = [f"  ↳ {url}: {summary.strip()}" for url, summary in m.link_summaries]
+    lines: list[str] = []
+    for url, summary in m.link_summaries:
+        lines.append(f"  ↳ {url}:")
+        lines.append(f"  <<<UNTRUSTED_CONTENT id={m.msg_id}>>>")
+        lines.append("  " + summary.strip())
+        lines.append("  <<<END_UNTRUSTED>>>")
     return "\n" + "\n".join(lines)
 
 
@@ -195,18 +210,74 @@ def _high_impact_marker(m: Message) -> str:
     return "[high-impact] "
 
 
-def _emit_msg_line(m: Message, idx: dict[int, Message], date_fmt: str) -> str | None:
-    """Render a single message line, or None if it has no analyzable body."""
-    body = _body(m)
+def render_msg_with_body(
+    m: Message,
+    idx: dict[int, Message],
+    date_fmt: str,
+    *,
+    body_override: str | None = None,
+    header_suffix: str = "",
+    include_link_summaries: bool = True,
+) -> str | None:
+    """Render a single message using the provided (or composed) body.
+
+    Output spans multiple lines: a trusted header line (timestamp,
+    msg_id, sender, tags, reply marker, dup suffix), then the body
+    wrapped in `<<<UNTRUSTED_CONTENT id=…>>> / <<<END_UNTRUSTED>>>`
+    sentinels, then optional link-summary blocks (each likewise
+    sentinel-wrapped). The model is told (via `_base.md`) to treat
+    anything between those markers as data, never as instructions —
+    a structural defense against prompt injection in third-party
+    message bodies, transcripts, image descriptions, doc excerpts,
+    and fetched link summaries.
+
+    Public surface for the chunker's "split or truncate oversized
+    single messages" path (Task 3.3). When `_body(m)` would push a
+    chunk past its budget, the chunker calls this helper repeatedly
+    with sentence-aligned slices of the original body and a
+    `(continued N/M)` `header_suffix` on parts 2+. Sub-renderings
+    preserve the original `m.msg_id`, sender, timestamp, and tags —
+    only the body content varies — so citations stay valid across all
+    sub-chunks.
+
+    `include_link_summaries`: link-summary blocks live AFTER the body
+    block; for split renderings only the FIRST part should carry them
+    so we don't duplicate the (possibly large) summaries on every
+    sub-chunk.
+    """
+    body = body_override if body_override is not None else _body(m)
     if not body:
         return None
     ts = m.date.strftime(date_fmt)
     who = _short_sender(m)
     reply = _reply_marker(m, idx)
-    return (
+    suffix = f" {header_suffix}" if header_suffix else ""
+    header = (
         f"[{ts} #{m.msg_id}] {who}{_forward_tag(m)}{_media_tag(m)}{_reactions_tag(m)}:"
-        f" {_high_impact_marker(m)}{reply}{body}{_dup_suffix(m)}{_link_summary_block(m)}"
+        f" {_high_impact_marker(m)}{reply}{_dup_suffix(m)}{suffix}".rstrip()
     )
+    parts = [
+        header,
+        f"<<<UNTRUSTED_CONTENT id={m.msg_id}>>>",
+        body,
+        "<<<END_UNTRUSTED>>>",
+    ]
+    rendered = "\n".join(parts)
+    if include_link_summaries:
+        link_block = _link_summary_block(m)
+        if link_block:
+            rendered += link_block
+    return rendered
+
+
+def _emit_msg_line(m: Message, idx: dict[int, Message], date_fmt: str) -> str | None:
+    """Render a single message, or None if it has no analyzable body.
+
+    `m.header_suffix` (set only by the chunker for sub-messages emitted
+    by `_split_oversize`) is forwarded so the model sees a
+    `(continued N/M)` marker in the header line of each split slice.
+    """
+    return render_msg_with_body(m, idx, date_fmt, header_suffix=m.header_suffix)
 
 
 def format_messages(

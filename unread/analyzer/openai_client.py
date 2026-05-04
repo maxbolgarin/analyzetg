@@ -5,7 +5,10 @@ module owns the policy that's identical across providers:
 
   - Single-call → log usage / cost / context fields.
   - On `truncated=True` (output cut at `max_tokens`), retry once with
-    a doubled budget, capped at `_MAX_RETRY_TOKENS`.
+    a doubled budget, capped at the per-model `max_output_tokens` from
+    :mod:`unread.ai.models` (or 16k fallback for unknown models).
+  - On :class:`ProviderSafetyBlockedError` (Gemini's safety refusal),
+    surface a yellow user-visible status and re-raise — never retry.
   - Re-export :class:`ChatResult` from the canonical `unread.ai`
     module so existing callers that destructure it keep working.
 
@@ -45,10 +48,31 @@ def build_messages(system: str, static_context: str, dynamic: str) -> list[dict[
     ]
 
 
-# Absolute ceiling for the retry-on-truncation budget. Most current models
-# cap a single completion at ~16k tokens; raise carefully if you move to
-# a reasoning model with higher caps.
-_MAX_RETRY_TOKENS = 16_000
+# Fallback ceiling for the retry-on-truncation budget when we don't have a
+# `max_output_tokens` entry on the model in `unread.ai.models`. 16k matches
+# the cap on most current chat models. Per-model overrides take priority —
+# bumping above a model's own cap (Gemini Flash → 8192) just guarantees a
+# 4xx after the user already paid for the prompt.
+_MAX_RETRY_TOKENS_FALLBACK = 16_000
+
+# Back-compat alias for `tests/test_openai_client.py` and any external
+# callers that imported the old constant. Equivalent to the fallback ceiling.
+_MAX_RETRY_TOKENS = _MAX_RETRY_TOKENS_FALLBACK
+
+
+def _retry_cap_for(model: str) -> int:
+    """Return the per-model truncation-retry ceiling.
+
+    Looks up the registered :class:`ModelInfo.max_output_tokens` cap;
+    falls back to `_MAX_RETRY_TOKENS_FALLBACK` (16k) when the model
+    isn't in the catalog or carries a sentinel `0`.
+    """
+    from unread.ai.models import find_model
+
+    info = find_model(model)
+    if info is not None and info.max_output_tokens > 0:
+        return info.max_output_tokens
+    return _MAX_RETRY_TOKENS_FALLBACK
 
 
 async def _one_call(
@@ -187,23 +211,36 @@ async def chat_complete(
     messages: list[dict[str, str]],
     max_tokens: int,
     context: dict[str, Any] | None = None,
+    disable_truncation_retry: bool = False,
 ) -> ChatResult:
     """Chat completion with automatic retry when the response is truncated.
 
     If the provider reports `truncated=True` on the first call, retry
-    once with `max_tokens` doubled (capped at `_MAX_RETRY_TOKENS`). The
-    retry replaces the result — you don't get both. Cost is logged for
-    both calls. Provider-agnostic: works the same for OpenAI, OpenRouter,
-    Anthropic, Google, and Local since each adapter's `truncated` flag
-    is normalized to the same semantics.
+    once with `max_tokens` doubled, capped at the per-model
+    `max_output_tokens` cap from :mod:`unread.ai.models` (or the 16k
+    fallback for unknown models). The retry replaces the result — you
+    don't get both. Cost is logged for both calls. Provider-agnostic:
+    works the same for OpenAI, OpenRouter, Anthropic, Google, and Local
+    since each adapter's `truncated` flag is normalized to the same
+    semantics.
+
+    `disable_truncation_retry`: when True, never retry — surface the
+    truncated response straight to the caller. Useful when the user
+    explicitly opts out of the (potentially expensive) re-bill via
+    `--no-truncation-retry`.
 
     Authentication / authorization failures from any provider's SDK are
     converted to :class:`ProviderUnavailableError` with a one-line
     "your key was rejected" message. Without this, users see raw SDK
     exceptions like ``openai.AuthenticationError`` which don't tell them
     what to do next.
+
+    :class:`ProviderSafetyBlockedError` (raised today by the Google
+    adapter on ``finish_reason=SAFETY``) is surfaced as a yellow
+    user-visible status line and re-raised. Safety blocks aren't
+    transient — we never retry on them.
     """
-    from unread.ai.providers import ProviderUnavailableError
+    from unread.ai.providers import ProviderSafetyBlockedError, ProviderUnavailableError
 
     settings = get_settings()
     try:
@@ -216,29 +253,42 @@ async def chat_complete(
             temperature=settings.openai.temperature,
             context=context,
         )
+    except ProviderSafetyBlockedError as e:
+        from unread.util.flood import _user_visible_retry_status
+
+        _user_visible_retry_status(
+            f"{provider.name} safety-blocked output (reason={e.reason or 'unknown'}); "
+            "skipping retry — safety refusals are not transient."
+        )
+        raise
     except Exception as e:
         if _is_auth_error(provider.name, e):
             raise ProviderUnavailableError(_friendly_auth_message(provider.name)) from e
         raise
-    if result.truncated and max_tokens < _MAX_RETRY_TOKENS:
-        bumped = min(max_tokens * 2, _MAX_RETRY_TOKENS)
+    if disable_truncation_retry:
+        return result
+    cap = _retry_cap_for(model)
+    if result.truncated and max_tokens < cap:
+        bumped = min(max_tokens * 2, cap)
         log.warning(
             "ai.chat.truncated_retry",
             provider=provider.name,
             model=model,
             old_max=max_tokens,
             new_max=bumped,
+            cap=cap,
             completion=result.completion_tokens,
         )
         # Surface the retry to the user — re-issuing the call re-bills
         # the entire prompt (which can be 100k+ tokens for big map
         # passes). The structured log was previously the only signal,
-        # invisible in non-verbose runs.
+        # invisible in non-verbose runs. Mention the per-model cap so
+        # the user understands why the bump is conservative.
         from unread.util.flood import _user_visible_retry_status
 
         _user_visible_retry_status(
             f"Output truncated at {max_tokens} tokens — retrying with {bumped} "
-            "(this re-bills the full prompt)"
+            f"(model cap: {cap}; this re-bills the full prompt)"
         )
         result = await _one_call(
             provider,
@@ -257,8 +307,7 @@ async def chat_complete(
                 max_tokens=bumped,
                 completion=result.completion_tokens,
                 hint=(
-                    "bump output_budget_tokens in the preset file "
-                    f"(current budget hit max retry cap {_MAX_RETRY_TOKENS})"
+                    f"bump output_budget_tokens in the preset file (current budget hit per-model cap {cap})"
                 ),
             )
     return result

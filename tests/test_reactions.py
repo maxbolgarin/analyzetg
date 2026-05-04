@@ -124,7 +124,7 @@ async def test_repo_round_trip_preserves_reactions(repo: Repo) -> None:
         reactions={"👍": 5, "🔥": 2},
     )
     await repo.upsert_messages([m])
-    loaded = await repo.iter_messages(chat_id=42)
+    loaded = [msg async for msg in repo.iter_messages(chat_id=42)]
     assert len(loaded) == 1
     assert loaded[0].reactions == {"👍": 5, "🔥": 2}
 
@@ -138,7 +138,7 @@ async def test_repo_round_trip_none_stays_none(repo: Repo) -> None:
         text="hi",
     )
     await repo.upsert_messages([m])
-    loaded = await repo.iter_messages(chat_id=42)
+    loaded = [msg async for msg in repo.iter_messages(chat_id=42)]
     assert loaded[0].reactions is None
 
 
@@ -152,5 +152,5 @@ async def test_repo_upsert_overwrites_reactions(repo: Repo) -> None:
     }
     await repo.upsert_messages([Message(**base_kw, reactions={"👍": 1})])
     await repo.upsert_messages([Message(**base_kw, reactions={"👍": 5, "❤️": 1})])
-    loaded = await repo.iter_messages(chat_id=42)
+    loaded = [msg async for msg in repo.iter_messages(chat_id=42)]
     assert loaded[0].reactions == {"👍": 5, "❤️": 1}

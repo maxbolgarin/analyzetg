@@ -29,6 +29,7 @@ from unread.ai.models import (
 from unread.ai.providers import (
     ChatProvider,
     ChatResult,
+    ProviderSafetyBlockedError,
     ProviderUnavailableError,
     make_chat_provider,
     resolve_chat_model,
@@ -39,6 +40,7 @@ __all__ = [
     "ChatProvider",
     "ChatResult",
     "ModelInfo",
+    "ProviderSafetyBlockedError",
     "ProviderUnavailableError",
     "all_known_models",
     "find_model",

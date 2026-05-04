@@ -332,12 +332,15 @@ async def _pull_linked_comments(
         log.warning("comments.backfill_failed", linked_id=linked_id, err=str(e)[:200])
         # Fall through — we can still surface whatever's in the local DB.
 
-    comments_msgs = await repo.iter_messages(
-        linked_id,
-        thread_id=None,
-        since=com_since,
-        until=com_until,
-    )
+    comments_msgs = [
+        m
+        async for m in repo.iter_messages(
+            linked_id,
+            thread_id=None,
+            since=com_since,
+            until=com_until,
+        )
+    ]
     if not comments_msgs:
         console.print(f"[grey70]{_t('no_comments_in_window')}[/]")
 
@@ -414,13 +417,16 @@ async def prepare_chat_run(
         force_from_start=bool(topic_markers),
     )
 
-    msgs = await repo.iter_messages(
-        chat_id,
-        thread_id=thread_id,
-        since=since_dt,
-        until=until_dt,
-        min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
-    )
+    msgs = [
+        m
+        async for m in repo.iter_messages(
+            chat_id,
+            thread_id=thread_id,
+            since=since_dt,
+            until=until_dt,
+            min_msg_id=start_msg_id if start_msg_id and start_msg_id > 0 else None,
+        )
+    ]
 
     # Per-topic unread filter (flat-forum only). Mirrors
     # analyzer/pipeline.py:run_analysis exactly.

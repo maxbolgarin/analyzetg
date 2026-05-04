@@ -29,14 +29,21 @@ def _is_reasoning_model(model: str) -> bool:
     """True when `model` is an OpenAI reasoning-class model that rejects
     custom `temperature`.
 
-    Covers the o-series (`o1`, `o3`, `o4-mini`, etc.) and the gpt-5
-    family. Provider-prefixed OpenRouter ids (`openai/gpt-5.4`) are
-    matched by suffix so the same predicate works for both adapters.
-    Match is permissive — accidentally dropping temperature for a
-    non-reasoning model is harmless (defaults to 1.0 server-side),
-    while incorrectly *forwarding* temperature to a reasoning model
-    400s the request.
+    Looks up :class:`unread.ai.models.ModelInfo.reasoning` first — that's
+    the curated source of truth (covers gpt-5.x including mini/nano,
+    o-series, and OpenRouter aliases like `openai/gpt-5.4-mini`). When
+    the model isn't in the catalog, falls back to a name-shape heuristic:
+    `o1`/`o3`/`o4`/`gpt-5` prefixes (matched against the bare suffix so
+    `vendor/model` routing still works). The heuristic is permissive —
+    accidentally dropping temperature for a non-reasoning model is
+    harmless (defaults to 1.0 server-side), while incorrectly
+    *forwarding* temperature to a reasoning model 400s the request.
     """
+    from unread.ai.models import find_model
+
+    info = find_model(model)
+    if info is not None and info.reasoning:
+        return True
     name = model.rsplit("/", 1)[-1].lower()
     return name.startswith("o1") or name.startswith("o3") or name.startswith("o4") or name.startswith("gpt-5")
 

@@ -23,7 +23,6 @@ avoid hitting SQLite on every secret lookup during a single CLI run.
 from __future__ import annotations
 
 import hashlib
-import os
 import sqlite3
 from pathlib import Path
 
@@ -34,38 +33,76 @@ log = get_logger(__name__)
 
 # Identifiers used when calling into `keyring`. Two installs on the
 # same OS user otherwise share a flat `unread` namespace and silently
-# clobber each other's keychain entries. We append a short hash of the
-# install home so dev + prod (or two cwd-bound installs) coexist
-# cleanly. Default-install hosts (the overwhelming majority) keep the
-# bare "unread" name so existing entries continue to resolve.
+# clobber each other's keychain entries — and any other Python process
+# could `keyring.get_password("unread", ...)` to fish them out. The
+# service name is now ALWAYS namespaced as `unread:<install_id>` where
+# `install_id` is the first 12 hex chars of `sha256(install_home)`.
+# Existing legacy entries under the bare `"unread"` service are
+# migrated forward on first read (see `keychain_read`).
 _KEYCHAIN_BASE = "unread"
+_LEGACY_KEYCHAIN_SERVICE = _KEYCHAIN_BASE
+_INSTALL_ID_LEN = 12
+
+# Cached resolution of the per-install service name. Keyed on the
+# resolved install-home path so a mid-process `UNREAD_HOME` flip
+# (tests, dev shell switching) is honored without any explicit cache
+# reset. The path resolve + sha256 take ~100 µs anyway — caching is a
+# politeness, not a hot-path optimization.
+_KEYCHAIN_SERVICE_CACHE: dict[str, str] = {}
 
 
-def _keychain_service_name() -> str:
-    """Return `unread` for default installs, `unread:<hash>` for custom paths.
+def _compute_install_id(home_str: str) -> str:
+    return hashlib.sha256(home_str.encode("utf-8")).hexdigest()[:_INSTALL_ID_LEN]
 
-    The discriminator is the first 8 hex chars of `sha256(install_home)`.
-    Stable across runs, fits in any keyring backend's service-name
-    field, and short enough to read in Keychain Access.
+
+def keychain_service() -> str:
+    """Return the namespaced keychain service name for this install.
+
+    Format: ``unread:<install_id>`` where ``install_id`` is the first
+    12 hex chars of ``sha256(install_home)``. The path → service-name
+    mapping is cached per-process; flipping ``UNREAD_HOME`` to a
+    different install transparently picks up a different name.
+
+    Replaces the historical bare `"unread"` constant. Reads of slots
+    not present under the namespaced service fall through to the legacy
+    `"unread"` name once and copy the value forward — see
+    :func:`keychain_read`.
     """
     try:
         from unread.core.paths import unread_home
 
-        home = unread_home().resolve()
+        home = str(unread_home().resolve())
     except Exception:
-        return _KEYCHAIN_BASE
-    default_home = (Path(os.path.expanduser("~")) / ".unread").resolve()
-    if home == default_home:
-        return _KEYCHAIN_BASE
-    suffix = hashlib.sha256(str(home).encode("utf-8")).hexdigest()[:8]
-    return f"{_KEYCHAIN_BASE}:{suffix}"
+        # Defensive: keep a stable shape so the migration shim always
+        # has a target to compare the legacy service name against.
+        home = "default"
+    cached = _KEYCHAIN_SERVICE_CACHE.get(home)
+    if cached is not None:
+        return cached
+    name = f"{_KEYCHAIN_BASE}:{_compute_install_id(home)}"
+    _KEYCHAIN_SERVICE_CACHE[home] = name
+    return name
 
 
-# Module-level constant kept for back-compat with callers that import
-# `KEYCHAIN_SERVICE` directly. New code should call
-# `_keychain_service_name()` so a per-install path is honored even
-# when the env changes mid-process (tests, dev shell switching).
-KEYCHAIN_SERVICE = _keychain_service_name()
+def _reset_keychain_service_cache() -> None:
+    """Clear the per-install cache. For tests and dev shell switching."""
+    _KEYCHAIN_SERVICE_CACHE.clear()
+
+
+def __getattr__(name: str) -> str:
+    """Lazy compatibility shim for `from unread.secrets_backend import KEYCHAIN_SERVICE`.
+
+    The constant was the public name in the prior release. Existing
+    callers (security commands, killme, and tests) keep importing it;
+    we resolve to the live `keychain_service()` value here so they
+    pick up the per-install namespacing automatically. New code should
+    call `keychain_service()` directly so the cache reset works for
+    them too.
+    """
+    if name == "KEYCHAIN_SERVICE":
+        return keychain_service()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Backend identifiers persisted in `app_settings::secrets.backend`.
 # Phase 3 will add ``BACKEND_PASSPHRASE``; the constant is reserved
@@ -117,22 +154,76 @@ def keychain_describe() -> str:
     return type(active).__module__ + "." + type(active).__name__
 
 
+def _migrate_legacy_slot(key: str) -> str | None:
+    """One-time forward-port from the bare `"unread"` service to namespaced.
+
+    Older installs wrote every credential under the flat `"unread"`
+    keychain service. The new release namespaces by install path.
+    On the first read after upgrade, look up the legacy entry, copy it
+    into the namespaced slot, and delete the legacy row. Subsequent
+    reads short-circuit to the namespaced slot. Failures here are
+    swallowed — the worst case is the user re-enters the credential.
+    """
+    service = keychain_service()
+    if service == _LEGACY_KEYCHAIN_SERVICE:
+        # Defensive: if the namespaced name happens to collide with the
+        # legacy one, there's nothing to migrate.
+        return None
+    try:
+        import keyring
+        from keyring.errors import PasswordDeleteError
+
+        legacy_value = keyring.get_password(_LEGACY_KEYCHAIN_SERVICE, key)
+        if legacy_value is None:
+            return None
+        try:
+            keyring.set_password(service, key, legacy_value)
+        except Exception as e:
+            log.debug("secrets_backend.keychain_legacy_copy_failed", key=key, err_type=type(e).__name__)
+            return legacy_value
+        try:
+            keyring.delete_password(_LEGACY_KEYCHAIN_SERVICE, key)
+        except PasswordDeleteError:
+            pass
+        except Exception as e:
+            log.debug("secrets_backend.keychain_legacy_delete_failed", key=key, err_type=type(e).__name__)
+        log.debug(
+            "secrets_backend.keychain_legacy_migrated",
+            key=key,
+            legacy_service=_LEGACY_KEYCHAIN_SERVICE,
+            new_service=service,
+        )
+        return legacy_value
+    except Exception as e:
+        log.debug("secrets_backend.keychain_legacy_lookup_failed", key=key, err_type=type(e).__name__)
+        return None
+
+
 def keychain_read(key: str) -> str | None:
     """Return the value stored under ``key`` in the OS keychain, or None.
 
     Only allowlisted keys are accepted — silently returning None for
     anything else stops a typo in a Python repl from spelunking
     arbitrary credentials out of the user's keychain.
+
+    On a miss against the namespaced service, falls back ONCE to the
+    legacy bare `"unread"` service (and forward-ports the value if
+    found) so installs that pre-date the per-install namespacing
+    upgrade transparently. See :func:`_migrate_legacy_slot`.
     """
     if key not in _SECRET_KEYS:
         return None
     try:
         import keyring
 
-        return keyring.get_password(KEYCHAIN_SERVICE, key)
+        value = keyring.get_password(keychain_service(), key)
     except Exception as e:
         log.warning("secrets_backend.keychain_read_failed", key=key, err_type=type(e).__name__)
         return None
+    if value is not None:
+        return value
+    # Migration shim — runs at most once per slot per install.
+    return _migrate_legacy_slot(key)
 
 
 def keychain_write(key: str, value: str) -> bool:
@@ -147,7 +238,7 @@ def keychain_write(key: str, value: str) -> bool:
     try:
         import keyring
 
-        keyring.set_password(KEYCHAIN_SERVICE, key, value)
+        keyring.set_password(keychain_service(), key, value)
         return True
     except Exception as e:
         log.warning("secrets_backend.keychain_write_failed", key=key, err_type=type(e).__name__)
@@ -163,7 +254,7 @@ def keychain_delete(key: str) -> bool:
         from keyring.errors import PasswordDeleteError
 
         try:
-            keyring.delete_password(KEYCHAIN_SERVICE, key)
+            keyring.delete_password(keychain_service(), key)
         except PasswordDeleteError:
             return False
         return True

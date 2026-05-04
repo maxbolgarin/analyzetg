@@ -29,11 +29,11 @@ async def test_iter_messages_min_msg_id_filters_strictly(repo: Repo) -> None:
     await repo.upsert_messages(msgs)
 
     # min_msg_id is exclusive: msg_id > 20 keeps 21 and 30 only.
-    res = await repo.iter_messages(1, min_msg_id=20)
+    res = [m async for m in repo.iter_messages(1, min_msg_id=20)]
     assert [m.msg_id for m in res] == [21, 30]
 
     # None means no lower bound.
-    all_rows = await repo.iter_messages(1, min_msg_id=None)
+    all_rows = [m async for m in repo.iter_messages(1, min_msg_id=None)]
     assert [m.msg_id for m in all_rows] == [10, 20, 21, 30]
 
 
@@ -67,6 +67,6 @@ async def test_iter_messages_min_msg_id_combines_with_time_window(repo: Repo) ->
     await repo.upsert_messages(msgs)
 
     since = now - timedelta(days=1)
-    res = await repo.iter_messages(1, since=since, min_msg_id=10)
+    res = [m async for m in repo.iter_messages(1, since=since, min_msg_id=10)]
     # msg_id=20 filtered out by since; msg_id=30 kept (after marker AND recent).
     assert [m.msg_id for m in res] == [30]

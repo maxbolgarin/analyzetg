@@ -1,23 +1,37 @@
-"""Token counting via tiktoken, with graceful fallback for unknown models
-and for environments where tiktoken can't reach its tokenizer blob.
+"""Token counting via tiktoken, with provider-aware safety margins for
+non-OpenAI models and a graceful fallback for environments where the
+tiktoken tokenizer blob can't be fetched.
 
-The `tiktoken.encoding_for_model` / `get_encoding` calls download the
-encoding files on first use. On a CI runner whose egress to
-`openaipublic.blob.core.windows.net` is blocked (some corporate
-firewalls + Azure regional outages have hit us in the wild), every
-chunker / cost-estimate / dump call would otherwise crash. Fall back
-to a character-based heuristic so the application stays functional —
-chunk sizes will be approximate, but the user gets a working CLI plus
-a one-time warning to install the cache or unblock the URL.
+**Provider awareness (pre-prod blocker #8).** tiktoken uses OpenAI's
+BPE encodings. Claude and Gemini tokenize the same text into ~10-25%
+more tokens (different vocab + merges), so a tiktoken count of a
+Claude prompt under-estimates the real cost and risks pushing chunks
+past the model's context window. The fix is to multiply the tiktoken
+count by a per-provider safety margin (`anthropic` and `google` get
+×1.25; `openai` / `openrouter` / `local` stay ×1.0). The margin is
+cheap, deterministic, and avoids the network round-trip that
+`anthropic.messages.count_tokens` / `google.genai.models.count_tokens`
+would impose on every line of every chunk in `analyzer/chunker.py`.
+
+**tiktoken fallback.** `tiktoken.encoding_for_model` /
+`get_encoding` download the encoding files on first use. On a CI
+runner whose egress to `openaipublic.blob.core.windows.net` is
+blocked (some corporate firewalls + Azure regional outages have hit
+us in the wild), every chunker / cost-estimate / dump call would
+otherwise crash. Fall back to a character-based heuristic so the
+application stays functional — chunk sizes will be approximate, but
+the user gets a working CLI plus a one-time warning.
 """
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from typing import Any
 
 import tiktoken
 
+from unread.ai.models import PROVIDER_TOKEN_SAFETY_MARGIN, provider_for_model
 from unread.util.logging import get_logger
 
 log = get_logger(__name__)
@@ -76,16 +90,30 @@ def _encoding_for(model: str) -> Any:
         return _CharFallbackEncoding()
 
 
+def _safety_margin(model: str) -> float:
+    provider = provider_for_model(model)
+    if provider is None:
+        # Unknown provider id (custom local model name etc.) — assume
+        # the user knows what they're doing and don't apply a margin.
+        return 1.0
+    return PROVIDER_TOKEN_SAFETY_MARGIN.get(provider, 1.0)
+
+
 def count_tokens(text: str, model: str = "gpt-5.4") -> int:
     if not text:
         return 0
     try:
-        return len(_encoding_for(model).encode(text))
+        raw = len(_encoding_for(model).encode(text))
     except Exception as e:
         # Defense-in-depth: if even the fallback path raises (shouldn't
         # happen), return a heuristic instead of bubbling.
         _maybe_warn_fallback(f"encode failed: {type(e).__name__}")
-        return max(1, int(len(text) / _FALLBACK_CHARS_PER_TOKEN))
+        raw = max(1, int(len(text) / _FALLBACK_CHARS_PER_TOKEN))
+    margin = _safety_margin(model)
+    if margin == 1.0:
+        return raw
+    # Round up so the safety margin is always a strict over-estimate.
+    return math.ceil(raw * margin)
 
 
 def count_message_tokens(messages: list[dict], model: str = "gpt-5.4") -> int:

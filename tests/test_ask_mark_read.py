@@ -33,6 +33,15 @@ def _msg(chat_id: int, msg_id: int) -> Message:
     )
 
 
+async def _empty_iter(*_args, **_kwargs):
+    """`iter_messages` is now an async generator; AsyncMock returns a
+    coroutine which `async for` rejects. This sync function returning an
+    async generator (via the empty `yield`) gives the caller exactly the
+    shape they expect."""
+    if False:
+        yield None  # pragma: no cover - makes this an async generator
+
+
 @pytest.mark.asyncio
 async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
     """`unread ask "Q" --chat=@x --mark-read` calls send_read_acknowledge
@@ -50,6 +59,7 @@ async def test_mark_read_calls_send_read_acknowledge_on_chat_scope():
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
 
     fake_repo = AsyncMock()
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value=None)
     # The local DB max — what the marker should advance to.
     fake_repo.get_max_msg_id = AsyncMock(return_value=99999)
@@ -102,6 +112,7 @@ async def test_no_mark_read_does_not_call_send_read_acknowledge():
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
 
     fake_repo = AsyncMock()
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value=None)
 
     async def fake_run_single(**kwargs):
@@ -143,6 +154,7 @@ async def test_mark_read_default_none_does_not_call():
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
 
     fake_repo = AsyncMock()
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value=None)
 
     async def fake_run_single(**kwargs):
@@ -184,6 +196,7 @@ async def test_mark_read_is_noop_with_global_scope():
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
 
     fake_repo = AsyncMock()
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value=None)
 
     async def fake_run_single(**kwargs):
@@ -224,6 +237,7 @@ async def test_mark_read_falls_back_to_max_msg_id_when_pool_empty():
     fake_client.send_read_acknowledge = AsyncMock(return_value=None)
 
     fake_repo = AsyncMock()
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value=None)
     fake_repo.get_max_msg_id = AsyncMock(return_value=999)
 
@@ -272,6 +286,7 @@ async def test_mark_read_failure_does_not_abort():
     fake_client.send_read_acknowledge = AsyncMock(side_effect=RuntimeError("boom"))
 
     fake_repo = AsyncMock()
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value=None)
 
     async def fake_run_single(**kwargs):

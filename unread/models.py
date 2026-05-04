@@ -86,6 +86,14 @@ class Message:
     image_description: str | None = None
     extracted_text: str | None = None
     link_summaries: list[tuple[str, str]] | None = None
+    # Free-text suffix appended after the colon in the rendered header
+    # line. Used by the chunker's "split oversized message" path to
+    # mark sub-messages as `(continued N/M)` so the model can tell
+    # they're slices of one original. Empty for natural messages — kept
+    # off the wire and out of persistence (it's purely a render-time
+    # signal). See `analyzer.formatter.render_msg_with_body` and
+    # `analyzer.chunker._split_oversize`.
+    header_suffix: str = ""
 
 
 @dataclass(slots=True)

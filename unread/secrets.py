@@ -97,6 +97,15 @@ def _ensure_passphrase() -> str:
     if _PROCESS_PASSPHRASE:
         return _PROCESS_PASSPHRASE
     env_value = (os.environ.get("UNREAD_PASSPHRASE") or "").strip()
+    if not env_value:
+        # Pre-prod blocker: `_load_dotenv` no longer pollutes
+        # `os.environ`, so a passphrase set in `~/.unread/.env` would
+        # otherwise be invisible here. Consult the cached overlay
+        # explicitly so scripted / cron usage with a `.env`-supplied
+        # passphrase keeps working.
+        from unread.config import dotenv_value
+
+        env_value = (dotenv_value("UNREAD_PASSPHRASE") or "").strip()
     if env_value:
         _PROCESS_PASSPHRASE = env_value
         return env_value
@@ -136,12 +145,14 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     """
     from unread.db.repo import read_data_db_secrets_sync
     from unread.security.crypto import (
+        ENCRYPTED_PREFIX_V2,
         PassphraseError,
         decrypt,
         decrypt_with_key,
         is_encrypted,
         load_cached_key,
         lookup_key_for_salt,
+        migrate_v1_to_v2_with_key,
         parse_envelope,
         remember_key_for_salt,
     )
@@ -153,6 +164,10 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     install_salt = _read_install_salt(db_path)
     out: dict[str, str] = {}
     passphrase: str | None = None
+    # Pairs of (slot_name, new_v2_blob) collected when we successfully
+    # decrypt a v1 row. Re-encryption uses the same key/salt so we can
+    # batch the rewrite at the end of the read.
+    pending_v2_rewrites: dict[str, str] = {}
 
     # Bring the cross-invocation cache into the in-process map up front
     # so every per-row lookup below sees it. Without this the disk
@@ -173,32 +188,55 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
             out[key] = value
             continue
         env = parse_envelope(value)
+        is_v1 = not value.startswith(ENCRYPTED_PREFIX_V2)
         # `slot_name=key` is the AAD binding for v2 envelopes. Passing
         # it for v1 reads is harmless (decrypt ignores it when the
         # prefix is `$u1$`) and means we don't need a per-row branch.
         cached_key = lookup_key_for_salt(env.salt)
+        used_key: bytes | None = None
         if cached_key is not None:
             try:
                 out[key] = decrypt_with_key(value, cached_key, slot_name=key)
-                continue
+                used_key = cached_key
             except PassphraseError:
                 # Unlikely (cached key already validated against this
                 # salt), but recoverable: drop and re-derive.
                 pass
-        # Need the passphrase. Prompt at most once per process; we
-        # then derive a key per distinct salt we encounter.
-        if passphrase is None:
-            passphrase = _ensure_passphrase()
-        # Common case: row salt matches the install salt. Derive once
-        # and reuse for every subsequent row sharing that salt.
-        if install_salt is not None and env.salt == install_salt:
-            from unread.security.crypto import derive_key
+        if used_key is None:
+            # Need the passphrase. Prompt at most once per process; we
+            # then derive a key per distinct salt we encounter.
+            if passphrase is None:
+                passphrase = _ensure_passphrase()
+            # Common case: row salt matches the install salt. Derive
+            # once and reuse for every subsequent row sharing that salt.
+            if install_salt is not None and env.salt == install_salt:
+                from unread.security.crypto import derive_key
 
-            install_key = derive_key(passphrase, install_salt)
-            remember_key_for_salt(install_salt, install_key)
-            out[key] = decrypt_with_key(value, install_key, slot_name=key)
-        else:
-            out[key] = decrypt(value, passphrase, slot_name=key)
+                install_key = derive_key(passphrase, install_salt)
+                remember_key_for_salt(install_salt, install_key)
+                out[key] = decrypt_with_key(value, install_key, slot_name=key)
+                used_key = install_key
+            else:
+                out[key] = decrypt(value, passphrase, slot_name=key)
+                # Cache for the rewrite below — per-row salts are rare
+                # but we still want one Scrypt per distinct salt.
+                from unread.security.crypto import derive_key
+
+                used_key = derive_key(passphrase, env.salt)
+                remember_key_for_salt(env.salt, used_key)
+        # Pre-prod blocker #2: any successfully-decrypted v1 row gets
+        # rewritten as v2 (slot-bound AAD) at the end of the read. This
+        # is idempotent — once every row is v2, this branch never runs
+        # again for the install. Failure to derive the new blob is
+        # logged but doesn't fail the read; the in-memory plaintext
+        # the caller asked for is unchanged.
+        if is_v1 and used_key is not None:
+            try:
+                pending_v2_rewrites[key] = migrate_v1_to_v2_with_key(value, used_key, slot_name=key)
+            except (PassphraseError, ValueError) as e:  # pragma: no cover - defensive
+                from unread.util.logging import get_logger
+
+                get_logger(__name__).warning("crypto.aead_v1_migrate_skip", slot=key, err=type(e).__name__)
 
     # Zeroize the per-process passphrase once the keys are cached. A
     # later read that doesn't need the passphrase (cached_key hits) is
@@ -207,7 +245,74 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     global _PROCESS_PASSPHRASE
     if passphrase is not None:
         _PROCESS_PASSPHRASE = None
+
+    if pending_v2_rewrites:
+        _persist_v2_rewrites_sync(db_path, pending_v2_rewrites)
+
     return out
+
+
+def _persist_v2_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
+    """Write a batch of v1→v2 envelope upgrades back to ``data.sqlite::secrets``.
+
+    Pre-prod blocker #2 (auto-migration): runs at the end of a
+    successful passphrase decrypt pass, never blocking the caller. A
+    write error here is logged and swallowed — the in-memory plaintext
+    the caller asked for is unaffected, and the next read attempt will
+    pick up where this one left off.
+
+    Uses sync sqlite3 because the read path that calls us is sync (it
+    runs at `config.load_settings` time, which itself runs at
+    `unread.cli` module-import). Single transaction so we never leave
+    a half-migrated install behind.
+    """
+    from datetime import UTC, datetime
+
+    from unread.db._keys import SECRET_KEYS as _ALLOWLIST
+
+    # Allowlist guard mirrors the schema-side enforcement in
+    # `Repo.put_secrets`. Defensive: a stray key here would be a real
+    # bug upstream, but a row write that violates the allowlist must
+    # never land on disk.
+    for slot in rewrites:
+        if slot not in _ALLOWLIST:
+            from unread.util.logging import get_logger
+
+            get_logger(__name__).warning("crypto.aead_v1_migrate_unknown_slot", slot=slot)
+            return
+
+    now_iso = datetime.now(UTC).isoformat()
+    rows = [(value, now_iso, slot) for slot, value in rewrites.items()]
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+    except sqlite3.Error as e:
+        from unread.util.logging import get_logger
+
+        get_logger(__name__).warning("crypto.aead_v1_migrate_db_open", err=type(e).__name__)
+        return
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "UPDATE secrets SET value=?, updated_at=? WHERE key=?",
+                rows,
+            )
+            conn.commit()
+        except sqlite3.Error as e:
+            with __import__("contextlib").suppress(sqlite3.Error):
+                conn.rollback()
+            from unread.util.logging import get_logger
+
+            get_logger(__name__).warning(
+                "crypto.aead_v1_migrate_db_write", err=type(e).__name__, count=len(rows)
+            )
+            return
+    finally:
+        conn.close()
+
+    from unread.util.logging import get_logger
+
+    get_logger(__name__).info("crypto.aead_v1_migrated", count=len(rows))
 
 
 def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]

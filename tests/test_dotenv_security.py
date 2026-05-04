@@ -35,23 +35,25 @@ def _write_env(tmp_path: Path, content: str, mode: int = 0o600) -> Path:
 
 
 def test_load_dotenv_loads_well_formed_file(tmp_path):
+    # Pre-prod: loader returns a dict and never mutates os.environ.
     p = _write_env(tmp_path, "TEST_DOTENV_KEY=value\n")
-    _load_dotenv(p)
-    assert os.environ.get("TEST_DOTENV_KEY") == "value"
+    out = _load_dotenv(p)
+    assert out.get("TEST_DOTENV_KEY") == "value"
+    assert "TEST_DOTENV_KEY" not in os.environ
 
 
 def test_load_dotenv_strips_crlf(tmp_path):
     # CRLF-saved files leave a trailing \r in API keys → 401, then any
     # downstream traceback prints the value. Loader must strip it.
     p = _write_env(tmp_path, 'TEST_DOTENV_KEY="abc"\r\n')
-    _load_dotenv(p)
-    assert os.environ.get("TEST_DOTENV_KEY") == "abc"
+    out = _load_dotenv(p)
+    assert out.get("TEST_DOTENV_KEY") == "abc"
 
 
 def test_load_dotenv_strips_unquoted_crlf(tmp_path):
     p = _write_env(tmp_path, "TEST_DOTENV_KEY=abc\r\n")
-    _load_dotenv(p)
-    assert os.environ.get("TEST_DOTENV_KEY") == "abc"
+    out = _load_dotenv(p)
+    assert out.get("TEST_DOTENV_KEY") == "abc"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission semantics")

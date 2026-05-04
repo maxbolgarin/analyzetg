@@ -259,9 +259,9 @@ def _build_plan() -> _Plan:
     from unread.core.paths import install_pointer_path, unread_home
     from unread.secrets_backend import (
         BACKEND_DB,
-        KEYCHAIN_SERVICE,
         keychain_available,
         keychain_read,
+        keychain_service,
         read_active_backend_sync,
     )
 
@@ -343,7 +343,7 @@ def _build_plan() -> _Plan:
             "session in Telegram (Settings → Devices) if you care about that."
         )
     notes.append(
-        f"Keychain service name [cyan]{KEYCHAIN_SERVICE}[/] will be cleared of "
+        f"Keychain service name [cyan]{keychain_service()}[/] will be cleared of "
         "every unread credential listed above."
     )
 

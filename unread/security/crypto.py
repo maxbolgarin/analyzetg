@@ -285,6 +285,33 @@ def decrypt(ciphertext: str, passphrase: str, *, slot_name: str | None = None) -
     return plaintext.decode("utf-8")
 
 
+def migrate_v1_to_v2_with_key(ciphertext: str, key: bytes, *, slot_name: str) -> str:
+    """Re-encrypt a v1 (`$u1$`) blob as v2 with slot-bound AAD.
+
+    Pre-prod blocker #2 (auto-migration): the v2 envelope binds the
+    slot name as AEAD `associated_data` so a copy-paste of the
+    ciphertext into a different slot fails `InvalidTag`. New writes
+    have used v2 since the v2 envelope shipped, but installs upgraded
+    before that change still carry v1 rows. This helper performs the
+    one-shot rewrite.
+
+    Salt is preserved across the migration so the cached-key-by-salt
+    machinery (`_PROCESS_KEYS`) keeps amortizing Scrypt across slots
+    that shared a salt. Only the nonce + ciphertext + AAD change.
+
+    Refuses to operate on already-v2 blobs and on plaintext.
+    """
+    if not slot_name:
+        raise ValueError("migrate_v1_to_v2_with_key requires a non-empty slot_name")
+    if not is_encrypted(ciphertext):
+        raise ValueError("migrate_v1_to_v2_with_key: input is not encrypted")
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V2):
+        raise ValueError("migrate_v1_to_v2_with_key: input is already v2")
+    plaintext = decrypt_with_key(ciphertext, key)
+    env = parse_envelope(ciphertext)
+    return encrypt_with_key(plaintext, key, salt=env.salt, slot_name=slot_name)
+
+
 def decrypt_with_key(ciphertext: str, key: bytes, *, slot_name: str | None = None) -> str:
     """Decrypt with a precomputed (salt-bound) key.
 
@@ -475,6 +502,7 @@ __all__ = [
     "is_encrypted",
     "load_cached_key",
     "lookup_key_for_salt",
+    "migrate_v1_to_v2_with_key",
     "parse_envelope",
     "remember_key_for_salt",
     "runtime_key_cache_path",

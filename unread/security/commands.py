@@ -17,7 +17,6 @@ from unread.secrets_backend import (
     BACKEND_DB,
     BACKEND_KEYCHAIN,
     BACKEND_PASSPHRASE,
-    KEYCHAIN_SERVICE,
     is_valid_backend,
     keychain_available,
     keychain_delete,
@@ -1214,7 +1213,6 @@ def register(app: typer.Typer, panel: str) -> typer.Typer:
 
 
 __all__ = [
-    "KEYCHAIN_SERVICE",
     "cmd_downgrade",
     "cmd_lock",
     "cmd_migrate",

@@ -130,10 +130,12 @@ def test_load_dotenv_strips_utf8_bom(tmp_path: Path, monkeypatch) -> None:
     # explicitly to 0o600 to match what `unread init` writes in prod.
     env_path.chmod(0o600)
     monkeypatch.delenv("UNREAD_REGRESSION_KEY", raising=False)
-    _load_dotenv(env_path)
+    out = _load_dotenv(env_path)
+    # Pre-prod: loader returns a dict and never mutates os.environ.
     import os
 
-    assert os.environ.get("UNREAD_REGRESSION_KEY") == "ok"
+    assert out.get("UNREAD_REGRESSION_KEY") == "ok"
+    assert "UNREAD_REGRESSION_KEY" not in os.environ
 
 
 def test_read_toml_wraps_parse_error(tmp_path: Path) -> None:

@@ -442,9 +442,21 @@ def _seed_home_templates() -> None:
                 f"manually and `chmod 600 {env_target}`.[/]"
             )
     if not cfg_target.exists() and cfg_template.exists():
-        from shutil import copyfile
+        # Pre-prod review: also seed config.toml.example via
+        # secret_write_text. The example file isn't itself sensitive,
+        # but the user's eventual edits will hold settings (model
+        # picks, base URLs) and the file lives in ~/.unread next to
+        # the credentials. 0o600 from creation closes the brief
+        # world-readable window between copyfile + chmod.
+        from unread.util.fsmode import secret_write_text
 
-        copyfile(cfg_template, cfg_target)
+        try:
+            secret_write_text(cfg_target, cfg_template.read_text(encoding="utf-8"))
+        except OSError as e:
+            console.print(
+                f"[yellow]Couldn't seed {cfg_target}: {e} — copy {cfg_template} "
+                f"manually and `chmod 600 {cfg_target}`.[/]"
+            )
 
 
 def _dispatch_analyze(**kwargs) -> None:
@@ -2086,6 +2098,12 @@ def _root(
         "--youtube-source",
         help="YouTube transcript source: auto (captions, fallback to Whisper), captions, or audio (always Whisper).",
     ),
+    no_truncation_retry: bool = typer.Option(
+        False,
+        "--no-truncation-retry",
+        "-T",
+        help="Don't retry on truncated output. Default: bump max_tokens (capped per model) and re-bill the full prompt.",
+    ),
 ) -> None:
     """Default action: analyze a chat / YouTube video / web page.
 
@@ -2208,6 +2226,7 @@ def _root(
         language=language,
         content_language=content_language,
         youtube_source=youtube_source,
+        disable_truncation_retry=no_truncation_retry,
     )
 
 
@@ -2544,7 +2563,10 @@ async def _cache_export(
     settings = get_settings()
     days = _parse_duration_days(older_than) if older_than else None
     async with open_repo(settings.storage.data_path) as repo:
-        rows = await repo.cache_iter_full(preset=preset, model=model, older_than_days=days)
+        # cache_iter_full streams to keep large result blobs out of one
+        # giant list; export wants the full list for its empty-check +
+        # double iteration, so materialize here.
+        rows = [r async for r in repo.cache_iter_full(preset=preset, model=model, older_than_days=days)]
 
     if not rows:
         console.print(f"[yellow]{_t('cli_export_no_matches')}[/]")
@@ -3248,9 +3270,11 @@ def watch(
 
 async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> None:
     import asyncio as _asyncio
+    import os as _os
     import shlex
-    import subprocess
     import sys as _sys
+
+    from unread.config import dotenv_values as _dotenv_values
 
     seconds = _parse_duration_seconds(interval)
     if seconds <= 0:
@@ -3261,11 +3285,18 @@ async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> 
     cmd = ["unread", *inner]
     pretty = " ".join(shlex.quote(c) for c in cmd)
     console.print(f"[bold cyan]{_tf('cli_watch_watching', interval=interval, cmd=pretty)}[/]")
-    # Single Ctrl-C handler covers both phases (subprocess.run / sleep).
-    # subprocess.run inherits stdin so child sees the SIGINT first; if
-    # the child handles it cleanly, control returns here and we just
-    # continue. If the user mashes Ctrl-C again during sleep, it
-    # propagates as KeyboardInterrupt and we exit.
+    # Compose the child env: shell env wins, with the cached .env overlay
+    # filling in missing keys. After `fix(config): isolate .env values
+    # from os.environ`, the .env values no longer live on os.environ —
+    # but the watched re-exec of `unread` still needs them, so we re-
+    # union them here explicitly.
+    dotenv_overlay = _dotenv_values()
+    child_env = {**_os.environ, **{k: v for k, v in dotenv_overlay.items() if k not in _os.environ}}
+    # Single Ctrl-C handler covers both phases (child wait / sleep).
+    # asyncio.create_subprocess_exec inherits stdin so the child sees
+    # SIGINT first; if it handles it cleanly, proc.wait() returns and
+    # we just continue. If the user mashes Ctrl-C again during sleep,
+    # it propagates as KeyboardInterrupt and we exit.
     try:
         while True:
             runs += 1
@@ -3274,12 +3305,14 @@ async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> 
                 f"[grey70]{datetime.now().isoformat(timespec='seconds')}[/]"
             )
             try:
-                # subprocess.run blocks the event loop; that's fine — we're
-                # not racing anything here, and the inner command may itself
-                # spin up its own asyncio loop.
-                proc = subprocess.run(cmd, check=False)
-                if proc.returncode != 0:
-                    console.print(f"[yellow]{_tf('cli_watch_inner_exited', code=proc.returncode)}[/]")
+                # asyncio.create_subprocess_exec leaves the event loop
+                # responsive while the child runs. The child shares our
+                # stdio, so its output / Ctrl-C behavior matches the
+                # previous blocking shape.
+                proc = await _asyncio.create_subprocess_exec(*cmd, env=child_env)
+                return_code = await proc.wait()
+                if return_code != 0:
+                    console.print(f"[yellow]{_tf('cli_watch_inner_exited', code=return_code)}[/]")
             except FileNotFoundError:
                 console.print(f"[red]{_tf('cli_watch_not_on_path', cmd=cmd[0])}[/]")
                 raise typer.Exit(2) from None
