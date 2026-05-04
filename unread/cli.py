@@ -3260,9 +3260,11 @@ def watch(
 
 async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> None:
     import asyncio as _asyncio
+    import os as _os
     import shlex
-    import subprocess
     import sys as _sys
+
+    from unread.config import dotenv_values as _dotenv_values
 
     seconds = _parse_duration_seconds(interval)
     if seconds <= 0:
@@ -3273,11 +3275,18 @@ async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> 
     cmd = ["unread", *inner]
     pretty = " ".join(shlex.quote(c) for c in cmd)
     console.print(f"[bold cyan]{_tf('cli_watch_watching', interval=interval, cmd=pretty)}[/]")
-    # Single Ctrl-C handler covers both phases (subprocess.run / sleep).
-    # subprocess.run inherits stdin so child sees the SIGINT first; if
-    # the child handles it cleanly, control returns here and we just
-    # continue. If the user mashes Ctrl-C again during sleep, it
-    # propagates as KeyboardInterrupt and we exit.
+    # Compose the child env: shell env wins, with the cached .env overlay
+    # filling in missing keys. After `fix(config): isolate .env values
+    # from os.environ`, the .env values no longer live on os.environ —
+    # but the watched re-exec of `unread` still needs them, so we re-
+    # union them here explicitly.
+    dotenv_overlay = _dotenv_values()
+    child_env = {**_os.environ, **{k: v for k, v in dotenv_overlay.items() if k not in _os.environ}}
+    # Single Ctrl-C handler covers both phases (child wait / sleep).
+    # asyncio.create_subprocess_exec inherits stdin so the child sees
+    # SIGINT first; if it handles it cleanly, proc.wait() returns and
+    # we just continue. If the user mashes Ctrl-C again during sleep,
+    # it propagates as KeyboardInterrupt and we exit.
     try:
         while True:
             runs += 1
@@ -3286,12 +3295,14 @@ async def _watch_loop(interval: str, max_runs: int | None, inner: list[str]) -> 
                 f"[grey70]{datetime.now().isoformat(timespec='seconds')}[/]"
             )
             try:
-                # subprocess.run blocks the event loop; that's fine — we're
-                # not racing anything here, and the inner command may itself
-                # spin up its own asyncio loop.
-                proc = subprocess.run(cmd, check=False)
-                if proc.returncode != 0:
-                    console.print(f"[yellow]{_tf('cli_watch_inner_exited', code=proc.returncode)}[/]")
+                # asyncio.create_subprocess_exec leaves the event loop
+                # responsive while the child runs. The child shares our
+                # stdio, so its output / Ctrl-C behavior matches the
+                # previous blocking shape.
+                proc = await _asyncio.create_subprocess_exec(*cmd, env=child_env)
+                return_code = await proc.wait()
+                if return_code != 0:
+                    console.print(f"[yellow]{_tf('cli_watch_inner_exited', code=return_code)}[/]")
             except FileNotFoundError:
                 console.print(f"[red]{_tf('cli_watch_not_on_path', cmd=cmd[0])}[/]")
                 raise typer.Exit(2) from None

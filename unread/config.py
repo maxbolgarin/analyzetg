@@ -258,6 +258,26 @@ class StorageCfg(_StrictCfg):
     data_path: Path = Field(default_factory=default_data_path)
 
 
+class LoggingCfg(_StrictCfg):
+    """Optional rotating file log for production debugging.
+
+    `file_path` defaults to None — terminal-only. When set, structured
+    log events are also appended to that path through a
+    ``RotatingFileHandler`` (plain text, same redaction pipeline as the
+    Rich console handler). The default rotation policy keeps four files
+    at 10 MB each (one active + three rotated) — tune via
+    ``file_max_bytes`` / ``file_backup_count``.
+
+    A reasonable choice is ``~/.unread/storage/unread.log``
+    (see :func:`unread.core.paths.default_log_path`); the user opts in
+    explicitly so a fresh install never silently writes to disk.
+    """
+
+    file_path: Path | None = None
+    file_max_bytes: int = 10_000_000  # 10 MB before rotation
+    file_backup_count: int = 3
+
+
 class LocaleCfg(_StrictCfg):
     """Output / UI / preset language.
 
@@ -312,6 +332,7 @@ class Settings(BaseSettings):
     website: WebsiteCfg = Field(default_factory=WebsiteCfg)
     retention: RetentionCfg = Field(default_factory=RetentionCfg)
     storage: StorageCfg = Field(default_factory=StorageCfg)
+    logging: LoggingCfg = Field(default_factory=LoggingCfg)
     locale: LocaleCfg = Field(default_factory=LocaleCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
 
@@ -429,6 +450,17 @@ def dotenv_value(name: str) -> str | None:
     .env values from polluting the subprocess inheritance surface.
     """
     return _DOTENV_VALUES.get(name)
+
+
+def dotenv_values() -> dict[str, str]:
+    """Return a copy of the cached .env overlay.
+
+    Used by the rare call site that needs to compose a child-process env
+    (e.g. `unread watch` re-execing `unread` — the child has to see the
+    .env-loaded credentials too). Returns a copy so callers can mutate
+    freely without poisoning the per-process cache.
+    """
+    return dict(_DOTENV_VALUES)
 
 
 def load_settings(config_path: Path | str | None = None) -> Settings:
