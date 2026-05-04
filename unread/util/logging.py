@@ -61,10 +61,12 @@ def _redact_processor(_logger: Any, _method_name: str, event_dict: dict) -> dict
     """structlog processor: mask secret-shaped values and known-secret keys.
 
     Last line of defense — modules should still avoid logging raw
-    credentials. Walks one level into nested dicts/lists so common
-    `extra={"payload": {...}}` patterns and Telethon's nested error
-    structures don't bypass the filter. Stops at depth 2 to keep the
-    cost bounded on every log call.
+    credentials. Walks nested dicts/lists/tuples up to depth 6 so
+    common `extra={"payload": {...}}` patterns, Telethon's nested
+    error structures, and deeply-nested provider response payloads
+    don't bypass the filter. Depth cap keeps the cost bounded on
+    every log call (a malicious caller can't pin the logger by
+    handing in a depth-1000 nested dict).
     """
 
     def _scrub(key: str | None, value: Any, depth: int) -> Any:
@@ -85,7 +87,7 @@ def _redact_processor(_logger: Any, _method_name: str, event_dict: dict) -> dict
         return value
 
     for key, value in list(event_dict.items()):
-        event_dict[key] = _scrub(key, value, depth=2)
+        event_dict[key] = _scrub(key, value, depth=6)
     return event_dict
 
 
