@@ -1,13 +1,24 @@
-"""Dump-to-markdown adapter for local files and stdin.
+"""Dump adapter for local files and stdin — preserves the original bytes.
 
-Mirrors the shape of unread/youtube/dump.py and unread/website/dump.py:
-extract text via the existing per-kind extractor (cache-aware, reuses
-unread.files.extractors), assemble a metadata header, write a markdown
-file under ~/.unread/reports/files/. No LLM call.
+Unlike `unread/youtube/dump.py` and `unread/website/dump.py` which extract
+remote content into markdown, the local-file dump is just a save-a-copy:
+the original bytes go to `~/.unread/reports/files/<kind>/<original-name>-<stamp>.<ext>`
+unchanged. The user already has the file in its native format on disk;
+re-extracting it would be lossy (PDF→text drops layout, code→markdown
+drops structure) and pointless.
+
+The markdown-with-metadata-header shape lives in the LLM-bound paths
+(`unread <file>` analyze, `unread ask <file>`) where the extracted text
+is what the model consumes. `dump` is the no-LLM verb — it just saves.
+
+For stdin, there's no original file to copy: bytes are written to
+`<stamp>.txt`, decoded as UTF-8 with replacement (assumes text input;
+piping a binary stream to `unread dump` is unusual).
 """
 
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,23 +32,6 @@ def _stamp() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 
-def _build_markdown(
-    *,
-    source_label: str,
-    kind: str,
-    body: str,
-    content_hash: str,
-    size_bytes: int,
-) -> str:
-    header = (
-        f"# {source_label}\n\n"
-        f"_Kind: {kind} · size: {size_bytes} bytes · sha256: {content_hash[:16]}_\n"
-        f"_Extracted: {datetime.now(UTC).isoformat()}_\n\n"
-        "---\n\n"
-    )
-    return header + body.rstrip() + "\n"
-
-
 async def cmd_dump_file(
     ref: str,
     *,
@@ -47,16 +41,14 @@ async def cmd_dump_file(
     language: str | None = None,
     content_language: str | None = None,
 ) -> None:
-    """Extract text from a local file (or stdin) and write it as markdown."""
+    """Save a local file (or stdin bytes) to ~/.unread/reports/files/.
+
+    Files are copied byte-for-byte with their original extension preserved.
+    Stdin lands as `<stamp>.txt`.
+    """
     from unread.cli import _STDIN_REF_SENTINEL
     from unread.core.paths import reports_dir
-    from unread.files.commands import (
-        _extract_for_kind,
-        _file_id_for_path,
-        _file_id_for_stdin,
-        _hash_content,
-        _read_stdin_bytes,
-    )
+    from unread.files.commands import _file_id_for_stdin, _read_stdin_bytes
     from unread.files.extractors import detect_kind
 
     if ref == _STDIN_REF_SENTINEL:
@@ -64,45 +56,33 @@ async def cmd_dump_file(
         if not raw.strip():
             console.print("[red]No data on stdin.[/]")
             raise typer.Exit(2)
-        text = raw.decode("utf-8", errors="replace")
-        kind = "stdin"
-        size_bytes = len(raw)
-        content_hash = _hash_content(text)
-        source_label = "<stdin>"
         out_dir = reports_dir() / "files" / "stdin"
         slug = _file_id_for_stdin(raw)[:12]
-        default_output = out_dir / f"{slug}-{_stamp()}-dump.md"
-    else:
-        path = Path(ref).expanduser().resolve()
-        if not path.is_file():
-            console.print(f"[red]Not a file: {path}[/]")
-            raise typer.Exit(2)
-        kind = detect_kind(path)
-        result = await _extract_for_kind(path, kind)
-        text = result.text
-        size_bytes = path.stat().st_size
-        content_hash = _hash_content(text)
-        source_label = path.name
-        _ = _file_id_for_path(path)  # touches the cache key for future cache lookups
-        out_dir = reports_dir() / "files" / str(kind)
-        slug = path.stem.replace(" ", "_")
-        default_output = out_dir / f"{slug}-{_stamp()}-dump.md"
-
-    md = _build_markdown(
-        source_label=source_label,
-        kind=str(kind),
-        body=text,
-        content_hash=content_hash,
-        size_bytes=size_bytes,
-    )
-
-    if console_out and output is None:
-        console.print(md)
+        default_output = out_dir / f"{slug}-{_stamp()}.txt"
+        target = output or default_output
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        console.print(f"[grey70]Saved to[/] [bold]{target}[/]")
+        if console_out:
+            console.print(raw.decode("utf-8", errors="replace"))
         return
 
+    path = Path(ref).expanduser().resolve()
+    if not path.is_file():
+        console.print(f"[red]Not a file: {path}[/]")
+        raise typer.Exit(2)
+    kind = detect_kind(path)
+    out_dir = reports_dir() / "files" / str(kind)
+    # Preserve the original extension. The stem gets a stamp suffix so
+    # repeat-dumps of the same file don't overwrite each other.
+    suffix = "".join(path.suffixes)  # handles `.tar.gz`-style multi-suffixes
+    stem = path.name.removesuffix(suffix).replace(" ", "_") or path.stem
+    default_output = out_dir / f"{stem}-{_stamp()}{suffix}"
     target = output or default_output
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(md, encoding="utf-8")
+    shutil.copy2(path, target)
     console.print(f"[grey70]Saved to[/] [bold]{target}[/]")
-    if console_out:
-        console.print(md)
+    if console_out and kind == "text":
+        # Only echo text files to the terminal; binary `console_out` is
+        # noise (and may corrupt the user's terminal state).
+        console.print(target.read_text(encoding="utf-8", errors="replace"))

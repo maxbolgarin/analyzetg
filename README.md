@@ -908,19 +908,22 @@ picker only fires on a real terminal. Telegram-only flags
 
 ### `dump` for local files and stdin
 
-`unread dump <path>` extracts the file's text via the appropriate
-per-kind extractor (PDF, DOCX, audio/video transcript, image OCR, plain
-text) and writes the result as markdown to
-`~/.unread/reports/files/<kind>/`. Stdin works too:
+`unread dump <path>` saves a byte-for-byte copy of the file under
+`~/.unread/reports/files/<kind>/<original-name>-<stamp>.<original-ext>`.
+The original extension is preserved — a `.ts` file lands as `.ts`,
+a PDF as `.pdf`, an audio file as `.mp3`. No extraction, no markdown
+wrap, no LLM call:
 
 ```bash
-unread dump ./report.pdf                  # → ~/.unread/reports/files/pdf/...
-unread dump ./meeting.mp3                 # transcribes, then dumps
-echo "raw text…" | unread dump            # stdin → ~/.unread/reports/files/stdin/
+unread dump ./src/data/content.ts        # → ~/.unread/reports/files/text/content-<stamp>.ts
+unread dump ./report.pdf                 # → ~/.unread/reports/files/pdf/report-<stamp>.pdf
+unread dump ./meeting.mp3                # → ~/.unread/reports/files/audio/meeting-<stamp>.mp3
+echo "raw text…" | unread dump           # → ~/.unread/reports/files/stdin/<slug>-<stamp>.txt
 ```
 
-No LLM call — `dump` is the "save extracted markdown" verb;
-`unread <path>` (analyze) and `unread ask <path>` are the LLM verbs.
+Use `unread <path>` (analyze) or `unread ask <path>` if you want
+extraction-then-markdown — the LLM-bound paths consume markdown, but
+`dump` is the "save the original" verb and a re-encode would be lossy.
 
 ---
 
