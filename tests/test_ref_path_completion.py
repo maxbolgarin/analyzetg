@@ -1,4 +1,4 @@
-"""Tab-completion for the `<ref>` positional includes local file paths."""
+"""Tab-completion for the `<ref>` positional delegates path completion to the shell."""
 
 from __future__ import annotations
 
@@ -12,49 +12,35 @@ def test_path_prefix_detector_only_fires_on_pathy_strings() -> None:
     assert _looks_like_path_prefix("~/Documents") is True
     assert _looks_like_path_prefix("../sibling") is True
     assert _looks_like_path_prefix("dir/file") is True
+    assert _looks_like_path_prefix(".") is True
+    assert _looks_like_path_prefix("..") is True
 
     assert _looks_like_path_prefix("") is False
     assert _looks_like_path_prefix("cleanup") is False
     assert _looks_like_path_prefix("@somegroup") is False
+    # URLs are not path prefixes (a glob would lie about remote files).
     assert _looks_like_path_prefix("https://example.com") is False
+    assert _looks_like_path_prefix("t.me/c/123") is False
     assert _looks_like_path_prefix("tg") is False
 
 
-def test_complete_path_prefix_matches_files_and_dirs(tmp_path, monkeypatch) -> None:
-    """Completion enumerates dir contents matching the partial name."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "report.pdf").write_text("a")
-    (tmp_path / "report-old.pdf").write_text("b")
-    (tmp_path / "notes.md").write_text("c")
-    (tmp_path / "subdir").mkdir()
+def test_complete_path_prefix_delegates_to_shell_for_pathy_input() -> None:
+    """Pathy prefixes return a CompletionItem(type='file'); the shell does the glob.
+
+    The actual filesystem enumeration happens inside the shell's native
+    file-completion machinery (`_path_files -f` in zsh, `__fish_complete_path`
+    in fish). Those handle no-trailing-space-after-files automatically —
+    which is the whole point of delegating instead of returning plain strings
+    that would route through `compadd -U` and add a trailing space.
+    """
+    from click.shell_completion import CompletionItem
 
     from unread.cli import _complete_path_prefix
 
     matches = _complete_path_prefix("./re")
-    assert "./report.pdf" in matches
-    assert "./report-old.pdf" in matches
-    # notes.md doesn't start with "re"
-    assert "./notes.md" not in matches
-
-
-def test_complete_path_prefix_appends_slash_for_dirs(tmp_path, monkeypatch) -> None:
-    """Directories get a trailing slash so the user can keep tabbing."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "subdir").mkdir()
-    (tmp_path / "leaf.txt").write_text("a")
-
-    from unread.cli import _complete_path_prefix
-
-    matches = _complete_path_prefix("./")
-    assert "./subdir/" in matches
-    assert "./leaf.txt" in matches
-    # Hidden files excluded by default
-    (tmp_path / ".secret").write_text("hidden")
-    matches = _complete_path_prefix("./")
-    assert "./.secret" not in matches
-    # …unless the user typed a leading dot
-    matches = _complete_path_prefix("./.")
-    assert "./.secret" in matches
+    assert len(matches) == 1
+    assert isinstance(matches[0], CompletionItem)
+    assert matches[0].type == "file"
 
 
 def test_complete_path_prefix_returns_empty_for_non_pathy_input() -> None:
@@ -64,17 +50,15 @@ def test_complete_path_prefix_returns_empty_for_non_pathy_input() -> None:
     assert _complete_path_prefix("cleanup") == []
     assert _complete_path_prefix("@user") == []
     assert _complete_path_prefix("") == []
+    assert _complete_path_prefix("https://example.com") == []
 
 
-def test_root_ref_completion_returns_paths_when_pathy(tmp_path, monkeypatch) -> None:
-    """`unread ./re<Tab>` returns path matches, not subcommand names."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "report.pdf").write_text("a")
+def test_root_ref_completion_delegates_paths_when_pathy() -> None:
+    """`unread ./re<Tab>` returns a 'file' CompletionItem, no subcommand names."""
+    from click.shell_completion import CompletionItem
 
     from unread.cli import _complete_root_ref
 
-    # Build a fake ctx whose .command has list_commands/get_command — we
-    # only need them when the path branch isn't taken.
     class _FakeCommand:
         def list_commands(self, ctx):
             return ["cleanup", "doctor"]
@@ -90,9 +74,10 @@ def test_root_ref_completion_returns_paths_when_pathy(tmp_path, monkeypatch) -> 
         command = _FakeCommand()
 
     matches = _complete_root_ref(_FakeCtx(), [], "./re")
-    # Path branch wins: only path entries returned, no subcommand tuples.
-    assert any(m == "./report.pdf" for m in matches)
-    assert not any(isinstance(m, tuple) for m in matches)
+    # Path branch wins: only the file-completion sentinel is returned.
+    assert len(matches) == 1
+    assert isinstance(matches[0], CompletionItem)
+    assert matches[0].type == "file"
 
 
 def test_root_ref_completion_returns_subcommands_when_bare_word() -> None:
@@ -119,18 +104,16 @@ def test_root_ref_completion_returns_subcommands_when_bare_word() -> None:
     assert ("describe", "describe help") not in matches
 
 
-def test_ask_dump_ref_use_path_only_completion(tmp_path, monkeypatch) -> None:
-    """`unread ask ./re<Tab>` and `unread dump ./re<Tab>` complete file paths."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "report.pdf").write_text("a")
+def test_ask_dump_ref_use_path_only_completion() -> None:
+    """`unread ask ./re<Tab>` and `unread dump ./re<Tab>` delegate to shell file completion."""
+    from click.shell_completion import CompletionItem
 
     from unread.cli import _complete_ref
 
-    # `_complete_ref` intentionally has no subcommand fallback — it's
-    # used by `ask` and `dump`, neither of which has nested subcommands
-    # competing with the ref positional.
     matches = _complete_ref(None, [], "./re")
-    assert "./report.pdf" in matches
+    assert len(matches) == 1
+    assert isinstance(matches[0], CompletionItem)
+    assert matches[0].type == "file"
 
     # Bare words on ask/dump get no suggestions (they're TG handles or
     # URLs, both dynamic).

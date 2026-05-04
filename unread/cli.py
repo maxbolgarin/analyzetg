@@ -1799,44 +1799,29 @@ def _looks_like_path_prefix(incomplete: str) -> bool:
     )
 
 
-def _complete_path_prefix(incomplete: str) -> list[str]:
-    """Glob filesystem entries matching `incomplete`. Used by ref-arg autocompletion.
+def _complete_path_prefix(incomplete: str):  # type: ignore[no-untyped-def]
+    """Delegate file completion to the shell when the prefix looks pathy.
 
-    Directories get a trailing `/` so the user can keep tabbing into them.
-    The suggestion preserves the form the user typed: a `./re` prefix
-    yields `./report.pdf`, an absolute `/etc/h` yields `/etc/hostname`,
-    and `~/Doc` yields `~/Documents/` (we keep the `~` glyph the user
-    typed since shells handle the expansion themselves).
+    Returns a single ``CompletionItem(type="file")`` which our zsh / fish
+    completion scripts route to ``_path_files -f`` / ``__fish_complete_path``.
+    Those handle every detail the shell already knows: no trailing space
+    after a file, trailing slash after a dir, symlink detection, the
+    user's hidden-file policy, and — critically — they don't append a
+    space so the user can keep refining the path.
+
+    Doing the glob in Python (and returning plain strings) routes
+    through ``compadd -U`` and adds a trailing space. Delegating to the
+    shell's native file-completion machinery is shorter, faster, and
+    behaves correctly out of the box.
+
+    Returning an empty list when the prefix isn't pathy lets the
+    subcommand-name fallback in ``_complete_root_ref`` take over.
     """
     if not _looks_like_path_prefix(incomplete):
         return []
-    # Split the incomplete into a directory-prefix (kept verbatim in the
-    # suggestion) and a name-prefix (used to filter `iterdir`).
-    if incomplete.endswith("/") or incomplete in (".", "..", "~"):
-        dir_prefix = incomplete if incomplete.endswith("/") else f"{incomplete}/"
-        name_prefix = ""
-    else:
-        slash = max(incomplete.rfind("/"), incomplete.rfind("\\"))
-        if slash < 0:
-            return []
-        dir_prefix = incomplete[: slash + 1]
-        name_prefix = incomplete[slash + 1 :]
-    # Resolve the dir-prefix to a real directory on disk.
-    expanded_dir = Path(dir_prefix).expanduser() if dir_prefix.startswith("~") else Path(dir_prefix)
-    if not expanded_dir.is_dir():
-        return []
-    out: list[str] = []
-    for entry in sorted(expanded_dir.iterdir()):
-        if not entry.name.startswith(name_prefix):
-            continue
-        # Hidden files only when the prefix explicitly asked for them.
-        if entry.name.startswith(".") and not name_prefix.startswith("."):
-            continue
-        suggestion = f"{dir_prefix}{entry.name}"
-        if entry.is_dir():
-            suggestion += "/"
-        out.append(suggestion)
-    return out
+    from click.shell_completion import CompletionItem
+
+    return [CompletionItem(value="", type="file")]
 
 
 def _complete_root_ref(ctx, args, incomplete):  # type: ignore[no-untyped-def]
