@@ -272,7 +272,7 @@ async def test_cache_iter_full_returns_body(repo: Repo) -> None:
         completion_tokens=1,
         cost_usd=0.0,
     )
-    rows = await repo.cache_iter_full(preset="p")
+    rows = [r async for r in repo.cache_iter_full(preset="p")]
     assert len(rows) == 1
     assert rows[0]["result"] == "full body"
 
@@ -354,7 +354,7 @@ async def test_redact_respects_keep_transcripts(repo: Repo) -> None:
     # keep_transcripts=True: only msg_id=2 (with text) gets redacted.
     n = await repo.redact_old_messages(retention_days=90, keep_transcripts=True)
     assert n == 1
-    rows = await repo.iter_messages(1)
+    rows = [m async for m in repo.iter_messages(1)]
     by_id = {m.msg_id: m for m in rows}
     assert by_id[1].transcript == "voice-1"  # transcript intact
     assert by_id[2].text is None  # text nulled
@@ -368,7 +368,7 @@ async def test_redact_no_keep_transcripts_nulls_both(repo: Repo) -> None:
 
     n = await repo.redact_old_messages(retention_days=90, keep_transcripts=False)
     assert n == 1
-    rows = await repo.iter_messages(1)
+    rows = [m async for m in repo.iter_messages(1)]
     assert rows[0].transcript is None
 
 
@@ -383,5 +383,5 @@ async def test_redact_chat_filter(repo: Repo) -> None:
     n = await repo.redact_old_messages(retention_days=90, chat_id=1)
     assert n == 1
     # chat 2 untouched
-    rows = await repo.iter_messages(2)
+    rows = [m async for m in repo.iter_messages(2)]
     assert rows[0].text == "in chat 2"

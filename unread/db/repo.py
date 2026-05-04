@@ -646,7 +646,16 @@ class Repo:
         until: datetime | None = None,
         min_msg_id: int | None = None,
         max_msg_id: int | None = None,
-    ) -> list[Message]:
+    ) -> AsyncIterator[Message]:
+        """Stream matching messages, ordered by (date, msg_id) ASC.
+
+        Pre-prod review flagged the previous `fetchall()` shape as an
+        OOM risk on multi-million-message chats — the entire result
+        set landed in a single Python list before yielding to the
+        caller. The async-iterator shape lets the cursor stream from
+        SQLite a row at a time. Callers that genuinely need a list
+        materialize via ``[m async for m in repo.iter_messages(...)]``.
+        """
         sql = "SELECT * FROM messages WHERE chat_id=?"
         args: list[Any] = [chat_id]
         if thread_id is not None:
@@ -666,9 +675,11 @@ class Repo:
             args.append(max_msg_id)
         sql += " ORDER BY date ASC, msg_id ASC"
         cur = await self._conn.execute(sql, args)
-        rows = await cur.fetchall()
-        await cur.close()
-        return [self._row_to_msg(r) for r in rows]
+        try:
+            async for row in cur:
+                yield self._row_to_msg(row)
+        finally:
+            await cur.close()
 
     @staticmethod
     def _row_to_msg(row: aiosqlite.Row) -> Message:
@@ -930,7 +941,11 @@ class Repo:
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int | None = None,
-    ) -> list[Message]:
+    ) -> AsyncIterator[Message]:
+        """Stream media messages without a transcript, ordered by date ASC.
+
+        See :meth:`iter_messages` for the streaming-shape rationale.
+        """
         sql = (
             "SELECT * FROM messages WHERE media_doc_id IS NOT NULL AND transcript IS NULL"
             " AND media_type IS NOT NULL"
@@ -950,9 +965,11 @@ class Repo:
             sql += " LIMIT ?"
             args.append(limit)
         cur = await self._conn.execute(sql, args)
-        rows = await cur.fetchall()
-        await cur.close()
-        return [self._row_to_msg(r) for r in rows]
+        try:
+            async for row in cur:
+                yield self._row_to_msg(row)
+        finally:
+            await cur.close()
 
     async def count_redactable_messages(
         self,
@@ -1810,8 +1827,13 @@ class Repo:
         preset: str | None = None,
         model: str | None = None,
         older_than_days: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Full rows incl. result — for export."""
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream full cache rows (incl. result blob) for export.
+
+        Result rows can be large (full LLM responses); the streaming
+        shape avoids loading the entire cache table into memory at once
+        for `unread cache export`-style operations.
+        """
         sql = "SELECT * FROM analysis_cache WHERE 1=1"
         args: list[Any] = []
         if older_than_days:
@@ -1825,9 +1847,11 @@ class Repo:
             args.append(model)
         sql += " ORDER BY created_at DESC"
         cur = await self._conn.execute(sql, args)
-        rows = await cur.fetchall()
-        await cur.close()
-        return [dict(r) for r in rows]
+        try:
+            async for row in cur:
+                yield dict(row)
+        finally:
+            await cur.close()
 
     async def vacuum(self) -> int:
         """Run VACUUM and return reclaimed bytes (file-size delta)."""

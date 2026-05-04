@@ -261,6 +261,11 @@ class AnalysisOptions:
     # actual boolean flowed through to formatter / hashing is resolved
     # in `run_analysis` from this + settings.
     redact: bool | None = None
+    # Runtime knob: when True, the orchestrator surfaces a truncated
+    # response straight to the caller instead of retrying with a
+    # doubled budget. Doesn't affect the cache key — toggling it
+    # between runs of the same input must hit the same cache row.
+    disable_truncation_retry: bool = False
 
     def options_payload(self, preset: Preset) -> dict[str, Any]:
         """Hash ingredients that must bust cache when toggled."""
@@ -375,6 +380,7 @@ async def _call_cached(
     max_tokens: int,
     run_context: dict[str, Any],
     use_cache: bool,
+    disable_truncation_retry: bool = False,
 ) -> tuple[str, float, bool, bool]:
     """Return (text, cost, was_cache_hit, truncated). Writes cache and usage log on miss.
 
@@ -396,6 +402,7 @@ async def _call_cached(
         messages=messages,
         max_tokens=max_tokens,
         context={**run_context, "batch_hash": bhash},
+        disable_truncation_retry=disable_truncation_retry,
     )
     if use_cache and not res.truncated:
         # Don't cache truncated results — caching a partial summary would
@@ -485,14 +492,17 @@ async def run_analysis(
             enrich_kinds_used = list(opts.enrich.kinds_enabled())
     else:
         # --- Load messages
-        msgs = await repo.iter_messages(
-            chat_id,
-            thread_id=thread_id,
-            since=opts.since,
-            until=opts.until,
-            min_msg_id=opts.min_msg_id,
-            max_msg_id=opts.max_msg_id,
-        )
+        msgs = [
+            m
+            async for m in repo.iter_messages(
+                chat_id,
+                thread_id=thread_id,
+                since=opts.since,
+                until=opts.until,
+                min_msg_id=opts.min_msg_id,
+                max_msg_id=opts.max_msg_id,
+            )
+        ]
 
         # Per-topic unread filter for flat-forum mode. `iter_messages` applies
         # a single `min_msg_id` floor — fine for a non-forum chat, but forums
@@ -701,6 +711,7 @@ async def run_analysis(
                 max_tokens=preset.output_budget_tokens,
                 run_context=run_ctx,
                 use_cache=opts.use_cache,
+                disable_truncation_retry=opts.disable_truncation_retry,
             ),
         )
         total_cost += cost
@@ -808,6 +819,7 @@ async def run_analysis(
                         max_tokens=min(preset.output_budget_tokens, preset.map_output_tokens),
                         run_context={**run_ctx, "phase": "map"},
                         use_cache=opts.use_cache,
+                        disable_truncation_retry=opts.disable_truncation_retry,
                     )
                 return bh, t, c, hit, tr
             finally:
@@ -859,6 +871,7 @@ async def run_analysis(
             max_tokens=preset.output_budget_tokens,
             run_context={**run_ctx, "phase": "reduce"},
             use_cache=opts.use_cache,
+            disable_truncation_retry=opts.disable_truncation_retry,
         ),
     )
     total_cost += cost

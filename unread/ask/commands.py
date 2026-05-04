@@ -453,14 +453,13 @@ async def cmd_ask(
             if enrich_opts.any_enabled():
                 msgs_to_enrich = []
                 for cid in chat_ids:
-                    msgs_to_enrich.extend(
-                        await repo.iter_messages(
-                            cid,
-                            thread_id=thread,
-                            since=since_dt,
-                            until=until_dt,
-                        )
-                    )
+                    async for m in repo.iter_messages(
+                        cid,
+                        thread_id=thread,
+                        since=since_dt,
+                        until=until_dt,
+                    ):
+                        msgs_to_enrich.append(m)
                 if msgs_to_enrich:
                     console.print(
                         f"[grey70]→ Enriching {len(msgs_to_enrich)} messages "

@@ -70,7 +70,9 @@ async def cmd_export(*, chat: int, fmt: str, output: Path, since: str | None, un
     settings = get_settings()
     async with open_repo(settings.storage.data_path) as repo:
         chat_row = await repo.get_chat(chat)
-        msgs = await repo.iter_messages(chat, since=_parse_ymd(since), until=_parse_ymd(until))
+        # _write consumes the iterable twice (line counts + serialization),
+        # so materialize the streamed iterator into a list.
+        msgs = [m async for m in repo.iter_messages(chat, since=_parse_ymd(since), until=_parse_ymd(until))]
         title = (chat_row or {}).get("title")
         _write(msgs, fmt=fmt, output=output, title=title)
         console.print(f"[green]{_tf('exported_n_to', n=len(msgs), path=output)}[/]")
@@ -864,8 +866,11 @@ async def _transcribe_pending(
 ) -> None:
     from unread.enrich.audio import transcribe_message
 
-    pending = await repo.untranscribed_media(chat_id=chat_id, since=since_dt, until=until_dt)
-    pending = [m for m in pending if _transcribable(m, settings)]
+    pending = [
+        m
+        async for m in repo.untranscribed_media(chat_id=chat_id, since=since_dt, until=until_dt)
+        if _transcribable(m, settings)
+    ]
     console.print(f"[cyan]{_t('export_transcribe_label')}[/] {_tf('export_pending_label', n=len(pending))}")
 
     sem = asyncio.Semaphore(settings.media.download_concurrency)

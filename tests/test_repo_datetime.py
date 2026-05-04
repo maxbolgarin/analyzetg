@@ -28,7 +28,7 @@ async def test_redact_old_messages_respects_retention(repo: Repo) -> None:
     redacted = await repo.redact_old_messages(retention_days=7)
     assert redacted == 1
 
-    rows = await repo.iter_messages(1)
+    rows = [m async for m in repo.iter_messages(1)]
     texts = {r.msg_id: r.text for r in rows}
     assert texts[1] == "keep me"
     assert texts[2] is None

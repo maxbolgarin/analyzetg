@@ -149,15 +149,14 @@ async def build_index(
         for batch_start in range(0, len(missing), _EMBED_BATCH):
             batch_ids = missing[batch_start : batch_start + _EMBED_BATCH]
             # Range query: contiguous msg_ids form one slice. Batch is small.
-            messages = await repo.iter_messages(
-                chat_id, min_msg_id=min(batch_ids) - 1, max_msg_id=max(batch_ids)
-            )
             # Filter to the exact set we asked for (range may pick up rows
             # that already have embeddings; we re-skip those).
             wanted = set(batch_ids)
             inputs: list[str] = []
             input_msgs: list[Message] = []
-            for m in messages:
+            async for m in repo.iter_messages(
+                chat_id, min_msg_id=min(batch_ids) - 1, max_msg_id=max(batch_ids)
+            ):
                 if m.msg_id not in wanted:
                     continue
                 body = _body_for_embedding(m)
@@ -241,8 +240,7 @@ async def semantic_search(
         by_chat.setdefault(cid, set()).add(mid)
     msg_index: dict[tuple[int, int], Message] = {}
     for cid, ids in by_chat.items():
-        msgs = await repo.iter_messages(cid, min_msg_id=min(ids) - 1, max_msg_id=max(ids))
-        for m in msgs:
+        async for m in repo.iter_messages(cid, min_msg_id=min(ids) - 1, max_msg_id=max(ids)):
             if m.msg_id in ids:
                 msg_index[(cid, m.msg_id)] = m
     out: list[tuple[Message, float]] = []
