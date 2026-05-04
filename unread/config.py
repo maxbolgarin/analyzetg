@@ -335,11 +335,17 @@ def _read_toml(path: Path) -> dict[str, Any]:
         ) from e
 
 
-def _load_dotenv(path: Path) -> None:
+def _load_dotenv(path: Path) -> dict[str, str]:
     """Minimal .env loader (KEY=VALUE per line, # comments, optional quotes).
 
-    Populates os.environ for any keys not already set, so existing shell
-    exports still win. Silently no-ops if the file doesn't exist.
+    Returns a dict of the parsed entries. Pre-prod blocker: this used
+    to mutate ``os.environ`` directly, which meant every subsequent
+    ``subprocess.run`` (ffmpeg, fdesetup, package manager, even our
+    own re-execs) inherited the user's API keys via the child env.
+    Returning a dict keeps the values inside the process — call sites
+    that need them (load_settings, the passphrase reader) consult the
+    dict explicitly via :func:`dotenv_value`. Silently returns ``{}``
+    if the file doesn't exist.
     """
     # Defenses (added pre-prod review):
     #
@@ -352,19 +358,20 @@ def _load_dotenv(path: Path) -> None:
     #   API keys (which then 401s and prints the value in tracebacks).
     import sys
 
+    values: dict[str, str] = {}
     try:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(str(path), flags)
     except FileNotFoundError:
-        return
+        return values
     except OSError as e:
         # ELOOP (symlink rejected) or EACCES — surface a warning so the
         # user knows their .env was skipped instead of silently 401-ing
         # later when the secret isn't loaded.
         print(f"warning: refusing to load {path}: {e.strerror or e}", file=sys.stderr)
-        return
+        return values
     try:
         st = os.fstat(fd)
         if st.st_mode & 0o077:
@@ -374,13 +381,13 @@ def _load_dotenv(path: Path) -> None:
                 file=sys.stderr,
             )
             os.close(fd)
-            return
+            return values
         with os.fdopen(fd, "r", encoding="utf-8-sig") as fh:
             text = fh.read()
     except OSError:
         with contextlib.suppress(OSError):
             os.close(fd)
-        return
+        return values
     # utf-8-sig transparently strips a UTF-8 BOM if present (common on
     # Windows editors) — without this, the first line parses as
     # "\ufeffTELEGRAM_API_ID" and Telegram login fails with "no API id"
@@ -401,8 +408,27 @@ def _load_dotenv(path: Path) -> None:
         value = value.strip().rstrip("\r")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
-        if key and key not in os.environ:
-            os.environ[key] = value
+        if key:
+            values[key] = value
+    return values
+
+
+# Per-process .env overlay — populated by `load_settings` on first call.
+# Read by `dotenv_value()` so credential-gate checks and the passphrase
+# reader see the same values that `load_settings` consulted, without any
+# of them leaking into `os.environ` (and from there into subprocesses).
+_DOTENV_VALUES: dict[str, str] = {}
+
+
+def dotenv_value(name: str) -> str | None:
+    """Return ``name`` from the cached .env overlay, or ``None`` if absent.
+
+    Real shell env vars always win — call sites should consult
+    ``os.environ`` first and fall through to this helper. This keeps
+    the precedence chain (shell env > .env) intact while preventing
+    .env values from polluting the subprocess inheritance surface.
+    """
+    return _DOTENV_VALUES.get(name)
 
 
 def load_settings(config_path: Path | str | None = None) -> Settings:
@@ -427,27 +453,57 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
     successful `unread init` and keep using the CLI — credentials
     are written into the session DB at init time and read back here.
     """
-    _load_dotenv(default_env_path())
+    # Refresh the per-process .env cache. Re-running load_settings (e.g.
+    # via reset_settings() in tests) picks up edits to ~/.unread/.env.
+    # Coerce None → {} defensively for tests that monkeypatch the loader.
+    global _DOTENV_VALUES
+    _DOTENV_VALUES = _load_dotenv(default_env_path()) or {}
+
+    def _env(name: str) -> str | None:
+        # Shell env wins over the .env overlay — same precedence as the
+        # original os.environ-pollution scheme, just no pollution.
+        v = os.environ.get(name)
+        if v is not None:
+            return v
+        return _DOTENV_VALUES.get(name)
 
     # `UNREAD_CONFIG_PATH` is the canonical override.
-    cfg_path = Path(config_path or os.environ.get("UNREAD_CONFIG_PATH") or default_config_path())
+    cfg_path = Path(config_path or _env("UNREAD_CONFIG_PATH") or default_config_path())
     raw = _read_toml(cfg_path)
 
     # Env overrides for secrets
     if "telegram" not in raw:
         raw["telegram"] = {}
-    if api_id := os.environ.get("TELEGRAM_API_ID"):
+    if api_id := _env("TELEGRAM_API_ID"):
         try:
             raw["telegram"]["api_id"] = int(api_id)
         except ValueError as e:
             raise ValueError(f"TELEGRAM_API_ID must be an integer, got: {api_id!r}") from e
-    if api_hash := os.environ.get("TELEGRAM_API_HASH"):
+    if api_hash := _env("TELEGRAM_API_HASH"):
         raw["telegram"]["api_hash"] = api_hash
 
     if "openai" not in raw:
         raw["openai"] = {}
-    if api_key := os.environ.get("OPENAI_API_KEY"):
+    if api_key := _env("OPENAI_API_KEY"):
         raw["openai"]["api_key"] = api_key
+    # The first-run banner (cli.py) advertises ANTHROPIC_API_KEY /
+    # GOOGLE_API_KEY / OPENROUTER_API_KEY as valid env-var entry
+    # points. Pre-prod review: those env names had no `load_settings`
+    # handler — the dotenv-os.environ pollution was the only reason
+    # they ever flowed through. Closing the pollution path also closes
+    # the only (accidental) wiring, so wire them up explicitly here.
+    if "anthropic" not in raw:
+        raw["anthropic"] = {}
+    if api_key := _env("ANTHROPIC_API_KEY"):
+        raw["anthropic"]["api_key"] = api_key
+    if "google" not in raw:
+        raw["google"] = {}
+    if api_key := _env("GOOGLE_API_KEY"):
+        raw["google"]["api_key"] = api_key
+    if "openrouter" not in raw:
+        raw["openrouter"] = {}
+    if api_key := _env("OPENROUTER_API_KEY"):
+        raw["openrouter"]["api_key"] = api_key
 
     # Back-compat: mirror legacy [media].transcribe_* into [enrich] when the
     # user hasn't declared [enrich] yet. Keeps existing configs working without

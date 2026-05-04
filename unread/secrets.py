@@ -97,6 +97,15 @@ def _ensure_passphrase() -> str:
     if _PROCESS_PASSPHRASE:
         return _PROCESS_PASSPHRASE
     env_value = (os.environ.get("UNREAD_PASSPHRASE") or "").strip()
+    if not env_value:
+        # Pre-prod blocker: `_load_dotenv` no longer pollutes
+        # `os.environ`, so a passphrase set in `~/.unread/.env` would
+        # otherwise be invisible here. Consult the cached overlay
+        # explicitly so scripted / cron usage with a `.env`-supplied
+        # passphrase keeps working.
+        from unread.config import dotenv_value
+
+        env_value = (dotenv_value("UNREAD_PASSPHRASE") or "").strip()
     if env_value:
         _PROCESS_PASSPHRASE = env_value
         return env_value
