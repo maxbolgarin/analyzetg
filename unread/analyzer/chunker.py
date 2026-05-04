@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from datetime import timedelta
 
 from unread.ai.models import find_model
@@ -11,6 +13,18 @@ from unread.util.logging import get_logger
 from unread.util.tokens import count_tokens
 
 log = get_logger(__name__)
+
+# Sentence-boundary splitter for the oversized-message path. Matches a
+# whitespace gap that follows a sentence terminator (`.`, `!`, `?`) and
+# precedes the start of the next sentence — uppercase Latin / Cyrillic
+# or an opening quotation mark. Deliberately loose: better to over-split
+# (more chunks) than under-split (a slice that still busts the budget).
+_SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я"«])')
+
+# Suffix appended when a single sentence exceeds the budget alone and
+# we have to mid-sentence truncate. A literal char marker — kept short
+# so it doesn't itself eat much of the budget.
+_TRUNC_MARKER = "…[truncated]"
 
 # Legacy fallback table for OpenAI ids predating the per-provider catalog
 # in unread/ai/models.py. New entries should land in `ai/models.py` as a
@@ -78,6 +92,180 @@ def _fmt_line(m: Message) -> str:
     return rendered
 
 
+def _stripped_clone(m: Message, body: str, *, header_suffix: str = "") -> Message:
+    """Clone `m` keeping all metadata, replacing the body with `body`.
+
+    The composed body in `formatter._body()` glues `text` ++ image
+    description ++ extracted doc text ++ transcript. To put a custom
+    body string in front of the formatter we have to set `text` to that
+    body AND clear every other body source so they don't bleed back in.
+    """
+    return replace(
+        m,
+        text=body,
+        image_description=None,
+        extracted_text=None,
+        transcript=None,
+        link_summaries=None,  # link summaries piggy-back only on the FIRST part
+        header_suffix=header_suffix,
+    )
+
+
+def _split_sentences(body: str) -> list[str]:
+    """Split a body into sentence-ish fragments at `[.!?]\\s+[A-ZА-Я"«]`.
+
+    Returns at least one element even when the body has no detectable
+    boundaries (a single long blob). Whitespace at fragment boundaries
+    is normalized — leading/trailing space stripped — so re-joining
+    with `" "` reconstructs a near-byte-equivalent body.
+    """
+    parts = _SENTENCE_SPLIT.split(body)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _truncate_body_to_budget(
+    sentence: str,
+    template: Message,
+    budget: int,
+    model: str,
+) -> str:
+    """Hard-truncate a body that's still oversized after sentence split.
+
+    Binary-search the largest character prefix of `sentence` such that
+    the rendered line (header + sentinels + prefix + truncation marker)
+    still fits in `budget`. The marker `…[truncated]` is appended so the
+    model can tell content was cut. Always returns a non-empty body —
+    if even one character + marker would overflow, we surface the
+    pathological condition by returning just the marker (provider will
+    likely 4xx, but the chunker has done its best).
+    """
+    lo, hi = 0, len(sentence)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = sentence[:mid].rstrip() + _TRUNC_MARKER
+        clone = _stripped_clone(template, candidate)
+        if count_tokens(_fmt_line(clone), model) <= budget:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best == 0:
+        return _TRUNC_MARKER
+    return sentence[:best].rstrip() + _TRUNC_MARKER
+
+
+def _split_oversize(m: Message, budget: int, model: str) -> list[Message]:
+    """Split an oversize message into sub-messages that each fit in budget.
+
+    Strategy: split body at sentence boundaries, greedily pack
+    sentences into the largest fragments that fit, mid-sentence-
+    truncate any single sentence that still overflows. Each returned
+    clone preserves the original `msg_id`, sender, timestamp, and tags
+    — only the body content varies — so citations issued by the model
+    against any sub-chunk resolve back to the same original message.
+
+    Sub-messages 2..N carry a `(continued K/N)` `header_suffix` so the
+    rendered header line tells the model "this is a slice of the
+    same #msg_id you saw before". The first sub-message keeps the
+    natural header (no prefix) and is the only one that carries the
+    original `link_summaries` block — splitting them across continuations
+    would duplicate the (often large) summary on every part.
+
+    Implementation note: the greedy pack uses *cumulative per-sentence
+    token sums* + a fixed per-message rendering overhead to decide
+    where to flush, instead of re-rendering the growing candidate body
+    every iteration. With N sentences that quadratic re-render cost
+    was the difference between the function returning instantly on a
+    moderate body vs. taking minutes on a multi-megabyte one.
+    """
+    body = format_messages([m])  # render through the full formatter to
+    # extract the composed body inside the sentinel block. We can't just
+    # call `_body(m)` because it isn't re-exported and the rendered line
+    # is already the source of truth for token math.
+    # Pull the body out from between the first sentinel pair.
+    open_marker = f"<<<UNTRUSTED_CONTENT id={m.msg_id}>>>"
+    close_marker = "<<<END_UNTRUSTED>>>"
+    o = body.find(open_marker)
+    c = body.find(close_marker, o + len(open_marker)) if o >= 0 else -1
+    if o < 0 or c < 0:
+        # Defensive: no sentinel pair found — message had no body.
+        # Hand back the original so the caller's "raise / log" branch
+        # still surfaces the issue rather than silently dropping it.
+        return [m]
+    raw_body = body[o + len(open_marker) + 1 : c].rstrip("\n")
+
+    sentences = _split_sentences(raw_body) or [raw_body]
+
+    # Per-message rendering overhead: count tokens of the rendering
+    # with a 1-char body, subtract that 1 token, and use the remainder
+    # as the fixed cost added to any body slice. This way we only
+    # re-render once instead of once per sentence.
+    probe = _stripped_clone(m, "x")
+    overhead = max(0, count_tokens(_fmt_line(probe), model) - 1)
+    body_budget = max(1, budget - overhead)
+
+    # Per-sentence token counts. Tokenizing 16k+ short strings one at a
+    # time is the hot path on multi-megabyte bodies; estimate via byte
+    # ratio against a single one-shot count of the joined corpus.
+    # Cheap, deterministic, and good enough for the bucket boundary.
+    # Slight over-estimate (90% of measured chars/token) so a
+    # mis-estimate biases towards smaller-than-budget chunks rather
+    # than the budget-busting direction.
+    joined = " ".join(sentences)
+    total_body_tokens = count_tokens(joined, model)
+    total_chars = sum(len(s) for s in sentences) + max(0, len(sentences) - 1)
+    if total_chars <= 0 or total_body_tokens <= 0:
+        chars_per_token = 4.0
+    else:
+        chars_per_token = max(1.0, (total_chars / total_body_tokens) * 0.9)
+    sentence_tokens = [max(1, int(len(s) / chars_per_token) + 1) for s in sentences]
+    # +1 token approximates the joining whitespace between sentences.
+    join_cost = 1
+
+    parts: list[str] = []
+    current_sents: list[str] = []
+    current_tokens = 0
+    for sent, tok in zip(sentences, sentence_tokens, strict=True):
+        added = tok + (join_cost if current_sents else 0)
+        if current_tokens + added <= body_budget:
+            current_sents.append(sent)
+            current_tokens += added
+            continue
+        # `sent` would overflow the current part. Flush what we have.
+        if current_sents:
+            parts.append(" ".join(current_sents))
+            current_sents = []
+            current_tokens = 0
+        # Try the sentence on its own.
+        if tok <= body_budget:
+            current_sents = [sent]
+            current_tokens = tok
+        else:
+            # Single sentence overflows — mid-sentence truncate. Falls
+            # back to a real-render binary search (rare path).
+            parts.append(_truncate_body_to_budget(sent, m, budget, model))
+    if current_sents:
+        parts.append(" ".join(current_sents))
+
+    if not parts:
+        # Should be unreachable (sentences was non-empty), but be safe.
+        return [m]
+
+    total = len(parts)
+    clones: list[Message] = []
+    for i, part_body in enumerate(parts, 1):
+        suffix = f"(continued {i}/{total})" if i > 1 else ""
+        clone = _stripped_clone(m, part_body, header_suffix=suffix)
+        # Only the first sub-message carries the original link summaries;
+        # they're independent of the body slice and we don't want
+        # duplication on every part.
+        if i == 1:
+            clone.link_summaries = m.link_summaries
+        clones.append(clone)
+    return clones
+
+
 def build_chunks(
     msgs: list[Message],
     *,
@@ -131,33 +319,71 @@ def build_chunks(
     prev_date = None
     soft_break = timedelta(minutes=soft_break_minutes)
     min_roll_tokens = max(soft_break_min_tokens, min(budget // 3, 4000))
-    oversize_warned = False
 
+    # Expand oversize messages into a sequence of in-budget sub-messages
+    # before the packing loop runs. The expansion is per-message so a
+    # mix of normal and oversize inputs only pays the rendering cost
+    # once for each oversize entry. Normal messages pass through
+    # unchanged. The expanded list still respects the original
+    # chronological order so soft-break logic stays valid.
+    expanded: list[Message] = []
     for m in msgs:
-        line = _fmt_line(m) + "\n"
-        t = count_tokens(line, model)
-        if t > budget and not oversize_warned:
-            # Pre-prod review: a single message larger than the body
-            # budget gets emitted as a chunk that the provider rejects
-            # with "prompt is too long". We can't safely truncate the
-            # body here without mutating shared `Message` objects, so
-            # emit a one-shot warning per chunker call so the operator
-            # sees this at the top of their run instead of debugging a
-            # mysterious 4xx from the provider. Once-per-call so a
-            # chat with N oversized messages doesn't spam.
-            oversize_warned = True
+        line = _fmt_line(m)
+        if not line:
+            continue
+        if count_tokens(line + "\n", model) <= budget:
+            expanded.append(m)
+            continue
+        # Oversize — split (or truncate the worst offenders).
+        sub_msgs = _split_oversize(m, budget, model)
+        if len(sub_msgs) == 1 and sub_msgs[0] is m:
+            # Defensive: split returned the original (no body to slice).
+            # Surface the issue and keep the original in the chunk so
+            # the model still sees something even if the call 4xxes.
             log.warning(
                 "chunker.message_exceeds_budget",
                 msg_id=m.msg_id,
                 chat_id=m.chat_id,
-                tokens=t,
+                tokens=count_tokens(line + "\n", model),
                 budget=budget,
+                hint="Could not split — message had no extractable body.",
+            )
+            expanded.append(m)
+            continue
+        truncated_parts = sum(1 for s in sub_msgs if s.text and s.text.endswith(_TRUNC_MARKER))
+        if truncated_parts:
+            log.info(
+                "chunker.message_truncated",
+                msg_id=m.msg_id,
+                chat_id=m.chat_id,
+                budget=budget,
+                truncated_parts=truncated_parts,
+                total_parts=len(sub_msgs),
                 hint=(
-                    "Message body alone exceeds chunk budget — provider will "
-                    "reject. Raise output_budget_tokens / max_chunk_input_tokens "
-                    "or pre-summarize this message."
+                    "A sentence inside this message was longer than the "
+                    "per-chunk budget on its own and got mid-sentence "
+                    "truncated. Likely a long URL, base64 blob, or "
+                    "unbroken text wall."
                 ),
             )
+        else:
+            log.info(
+                "chunker.message_split",
+                msg_id=m.msg_id,
+                chat_id=m.chat_id,
+                budget=budget,
+                parts=len(sub_msgs),
+                hint=(
+                    "Single message body exceeded the per-chunk budget; "
+                    "split into N sentence-aligned sub-chunks. Citations "
+                    "still resolve to the original msg_id."
+                ),
+            )
+        expanded.extend(sub_msgs)
+
+    for m in expanded:
+        line = _fmt_line(m) + "\n"
+        t = count_tokens(line, model)
         if prev_date is not None:
             gap = m.date - prev_date
             if gap > soft_break and current.tokens >= min_roll_tokens:

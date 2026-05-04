@@ -8,7 +8,6 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -64,39 +63,57 @@ def test_401_is_always_auth():
 # ---------------------------------------------------------------------
 
 
-def test_chunker_warns_once_on_message_exceeds_budget(capsys):
-    """A single message larger than the chunk body budget gets a
-    one-shot warning so the operator sees it, instead of debugging a
-    mysterious "prompt is too long" 4xx from the provider later.
+def test_chunker_logs_split_or_truncate_on_oversized_message(capsys):
+    """A single message larger than the chunk body budget no longer
+    warns-and-emits; the chunker now splits the body at sentence
+    boundaries (or mid-sentence-truncates if a single sentence still
+    overflows) and logs a `chunker.message_split` /
+    `chunker.message_truncated` INFO event so the operator sees what
+    happened. See Task 3.3.
 
     structlog writes via PrintLogger to stdout, so capsys captures it
     even though pytest's caplog only sees stdlib logging records.
     """
+    from unread.analyzer import formatter as _formatter
     from unread.analyzer.chunker import build_chunks
     from unread.models import Message
 
-    msgs = [
-        Message(
-            chat_id=-1,
-            msg_id=42,
-            date=datetime(2026, 4, 24, 12, 0),
-            text="x" * 50_000,
-            sender_name="A",
-        ),
-    ]
-    with patch("unread.analyzer.chunker.count_tokens", return_value=10_000):
+    # Lift the formatter's body cap so the synthetic body reaches the
+    # chunker untruncated — in production `_BODY_CAP=4000` would clip
+    # this first, but the path under test is what the chunker does
+    # AFTER a body slips through (e.g. very long synthetic file/website
+    # paragraphs).
+    original_cap = _formatter._BODY_CAP
+    _formatter._BODY_CAP = 10_000_000
+    try:
+        msgs = [
+            Message(
+                chat_id=-1,
+                msg_id=42,
+                date=datetime(2026, 4, 24, 12, 0),
+                # Long un-punctuated body of varied words → triggers the
+                # mid-sentence truncate branch (single sentence overflows).
+                text=("alpha bravo charlie delta echo foxtrot " * 1500).strip(),
+                sender_name="A",
+            ),
+        ]
         chunks = build_chunks(
             msgs,
             model="gpt-4o-mini",
             system_prompt="",
             user_overhead="",
-            output_budget=0,
-            safety_margin=0,
+            output_budget=200,
+            safety_margin=200,
             max_chunk_input_tokens=2000,
         )
-    assert chunks, "chunker should still emit a chunk so caller sees the failure surface"
+    finally:
+        _formatter._BODY_CAP = original_cap
+    assert chunks, "chunker should emit at least one chunk after split/truncate"
     out = capsys.readouterr().out + capsys.readouterr().err
-    assert "message_exceeds_budget" in out
+    # Either a clean sentence split OR a mid-sentence truncate must be
+    # logged — both are valid outcomes; the precise pick depends on
+    # the input shape.
+    assert "chunker.message_split" in out or "chunker.message_truncated" in out
 
 
 # ---------------------------------------------------------------------
