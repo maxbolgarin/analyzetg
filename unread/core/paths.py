@@ -153,6 +153,18 @@ def default_backups_dir() -> Path:
     return storage_dir() / "backups"
 
 
+def default_log_path() -> Path:
+    """Suggested location for the optional rotating file log.
+
+    Not the default for `Settings.logging.file_path` — the user opts in
+    by setting `[logging] file_path = "..."` in `config.toml`. This
+    helper is here so any UI / wizard / docstring that wants to suggest
+    a path uses the same shape (`<install>/storage/unread.log`) instead
+    of hard-coding it.
+    """
+    return storage_dir() / "unread.log"
+
+
 def default_config_path() -> Path:
     return unread_home() / "config.toml"
 

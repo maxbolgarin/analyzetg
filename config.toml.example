@@ -291,3 +291,12 @@ output = 0.40
 
 # [storage]
 # data_path = "storage/data.sqlite"
+
+# ==================================================================== Logging
+
+# [logging]
+# Path to a file where structured logs are appended for production
+# debugging (rotated). Empty / omitted = terminal-only.
+# file_path = "~/.unread/storage/unread.log"
+# file_max_bytes = 10000000  # 10 MB before rotation
+# file_backup_count = 3
