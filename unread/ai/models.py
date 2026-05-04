@@ -44,21 +44,94 @@ class ModelInfo:
     # chunker sizes prompts correctly for Claude / Gemini, not just
     # OpenAI. Refreshed against vendor docs 2026-05-01.
     context_window: int = 0
+    # Hard cap on a single completion's `max_tokens` (output tokens).
+    # 0 means "unknown — use the orchestrator's 16k fallback". Used by
+    # `analyzer.openai_client.chat_complete` to bound the truncation
+    # retry: bumping above the per-model cap just guarantees a 4xx after
+    # the user already paid for the prompt (e.g. Gemini Flash caps at
+    # 8192 — doubling 4000→8000 is fine, doubling 5000→10000 is not).
+    # Audio / vision-only entries leave this at 0; they're never used
+    # for chat completions.
+    max_output_tokens: int = 0
+    # OpenAI reasoning-class models (o-series, gpt-5 family, including
+    # the mini / nano variants) reject any `temperature` other than the
+    # default `1.0` with a 400. The OpenAI adapter drops `temperature`
+    # from the request when this flag is True. Anthropic / Google models
+    # leave this False; their reasoning toggles are different shapes
+    # (extended thinking, etc.) and don't constrain `temperature`.
+    reasoning: bool = False
 
 
 # ----------------------- OpenAI (refreshed 2026-05-01) ---------------------
 
 _OPENAI_MODELS: tuple[ModelInfo, ...] = (
-    ModelInfo("gpt-5.5", "GPT-5.5 — flagship (1M ctx)", "chat", 5.00, 0.50, 30.00, context_window=1_000_000),
-    ModelInfo("gpt-5.4", "GPT-5.4 — heavy reasoning", "chat", 2.50, 0.25, 15.00, context_window=1_000_000),
-    ModelInfo("gpt-5.4-mini", "GPT-5.4 mini — balanced", "chat", 0.75, 0.075, 4.50, context_window=400_000),
-    ModelInfo("gpt-5.4-nano", "GPT-5.4 nano — cheapest", "filter", 0.20, 0.02, 1.25, context_window=400_000),
-    ModelInfo("gpt-4o", "GPT-4o — previous gen", "chat", 2.50, 1.25, 10.00, context_window=128_000),
     ModelInfo(
-        "gpt-4o-mini", "GPT-4o mini — vision default", "vision", 0.15, 0.075, 0.60, context_window=128_000
+        "gpt-5.5",
+        "GPT-5.5 — flagship (1M ctx)",
+        "chat",
+        5.00,
+        0.50,
+        30.00,
+        context_window=1_000_000,
+        max_output_tokens=16_384,
+        reasoning=True,
+    ),
+    ModelInfo(
+        "gpt-5.4",
+        "GPT-5.4 — heavy reasoning",
+        "chat",
+        2.50,
+        0.25,
+        15.00,
+        context_window=1_000_000,
+        max_output_tokens=16_384,
+        reasoning=True,
+    ),
+    ModelInfo(
+        "gpt-5.4-mini",
+        "GPT-5.4 mini — balanced",
+        "chat",
+        0.75,
+        0.075,
+        4.50,
+        context_window=400_000,
+        max_output_tokens=16_384,
+        reasoning=True,
+    ),
+    ModelInfo(
+        "gpt-5.4-nano",
+        "GPT-5.4 nano — cheapest",
+        "filter",
+        0.20,
+        0.02,
+        1.25,
+        context_window=400_000,
+        max_output_tokens=16_384,
+        reasoning=True,
+    ),
+    ModelInfo(
+        "gpt-4o",
+        "GPT-4o — previous gen",
+        "chat",
+        2.50,
+        1.25,
+        10.00,
+        context_window=128_000,
+        max_output_tokens=16_384,
+    ),
+    ModelInfo(
+        "gpt-4o-mini",
+        "GPT-4o mini — vision default",
+        "vision",
+        0.15,
+        0.075,
+        0.60,
+        context_window=128_000,
+        max_output_tokens=16_384,
     ),
     # Audio. `input_price` carries $/minute; cached/output are unused;
-    # context window is irrelevant (file-based input).
+    # context window is irrelevant (file-based input). `max_output_tokens`
+    # left at 0 since the chat orchestrator never picks an audio model.
     ModelInfo("gpt-4o-mini-transcribe", "GPT-4o mini transcribe", "audio", 0.003),
     ModelInfo("gpt-4o-transcribe", "GPT-4o transcribe", "audio", 0.006),
     ModelInfo("whisper-1", "Whisper v1", "audio", 0.006),
@@ -76,6 +149,7 @@ _ANTHROPIC_MODELS: tuple[ModelInfo, ...] = (
         0.50,
         25.00,
         context_window=1_000_000,
+        max_output_tokens=16_384,
     ),
     ModelInfo(
         "claude-sonnet-4-6",
@@ -85,6 +159,7 @@ _ANTHROPIC_MODELS: tuple[ModelInfo, ...] = (
         0.30,
         15.00,
         context_window=200_000,
+        max_output_tokens=16_384,
     ),
     ModelInfo(
         "claude-haiku-4-5",
@@ -94,6 +169,7 @@ _ANTHROPIC_MODELS: tuple[ModelInfo, ...] = (
         0.10,
         5.00,
         context_window=200_000,
+        max_output_tokens=8_192,
     ),
 )
 
@@ -113,6 +189,7 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
         0.50,
         12.00,
         context_window=1_000_000,
+        max_output_tokens=32_768,
     ),
     ModelInfo(
         "gemini-3.1-flash-lite-preview",
@@ -122,6 +199,7 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
         0.0625,
         1.50,
         context_window=1_000_000,
+        max_output_tokens=8_192,
     ),
     ModelInfo(
         "gemini-2.5-pro",
@@ -131,6 +209,7 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
         0.31,
         10.00,
         context_window=1_000_000,
+        max_output_tokens=32_768,
     ),
     ModelInfo(
         "gemini-2.5-flash",
@@ -140,6 +219,7 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
         0.075,
         2.50,
         context_window=1_000_000,
+        max_output_tokens=8_192,
     ),
     ModelInfo(
         "gemini-2.5-flash-lite",
@@ -149,6 +229,7 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
         0.025,
         0.40,
         context_window=1_000_000,
+        max_output_tokens=8_192,
     ),
 )
 
@@ -160,7 +241,22 @@ _GOOGLE_MODELS: tuple[ModelInfo, ...] = (
 # other vendor/model alias.
 
 _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
-    ModelInfo("openai/gpt-5.5", "OpenRouter → GPT-5.5", "chat", 5.00, 0.50, 30.00, context_window=1_000_000),
+    # OpenRouter aliases mirror the underlying model's max_output_tokens
+    # cap (claude-opus → 16384, gemini-flash → 8192, etc.) — the router
+    # forwards the request to the upstream vendor whose limits are what
+    # actually matter. `reasoning=True` for the gpt-5 aliases for the
+    # same reason: OpenRouter routes them to OpenAI's reasoning endpoint.
+    ModelInfo(
+        "openai/gpt-5.5",
+        "OpenRouter → GPT-5.5",
+        "chat",
+        5.00,
+        0.50,
+        30.00,
+        context_window=1_000_000,
+        max_output_tokens=16_384,
+        reasoning=True,
+    ),
     ModelInfo(
         "openai/gpt-5.4-mini",
         "OpenRouter → GPT-5.4 mini",
@@ -169,6 +265,8 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.075,
         4.50,
         context_window=400_000,
+        max_output_tokens=16_384,
+        reasoning=True,
     ),
     ModelInfo(
         "openai/gpt-5.4-nano",
@@ -178,6 +276,8 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.02,
         1.25,
         context_window=400_000,
+        max_output_tokens=16_384,
+        reasoning=True,
     ),
     ModelInfo(
         "anthropic/claude-opus-4-7",
@@ -187,6 +287,7 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.50,
         25.00,
         context_window=1_000_000,
+        max_output_tokens=16_384,
     ),
     ModelInfo(
         "anthropic/claude-sonnet-4-6",
@@ -196,6 +297,7 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.30,
         15.00,
         context_window=200_000,
+        max_output_tokens=16_384,
     ),
     ModelInfo(
         "anthropic/claude-haiku-4-5",
@@ -205,6 +307,7 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.10,
         5.00,
         context_window=200_000,
+        max_output_tokens=8_192,
     ),
     ModelInfo(
         "google/gemini-2.5-flash",
@@ -214,6 +317,7 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.075,
         2.50,
         context_window=1_000_000,
+        max_output_tokens=8_192,
     ),
     ModelInfo(
         "google/gemini-2.5-flash-lite",
@@ -223,6 +327,7 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         0.025,
         0.40,
         context_window=1_000_000,
+        max_output_tokens=8_192,
     ),
 )
 

@@ -167,19 +167,21 @@ async def test_chat_complete_no_retry_when_already_at_cap() -> None:
     repo = _FakeRepo()
     provider = _FakeProvider([_mk_result("partial", truncated=True)])
 
+    # `unknown-model` falls back to the 16k catalog-default cap, so
+    # passing exactly that ceiling skips the retry.
     res = await chat_complete(
         provider,
         repo=repo,
-        model="gpt-5.4",
+        model="unknown-model",
         messages=build_messages("s", "s", "d"),
-        max_tokens=openai_client._MAX_RETRY_TOKENS,  # already at ceiling
+        max_tokens=openai_client._MAX_RETRY_TOKENS_FALLBACK,  # already at ceiling
     )
     assert len(provider.calls) == 1  # no retry
     assert res.truncated is True
 
 
 async def test_chat_complete_retry_caps_at_max() -> None:
-    """Doubled budget is clamped to `_MAX_RETRY_TOKENS`, not doubled past it."""
+    """Doubled budget is clamped to the per-model cap, not doubled past it."""
     repo = _FakeRepo()
     provider = _FakeProvider(
         [
@@ -188,19 +190,83 @@ async def test_chat_complete_retry_caps_at_max() -> None:
         ]
     )
 
-    # Start just below the cap so doubling would exceed it.
-    below_cap = openai_client._MAX_RETRY_TOKENS - 1000
+    # `unknown-model` uses the 16k fallback cap. Start just below it so
+    # doubling would exceed.
+    below_cap = openai_client._MAX_RETRY_TOKENS_FALLBACK - 1000
     await chat_complete(
         provider,
         repo=repo,
-        model="gpt-5.4",
+        model="unknown-model",
         messages=build_messages("s", "s", "d"),
         max_tokens=below_cap,
     )
     seen = [c["max_tokens"] for c in provider.calls]
     assert seen[0] == below_cap
-    # Retry is clamped to _MAX_RETRY_TOKENS (not below_cap * 2).
-    assert seen[1] == openai_client._MAX_RETRY_TOKENS
+    # Retry is clamped to the fallback cap (not below_cap * 2).
+    assert seen[1] == openai_client._MAX_RETRY_TOKENS_FALLBACK
+
+
+# --- per-model truncation-retry cap -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model, expected_cap",
+    [
+        # Claude Haiku 4.5: caps at 8192 output tokens.
+        ("claude-haiku-4-5", 8192),
+        # Gemini 2.5 Flash: also caps at 8192.
+        ("gemini-2.5-flash", 8192),
+        # GPT-5.4 mini: 16384 (the catalog ceiling for OpenAI chat models).
+        ("gpt-5.4-mini", 16384),
+    ],
+)
+async def test_chat_complete_retry_cap_per_model(model: str, expected_cap: int) -> None:
+    """Retry bump is bounded by the per-model `max_output_tokens` cap.
+
+    Passing a budget below the model's cap, the orchestrator should
+    bump up to (at most) `expected_cap` — never higher, even if doubling
+    `max_tokens` would exceed it.
+    """
+    repo = _FakeRepo()
+    provider = _FakeProvider(
+        [
+            _mk_result("partial", truncated=True),
+            _mk_result("done", truncated=False),
+        ]
+    )
+    # Start just below the per-model cap so doubling overshoots.
+    start = expected_cap - 100
+    await chat_complete(
+        provider,
+        repo=repo,
+        model=model,
+        messages=build_messages("s", "s", "d"),
+        max_tokens=start,
+    )
+    bumped = [c["max_tokens"] for c in provider.calls][1]
+    assert bumped == expected_cap, f"{model}: bumped to {bumped}, expected cap {expected_cap}"
+
+
+async def test_chat_complete_disable_truncation_retry() -> None:
+    """`disable_truncation_retry=True` surfaces the truncated response without a second call."""
+    repo = _FakeRepo()
+    # Only one scripted result — if a retry happens, FakeProvider raises.
+    provider = _FakeProvider([_mk_result("cut off", truncated=True)])
+
+    res = await chat_complete(
+        provider,
+        repo=repo,
+        model="gpt-5.4-mini",
+        messages=build_messages("s", "s", "d"),
+        max_tokens=1000,
+        disable_truncation_retry=True,
+    )
+    assert res.truncated is True
+    assert res.text == "cut off"
+    # Critical: no second call. With the retry path active, FakeProvider
+    # would have raised AssertionError on the empty results queue.
+    assert len(provider.calls) == 1
+    assert len(repo.calls) == 1
 
 
 # --- regression: usage log includes provider name ----------------------

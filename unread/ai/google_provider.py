@@ -27,7 +27,11 @@ from __future__ import annotations
 import asyncio
 import random
 
-from unread.ai.providers import ChatResult, ProviderUnavailableError
+from unread.ai.providers import (
+    ChatResult,
+    ProviderSafetyBlockedError,
+    ProviderUnavailableError,
+)
 from unread.util.flood import _user_visible_retry_status
 from unread.util.logging import get_logger
 
@@ -135,25 +139,48 @@ class GoogleProvider:
             raise RuntimeError("Gemini call exhausted retries without a response")
 
         finish_reason = ""
+        safety_ratings: tuple = ()
         candidates = getattr(resp, "candidates", None) or []
         if candidates:
             finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
+            raw_ratings = getattr(candidates[0], "safety_ratings", None) or ()
+            # Snapshot ratings into a small tuple of (category, probability)
+            # so callers don't drag the SDK type through the rest of the
+            # codebase. `category` and `probability` are enums in the
+            # genai SDK; `str(...)` flattens them to their canonical name.
+            safety_ratings = tuple(
+                (str(getattr(r, "category", "")), str(getattr(r, "probability", ""))) for r in raw_ratings
+            )
 
         # Gemini sets `finish_reason` to `SAFETY` / `RECITATION` / `OTHER`
         # when it refuses to emit content; in those cases `resp.text`
-        # *raises* a `ValueError` rather than returning empty. Without
-        # the try-block, a single safety-blocked chunk crashed the
-        # entire map-reduce gather. Surface it as empty text + a
-        # warning, mark `truncated=False` so the orchestrator doesn't
-        # retry with a doubled budget (which would refuse identically).
+        # *raises* a `ValueError` rather than returning empty. Convert
+        # the bare ValueError into a typed
+        # :class:`ProviderSafetyBlockedError` so the orchestrator can
+        # surface a structured user-visible status instead of treating
+        # this as a generic crash. Safety blocks aren't transient — the
+        # orchestrator must NOT retry with a doubled budget (it would
+        # refuse identically).
         try:
             text = resp.text or ""
-        except (ValueError, AttributeError) as e:
+        except ValueError as e:
             log.warning(
                 "google.refusal",
                 finish_reason=finish_reason or "unknown",
-                err=type(e).__name__,
+                ratings=safety_ratings,
             )
+            raise ProviderSafetyBlockedError(
+                f"Gemini refused to emit content (finish_reason={finish_reason or 'unknown'}).",
+                reason=finish_reason or "unknown",
+                ratings=safety_ratings,
+                provider=self.name,
+            ) from e
+        except AttributeError:
+            # Defensive: `resp.text` is the documented accessor but a
+            # malformed response (e.g. no candidates at all) can omit
+            # the property entirely. Treat as empty rather than
+            # crashing — keeps map-reduce alive when one chunk drops
+            # an obviously broken candidate.
             text = ""
 
         usage = getattr(resp, "usage_metadata", None)

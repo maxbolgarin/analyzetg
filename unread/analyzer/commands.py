@@ -378,6 +378,7 @@ async def cmd_analyze(
     language: str | None = None,
     content_language: str | None = None,
     youtube_source: str = "auto",
+    disable_truncation_retry: bool = False,
 ) -> None:
     # The CLI surface exposes `--no-save` as the explicit "skip file"
     # flag; the legacy `--console`/`-c` and `--save`/`-s` map onto the
@@ -488,6 +489,7 @@ async def cmd_analyze(
             folder=folder,
             language=effective_language,
             content_language=effective_content_language,
+            disable_truncation_retry=disable_truncation_retry,
         )
         return
     # No ref → interactive wizard (pick chat → thread → preset → period → run).
@@ -864,6 +866,7 @@ async def cmd_analyze(
                 enrich_opts=single_enrich,
                 language=effective_language,
                 content_language=effective_content_language,
+                disable_truncation_retry=disable_truncation_retry,
             )
             return
 
@@ -900,6 +903,7 @@ async def cmd_analyze(
                 yes=yes,
                 language=effective_language,
                 content_language=effective_content_language,
+                disable_truncation_retry=disable_truncation_retry,
             )
             return
 
@@ -1014,6 +1018,7 @@ async def cmd_analyze(
             topic_markers=topic_markers,
             language=effective_language,
             content_language=effective_content_language,
+            disable_truncation_retry=disable_truncation_retry,
         )
 
 
@@ -1039,6 +1044,7 @@ async def _run_single_msg(
     enrich_opts: EnrichOpts | None = None,
     language: str = "en",
     content_language: str = "en",
+    disable_truncation_retry: bool = False,
 ) -> None:
     """Analyze exactly one message.
 
@@ -1051,7 +1057,9 @@ async def _run_single_msg(
     from unread.tg.sync import normalize
 
     # Try local DB first (use thread_id=None so topic filter doesn't miss it).
-    existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
+    existing = [
+        m async for m in repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
+    ]
     if not existing:
         console.print(f"[grey70]{_tf('fetching_message', msg_id=msg_id)}[/]")
         tel_msg = await client.get_messages(chat_id, ids=msg_id)
@@ -1065,7 +1073,12 @@ async def _run_single_msg(
             source_kind="topic" if thread_id else "chat",
         )
         await repo.upsert_messages([normalize(tel_msg, sub)])
-        existing = await repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
+        existing = [
+            m
+            async for m in repo.iter_messages(
+                chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id
+            )
+        ]
         if not existing:
             console.print(f"[red]{_tf('failed_persist_msg', msg_id=msg_id)}[/]")
             raise typer.Exit(2)
@@ -1130,6 +1143,7 @@ async def _run_single_msg(
         max_msg_id=msg_id,
         enrich=enrich_opts,
         source_kind=inferred_source_kind,
+        disable_truncation_retry=disable_truncation_retry,
     )
     # Pass thread_id=None: msg_id is chat-unique; thread filter would risk
     # excluding a forum-topic message we just fetched outside the subscription.
@@ -1187,6 +1201,7 @@ async def _run_single(
     yes: bool = False,
     language: str = "en",
     content_language: str = "en",
+    disable_truncation_retry: bool = False,
 ) -> None:
     """Analyze one chat or one thread via the shared pipeline."""
     from unread.core.pipeline import prepare_chat_run
@@ -1338,6 +1353,7 @@ async def _run_single(
         with_comments=with_comments and prepared.comments_chat_id is not None,
         comments_chat_id=prepared.comments_chat_id,
         redact=redact,
+        disable_truncation_retry=disable_truncation_retry,
     )
     # Build chat_groups when comments were included so the formatter
     # emits a per-chat header + link template per section. Each msg keeps
@@ -1498,6 +1514,7 @@ async def _run_forum_per_topic(
     yes: bool = False,
     language: str = "en",
     content_language: str = "en",
+    disable_truncation_retry: bool = False,
 ) -> None:
     """One analysis per topic; reports land in reports/{chat-slug}/{topic-slug}/analyze/.
 
@@ -1570,6 +1587,7 @@ async def _run_forum_per_topic(
                 since=since_dt,
                 until=until_dt,
                 enrich=effective_enrich,
+                disable_truncation_retry=disable_truncation_retry,
             )
             result = await run_analysis(
                 repo=repo,
@@ -1695,6 +1713,7 @@ async def _run_no_ref(
     yes: bool = False,
     language: str = "en",
     content_language: str = "en",
+    disable_truncation_retry: bool = False,
 ) -> None:
     """No <ref>: list dialogs with unread messages, confirm, analyze each.
 
@@ -1754,6 +1773,7 @@ async def _run_no_ref(
             stamp=stamp,
             language=language,
             content_language=content_language,
+            disable_truncation_retry=disable_truncation_retry,
         )
         return
 
@@ -1783,6 +1803,7 @@ async def _run_no_ref(
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 enrich=effective_enrich,
+                disable_truncation_retry=disable_truncation_retry,
             )
             result = await run_analysis(
                 repo=repo,
@@ -1859,6 +1880,7 @@ async def _run_multichat_batch(
     stamp: str,
     language: str,
     content_language: str,
+    disable_truncation_retry: bool = False,
 ) -> None:
     """Cross-chat batch flow: gather messages across all selected chats
     and run ONE analysis with `chat_groups` so the LLM sees per-chat
@@ -1918,6 +1940,7 @@ async def _run_multichat_batch(
         include_transcripts=include_transcripts,
         min_msg_chars=min_msg_chars,
         enrich=enrich_opts,
+        disable_truncation_retry=disable_truncation_retry,
     )
     primary_chat_id = next(iter(chat_groups))
     primary_meta = chat_groups[primary_chat_id]
@@ -2424,6 +2447,7 @@ async def run_all_unread_analyze(
     yes: bool = False,
     language: str | None = None,
     content_language: str | None = None,
+    disable_truncation_retry: bool = False,
 ) -> None:
     """Public: run the batch-across-all-unread-chats flow (was the old no-ref default).
 
@@ -2453,6 +2477,7 @@ async def run_all_unread_analyze(
             folder=folder,
             language=lang,
             content_language=clang,
+            disable_truncation_retry=disable_truncation_retry,
         )
 
 

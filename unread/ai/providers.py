@@ -46,6 +46,32 @@ class ProviderUnavailableError(RuntimeError):
     """Raised when an adapter can't be constructed (missing key/SDK)."""
 
 
+class ProviderSafetyBlockedError(RuntimeError):
+    """Raised when a provider refused to emit content for safety reasons.
+
+    Surfaced today by :class:`unread.ai.google_provider.GoogleProvider`
+    when Gemini sets ``finish_reason`` to ``SAFETY`` / ``RECITATION`` /
+    ``OTHER`` (the SDK *raises* ``ValueError`` on ``resp.text`` in those
+    cases). Carries the structured reason + safety_ratings so the
+    orchestrator can render a useful status instead of a generic crash,
+    and a clean message for surfacing to the user. Safety blocks aren't
+    transient — the orchestrator should NOT retry on this.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "",
+        ratings: tuple = (),
+        provider: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.ratings = ratings
+        self.provider = provider
+
+
 @runtime_checkable
 class ChatProvider(Protocol):
     """Vendor-agnostic chat completion contract.

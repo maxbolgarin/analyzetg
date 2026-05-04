@@ -2098,6 +2098,12 @@ def _root(
         "--youtube-source",
         help="YouTube transcript source: auto (captions, fallback to Whisper), captions, or audio (always Whisper).",
     ),
+    no_truncation_retry: bool = typer.Option(
+        False,
+        "--no-truncation-retry",
+        "-T",
+        help="Don't retry on truncated output. Default: bump max_tokens (capped per model) and re-bill the full prompt.",
+    ),
 ) -> None:
     """Default action: analyze a chat / YouTube video / web page.
 
@@ -2220,6 +2226,7 @@ def _root(
         language=language,
         content_language=content_language,
         youtube_source=youtube_source,
+        disable_truncation_retry=no_truncation_retry,
     )
 
 
@@ -2556,7 +2563,10 @@ async def _cache_export(
     settings = get_settings()
     days = _parse_duration_days(older_than) if older_than else None
     async with open_repo(settings.storage.data_path) as repo:
-        rows = await repo.cache_iter_full(preset=preset, model=model, older_than_days=days)
+        # cache_iter_full streams to keep large result blobs out of one
+        # giant list; export wants the full list for its empty-check +
+        # double iteration, so materialize here.
+        rows = [r async for r in repo.cache_iter_full(preset=preset, model=model, older_than_days=days)]
 
     if not rows:
         console.print(f"[yellow]{_t('cli_export_no_matches')}[/]")
