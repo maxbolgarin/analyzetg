@@ -145,14 +145,14 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     """
     from unread.db.repo import read_data_db_secrets_sync
     from unread.security.crypto import (
-        ENCRYPTED_PREFIX_V2,
         PassphraseError,
         decrypt,
         decrypt_with_key,
+        envelope_version,
         is_encrypted,
         load_cached_key,
         lookup_key_for_salt,
-        migrate_v1_to_v2_with_key,
+        migrate_to_v3_with_key,
         parse_envelope,
         remember_key_for_salt,
     )
@@ -164,10 +164,10 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     install_salt = _read_install_salt(db_path)
     out: dict[str, str] = {}
     passphrase: str | None = None
-    # Pairs of (slot_name, new_v2_blob) collected when we successfully
-    # decrypt a v1 row. Re-encryption uses the same key/salt so we can
-    # batch the rewrite at the end of the read.
-    pending_v2_rewrites: dict[str, str] = {}
+    # (slot_name, new_v3_blob) pairs collected when we successfully
+    # decrypt a pre-v3 row. Re-encryption reuses the same key/salt so
+    # we can batch the rewrite at the end of the read.
+    pending_v3_rewrites: dict[str, str] = {}
 
     # Bring the cross-invocation cache into the in-process map up front
     # so every per-row lookup below sees it. Without this the disk
@@ -188,10 +188,13 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
             out[key] = value
             continue
         env = parse_envelope(value)
-        is_v1 = not value.startswith(ENCRYPTED_PREFIX_V2)
-        # `slot_name=key` is the AAD binding for v2 envelopes. Passing
-        # it for v1 reads is harmless (decrypt ignores it when the
-        # prefix is `$u1$`) and means we don't need a per-row branch.
+        # Anything below v3 needs a rewrite. v1 has no slot binding;
+        # v2 binds slot but not framing — both are caught here and
+        # upgraded once the decrypt succeeds.
+        needs_v3_upgrade = envelope_version(value) < 3
+        # `slot_name=key` is the AAD binding for v2 / v3 envelopes.
+        # Passing it for v1 reads is harmless (decrypt ignores it when
+        # the prefix is `$u1$`) and means we don't need a per-row branch.
         cached_key = lookup_key_for_salt(env.salt)
         used_key: bytes | None = None
         if cached_key is not None:
@@ -224,19 +227,19 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
 
                 used_key = derive_key(passphrase, env.salt)
                 remember_key_for_salt(env.salt, used_key)
-        # Pre-prod blocker #2: any successfully-decrypted v1 row gets
-        # rewritten as v2 (slot-bound AAD) at the end of the read. This
-        # is idempotent — once every row is v2, this branch never runs
-        # again for the install. Failure to derive the new blob is
-        # logged but doesn't fail the read; the in-memory plaintext
+        # Auto-migration: any successfully-decrypted v1 / v2 row gets
+        # rewritten as v3 (slot + framing-bound AAD) at the end of the
+        # read. Idempotent — once every row is v3 this branch never
+        # runs again for the install. Failure to derive the new blob
+        # is logged but doesn't fail the read; the in-memory plaintext
         # the caller asked for is unchanged.
-        if is_v1 and used_key is not None:
+        if needs_v3_upgrade and used_key is not None:
             try:
-                pending_v2_rewrites[key] = migrate_v1_to_v2_with_key(value, used_key, slot_name=key)
+                pending_v3_rewrites[key] = migrate_to_v3_with_key(value, used_key, slot_name=key)
             except (PassphraseError, ValueError) as e:  # pragma: no cover - defensive
                 from unread.util.logging import get_logger
 
-                get_logger(__name__).warning("crypto.aead_v1_migrate_skip", slot=key, err=type(e).__name__)
+                get_logger(__name__).warning("crypto.aead_v3_migrate_skip", slot=key, err=type(e).__name__)
 
     # Zeroize the per-process passphrase once the keys are cached. A
     # later read that doesn't need the passphrase (cached_key hits) is
@@ -246,20 +249,19 @@ def _read_db_secrets_passphrase(db_path: Path) -> dict[str, str]:
     if passphrase is not None:
         _PROCESS_PASSPHRASE = None
 
-    if pending_v2_rewrites:
-        _persist_v2_rewrites_sync(db_path, pending_v2_rewrites)
+    if pending_v3_rewrites:
+        _persist_v3_rewrites_sync(db_path, pending_v3_rewrites)
 
     return out
 
 
-def _persist_v2_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
-    """Write a batch of v1→v2 envelope upgrades back to ``data.sqlite::secrets``.
+def _persist_v3_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
+    """Write a batch of v1/v2→v3 envelope upgrades back to ``data.sqlite::secrets``.
 
-    Pre-prod blocker #2 (auto-migration): runs at the end of a
-    successful passphrase decrypt pass, never blocking the caller. A
-    write error here is logged and swallowed — the in-memory plaintext
-    the caller asked for is unaffected, and the next read attempt will
-    pick up where this one left off.
+    Runs at the end of a successful passphrase decrypt pass, never
+    blocking the caller. A write error here is logged and swallowed —
+    the in-memory plaintext the caller asked for is unaffected, and
+    the next read attempt will pick up where this one left off.
 
     Uses sync sqlite3 because the read path that calls us is sync (it
     runs at `config.load_settings` time, which itself runs at
@@ -278,7 +280,7 @@ def _persist_v2_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
         if slot not in _ALLOWLIST:
             from unread.util.logging import get_logger
 
-            get_logger(__name__).warning("crypto.aead_v1_migrate_unknown_slot", slot=slot)
+            get_logger(__name__).warning("crypto.aead_v3_migrate_unknown_slot", slot=slot)
             return
 
     now_iso = datetime.now(UTC).isoformat()
@@ -288,7 +290,7 @@ def _persist_v2_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
     except sqlite3.Error as e:
         from unread.util.logging import get_logger
 
-        get_logger(__name__).warning("crypto.aead_v1_migrate_db_open", err=type(e).__name__)
+        get_logger(__name__).warning("crypto.aead_v3_migrate_db_open", err=type(e).__name__)
         return
     try:
         try:
@@ -304,7 +306,7 @@ def _persist_v2_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
             from unread.util.logging import get_logger
 
             get_logger(__name__).warning(
-                "crypto.aead_v1_migrate_db_write", err=type(e).__name__, count=len(rows)
+                "crypto.aead_v3_migrate_db_write", err=type(e).__name__, count=len(rows)
             )
             return
     finally:
@@ -312,7 +314,7 @@ def _persist_v2_rewrites_sync(db_path: Path, rewrites: dict[str, str]) -> None:
 
     from unread.util.logging import get_logger
 
-    get_logger(__name__).info("crypto.aead_v1_migrated", count=len(rows))
+    get_logger(__name__).info("crypto.aead_v3_migrated", count=len(rows))
 
 
 def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]

@@ -137,6 +137,39 @@ def reports_dir() -> Path:
     return unread_home() / "reports"
 
 
+def assert_under_reports(path: Path) -> Path:
+    """Resolve `path` and verify it lives under `reports_dir()`.
+
+    Defense-in-depth for the *implicit* output-path computations
+    (no ``--output`` from the user). The slugify pipeline already
+    strips path separators, but this guard catches future bugs where
+    a title containing path-traversal bytes ever slipped through —
+    or a unicode-escape that splits weirdly on a future Python.
+
+    Explicit ``--output`` paths must NOT be routed through this
+    helper: the user is the authority on where their dump lands.
+
+    Uses :func:`os.path.realpath` instead of :meth:`Path.resolve`
+    because the latter behaves inconsistently across platforms when
+    the rightmost component doesn't exist yet (macOS's
+    ``/var`` → ``/private/var`` symlink, in particular). Reports
+    directories are usually built on demand, so the rightmost
+    component frequently doesn't exist at validation time.
+    """
+    resolved = Path(os.path.realpath(str(path)))
+    base = Path(os.path.realpath(str(reports_dir())))
+    try:
+        is_under = resolved.is_relative_to(base)
+    except ValueError:
+        is_under = False
+    if not is_under:
+        raise ValueError(f"computed output path escapes reports dir: {resolved} not under {base}")
+    # Return the input path unchanged: callers (and tests) expect the
+    # un-symlink-resolved form so `path.relative_to(reports_dir())`
+    # round-trips. Validation happens above against the realpath form.
+    return path
+
+
 def default_session_path() -> Path:
     return storage_dir() / "session.sqlite"
 

@@ -148,8 +148,11 @@ async def enrich_audio(
             )
             return None
         produced.append(downloaded)
+        # gpt-4o-mini-transcribe / gpt-4o-transcribe reject opus voice
+        # files; force the transcoder to re-encode them as mp3 first.
+        prefer_mp3 = used_model in {"gpt-4o-mini-transcribe", "gpt-4o-transcribe"}
         try:
-            parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir)
+            parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir, prefer_mp3=prefer_mp3)
         except FfmpegMissing as e:
             log.warning("enrich.audio.skipped_ffmpeg", err=str(e))
             return None

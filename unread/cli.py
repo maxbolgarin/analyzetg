@@ -213,6 +213,26 @@ def _run(coro) -> None:
 
     from unread.tg.client import TelegramSessionExpired, exit_session_expired
 
+    # Sync-context guard: if a future caller routes through `_run` from
+    # inside an already-running event loop, `asyncio.run` raises a
+    # confusing late-stage RuntimeError. Detect upfront so the message
+    # names the actual misuse (sync-only entry point) instead of leaking
+    # asyncio internals.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        # Close the unconsumed coroutine so we don't trigger a
+        # "coroutine was never awaited" RuntimeWarning on top of the
+        # error we're raising.
+        with contextlib.suppress(Exception):
+            coro.close()
+        raise RuntimeError(
+            "_run was called inside a running event loop; this CLI entry "
+            "point must be invoked from sync context only."
+        )
+
     try:
         asyncio.run(coro)
     except TelegramSessionExpired:

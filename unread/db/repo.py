@@ -80,11 +80,45 @@ def _assert_safe_column_definition(definition: str) -> None:
 
 
 class Repo:
-    """Async repository. Construct with `await Repo.open(path)`."""
+    """Async repository. Construct with `await Repo.open(path)`.
+
+    Concurrency invariant: a single :class:`aiosqlite.Connection` is
+    shared across all coroutines that touch this Repo. Single-statement
+    writes are atomic by virtue of SQLite's per-connection writer lock
+    + aiosqlite's serial command queue. Multi-statement writes that
+    must be observed atomically by concurrent readers go through
+    :meth:`_transaction` — it acquires :attr:`_write_lock` and wraps
+    the body in ``BEGIN IMMEDIATE`` / ``COMMIT``. Without that wrapper,
+    SQLite opens an implicit transaction per statement and a reader
+    in another coroutine can see the half-applied state between the
+    two writes.
+    """
 
     def __init__(self, conn: aiosqlite.Connection, path: Path) -> None:
         self._conn = conn
         self._path = path
+        # Serializes BEGIN IMMEDIATE blocks so two concurrent
+        # `_transaction()` calls don't race for the writer lock and
+        # produce SQLITE_BUSY errors. Reads still proceed in parallel.
+        self._write_lock: asyncio.Lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[None]:
+        """Acquire the write lock and run the body inside ``BEGIN IMMEDIATE``.
+
+        Use this for any method that performs two or more writes whose
+        atomicity matters to concurrent readers. Single-statement writes
+        do NOT need this wrapper — SQLite already makes them atomic.
+        """
+        async with self._write_lock:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                await self._conn.commit()
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await self._conn.rollback()
+                raise
 
     @classmethod
     async def open(cls, path: Path | str) -> Repo:
@@ -320,7 +354,6 @@ class Repo:
             {"transcript_timed_json": "TEXT"},
         )
         await self._migrate_legacy_media_transcripts()
-        await self._conn.commit()
 
     # `CREATE TABLE foo (...);` block — captures table name and the
     # column list. We tolerate `IF NOT EXISTS` and surrounding whitespace.
@@ -548,23 +581,27 @@ class Repo:
         await self._conn.commit()
 
     async def remove_subscription(self, chat_id: int, thread_id: int, purge_messages: bool = False) -> None:
-        await self._conn.execute(
-            "DELETE FROM subscriptions WHERE chat_id=? AND thread_id=?",
-            (chat_id, thread_id),
-        )
-        await self._conn.execute(
-            "DELETE FROM sync_state WHERE chat_id=? AND thread_id=?",
-            (chat_id, thread_id),
-        )
-        if purge_messages:
-            if thread_id == 0:
-                await self._conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
-            else:
-                await self._conn.execute(
-                    "DELETE FROM messages WHERE chat_id=? AND thread_id=?",
-                    (chat_id, thread_id),
-                )
-        await self._conn.commit()
+        # Multi-statement: subscription + sync_state + (optional)
+        # messages must be removed atomically — a reader that catches
+        # us mid-flight would otherwise see "subscription gone but
+        # messages still present" or vice versa.
+        async with self._transaction():
+            await self._conn.execute(
+                "DELETE FROM subscriptions WHERE chat_id=? AND thread_id=?",
+                (chat_id, thread_id),
+            )
+            await self._conn.execute(
+                "DELETE FROM sync_state WHERE chat_id=? AND thread_id=?",
+                (chat_id, thread_id),
+            )
+            if purge_messages:
+                if thread_id == 0:
+                    await self._conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+                else:
+                    await self._conn.execute(
+                        "DELETE FROM messages WHERE chat_id=? AND thread_id=?",
+                        (chat_id, thread_id),
+                    )
 
     @staticmethod
     def _row_to_sub(row: aiosqlite.Row) -> Subscription:

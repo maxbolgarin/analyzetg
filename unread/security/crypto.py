@@ -60,10 +60,20 @@ ENCRYPTED_PREFIX = "$u1$"
 # `unread:v2:<slot_name>` so the ciphertext is cryptographically bound
 # to its slot. A swap from `openai.api_key` into `telegram.api_hash`
 # now fails `InvalidTag` on read instead of silently decrypting.
-# Reads accept both prefixes; new writes always use v2 (when the
-# caller can supply `slot_name`).
+# Reads accept both prefixes.
 ENCRYPTED_PREFIX_V2 = "$u2$"
 _AAD_V2_PREFIX = b"unread:v2:"
+
+# v3 envelope: same body layout as v2, but the AEAD `associated_data`
+# also folds in the salt and nonce framing. A tampered envelope where
+# the salt or nonce was swapped now fails `InvalidTag` even when the
+# attacker computed a matching v2 AAD; the framing bytes are part of
+# the integrity check, not just inputs to KDF / cipher. New writes
+# always use v3 when a `slot_name` is supplied. Reads accept v1, v2,
+# and v3; v1/v2 rows auto-migrate to v3 on first successful decrypt
+# (see `unread/secrets.py:_persist_*_rewrites_sync`).
+ENCRYPTED_PREFIX_V3 = "$u3$"
+_AAD_V3_PREFIX = b"unread:v3:"
 
 KEY_LEN = 32
 SALT_LEN = 16
@@ -147,13 +157,19 @@ def _b64decode(text: str) -> bytes:
 
 
 def is_encrypted(value: str | None) -> bool:
-    return bool(value) and (value.startswith(ENCRYPTED_PREFIX) or value.startswith(ENCRYPTED_PREFIX_V2))
+    return bool(value) and (
+        value.startswith(ENCRYPTED_PREFIX)
+        or value.startswith(ENCRYPTED_PREFIX_V2)
+        or value.startswith(ENCRYPTED_PREFIX_V3)
+    )
 
 
 def envelope_version(value: str | None) -> int:
-    """Return 1 for `$u1$`, 2 for `$u2$`, 0 for plaintext / unknown."""
+    """Return 1 for `$u1$`, 2 for `$u2$`, 3 for `$u3$`, 0 for plaintext / unknown."""
     if not value:
         return 0
+    if value.startswith(ENCRYPTED_PREFIX_V3):
+        return 3
     if value.startswith(ENCRYPTED_PREFIX_V2):
         return 2
     if value.startswith(ENCRYPTED_PREFIX):
@@ -170,6 +186,19 @@ def _aad_for(slot_name: str | None) -> bytes | None:
     if not slot_name:
         return None
     return _AAD_V2_PREFIX + slot_name.encode("utf-8")
+
+
+def _aad_for_v3(slot_name: str, salt: bytes, nonce: bytes) -> bytes:
+    """AEAD additional-data binding for the v3 envelope.
+
+    Includes the slot name (defends against slot-swap, like v2) AND
+    the salt + nonce framing (defends against on-disk tampering of
+    the framing bytes). A reader who alters just the salt before the
+    base64 boundary now trips ``InvalidTag`` instead of slipping past
+    the parse layer to the AEAD verify only because the tag still
+    happens to verify under the wrong-key derivation.
+    """
+    return _AAD_V3_PREFIX + slot_name.encode("utf-8") + salt + nonce
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -191,12 +220,13 @@ def encrypt(plaintext: str, passphrase: str, *, slot_name: str | None = None) ->
     Each call generates a fresh salt + nonce so re-encrypting the same
     value produces a different ciphertext.
 
-    `slot_name` opts into the v2 (`$u2$`) envelope: the slot name is
-    bound as AEAD `associated_data` so a copy-paste of the ciphertext
-    into a different slot fails `InvalidTag`. Writers that know which
-    slot they're targeting (`put_secrets`, the session-string write
-    path, `_persist_upgrade`) always pass it. Legacy callers that
-    don't pass `slot_name` keep emitting `$u1$` for backward compat.
+    `slot_name` opts into the v3 (`$u3$`) envelope: the slot name plus
+    the salt + nonce framing are bound as AEAD `associated_data` so
+    both a copy-paste of the ciphertext into a different slot AND a
+    tamper of the framing bytes fail `InvalidTag`. Writers that know
+    which slot they're targeting (`put_secrets`, the session-string
+    write path, `_persist_upgrade`) always pass it. Legacy callers
+    that don't pass `slot_name` keep emitting `$u1$` for backward compat.
     """
     if not plaintext:
         # Encrypting an empty string is a smell — empty values are
@@ -206,10 +236,14 @@ def encrypt(plaintext: str, passphrase: str, *, slot_name: str | None = None) ->
     nonce = _stdsecrets.token_bytes(NONCE_LEN)
     key = _derive_key(passphrase, salt)
     aead = ChaCha20Poly1305(key)
-    aad = _aad_for(slot_name)
+    if slot_name:
+        aad = _aad_for_v3(slot_name, salt, nonce)
+        prefix = ENCRYPTED_PREFIX_V3
+    else:
+        aad = None
+        prefix = ENCRYPTED_PREFIX
     ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=aad)
     blob = salt + nonce + ct
-    prefix = ENCRYPTED_PREFIX_V2 if slot_name else ENCRYPTED_PREFIX
     return f"{prefix}{_b64encode(blob)}"
 
 
@@ -226,7 +260,7 @@ def encrypt_with_key(
     where we encrypt many slots in one go and want amortized cost.
     Caller is responsible for keeping the matching salt around if
     they want decrypt-with-key to work without a re-derivation.
-    `slot_name` enables the v2 envelope (see :func:`encrypt`).
+    `slot_name` enables the v3 envelope (see :func:`encrypt`).
     """
     if len(key) != KEY_LEN:
         raise ValueError(f"key must be {KEY_LEN} bytes")
@@ -236,24 +270,32 @@ def encrypt_with_key(
         raise ValueError(f"salt must be {SALT_LEN} bytes")
     nonce = _stdsecrets.token_bytes(NONCE_LEN)
     aead = ChaCha20Poly1305(key)
-    aad = _aad_for(slot_name)
+    if slot_name:
+        aad = _aad_for_v3(slot_name, salt, nonce)
+        prefix = ENCRYPTED_PREFIX_V3
+    else:
+        aad = None
+        prefix = ENCRYPTED_PREFIX
     ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=aad)
     blob = salt + nonce + ct
-    prefix = ENCRYPTED_PREFIX_V2 if slot_name else ENCRYPTED_PREFIX
     return f"{prefix}{_b64encode(blob)}"
 
 
 def parse_envelope(ciphertext: str) -> CryptoEnvelope:
     """Strip the prefix, decode base64, split into (salt, nonce, ciphertext).
 
-    Accepts either the legacy `$u1$` envelope (no slot binding) or the
-    v2 `$u2$` envelope (slot bound via AEAD `associated_data`). The
-    body layout is identical between the two; the version flag lives
-    in the prefix and the AAD requirement is enforced by the caller.
+    Accepts the legacy `$u1$` envelope (no slot binding), the v2
+    `$u2$` envelope (slot bound via AEAD `associated_data`), and the
+    v3 `$u3$` envelope (slot + salt + nonce all bound via AEAD AAD).
+    The body layout is identical across all three versions; the
+    version flag lives in the prefix and the AAD requirement is
+    enforced by the caller.
     """
     if not is_encrypted(ciphertext):
-        raise NotEncryptedError("missing $u1$/$u2$ prefix; not an encrypted record")
-    if ciphertext.startswith(ENCRYPTED_PREFIX_V2):
+        raise NotEncryptedError("missing $u1$/$u2$/$u3$ prefix; not an encrypted record")
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V3):
+        body = _b64decode(ciphertext[len(ENCRYPTED_PREFIX_V3) :])
+    elif ciphertext.startswith(ENCRYPTED_PREFIX_V2):
         body = _b64decode(ciphertext[len(ENCRYPTED_PREFIX_V2) :])
     else:
         body = _b64decode(ciphertext[len(ENCRYPTED_PREFIX) :])
@@ -265,19 +307,40 @@ def parse_envelope(ciphertext: str) -> CryptoEnvelope:
     return CryptoEnvelope(salt=salt, nonce=nonce, ciphertext=ct)
 
 
-def decrypt(ciphertext: str, passphrase: str, *, slot_name: str | None = None) -> str:
-    """Decrypt a single `$u1$`/`$u2$`-prefixed record.
+def _aad_for_envelope(ciphertext: str, env: CryptoEnvelope, slot_name: str | None) -> bytes | None:
+    """Resolve the AAD that the AEAD verify expects for `ciphertext`.
 
-    Wrong passphrase → ``PassphraseError``. For `$u2$` envelopes the
-    caller MUST supply the matching `slot_name`; without it the AEAD
-    verify fails and the read raises. Reading `$u1$` ignores
-    `slot_name` for back-compat — the legacy envelope has no slot
-    binding to verify against.
+    Centralizes the per-version branching so `decrypt` and
+    `decrypt_with_key` stay in lockstep. v1 envelopes ignore
+    `slot_name` (no binding existed), v2 binds slot only, v3 binds
+    slot + salt + nonce framing.
+    """
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V3):
+        if not slot_name:
+            # v3 always binds the slot. A caller that forgot to pass
+            # one would silently fail with InvalidTag — but the real
+            # bug is upstream, so surface it explicitly.
+            raise PassphraseError("v3 envelope requires slot_name on decrypt")
+        return _aad_for_v3(slot_name, env.salt, env.nonce)
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V2):
+        return _aad_for(slot_name)
+    return None
+
+
+def decrypt(ciphertext: str, passphrase: str, *, slot_name: str | None = None) -> str:
+    """Decrypt a single `$u1$`/`$u2$`/`$u3$`-prefixed record.
+
+    Wrong passphrase → ``PassphraseError``. For `$u2$` and `$u3$`
+    envelopes the caller MUST supply the matching `slot_name`; v3
+    additionally binds the salt + nonce framing into the AEAD AAD, so
+    on-disk tampering of those bytes also raises ``PassphraseError``.
+    Reading `$u1$` ignores `slot_name` for back-compat — the legacy
+    envelope has no slot binding to verify against.
     """
     env = parse_envelope(ciphertext)
     key = _derive_key(passphrase, env.salt)
     aead = ChaCha20Poly1305(key)
-    aad = _aad_for(slot_name) if ciphertext.startswith(ENCRYPTED_PREFIX_V2) else None
+    aad = _aad_for_envelope(ciphertext, env, slot_name)
     try:
         plaintext = aead.decrypt(env.nonce, env.ciphertext, associated_data=aad)
     except InvalidTag as e:
@@ -288,26 +351,51 @@ def decrypt(ciphertext: str, passphrase: str, *, slot_name: str | None = None) -
 def migrate_v1_to_v2_with_key(ciphertext: str, key: bytes, *, slot_name: str) -> str:
     """Re-encrypt a v1 (`$u1$`) blob as v2 with slot-bound AAD.
 
-    Pre-prod blocker #2 (auto-migration): the v2 envelope binds the
-    slot name as AEAD `associated_data` so a copy-paste of the
-    ciphertext into a different slot fails `InvalidTag`. New writes
-    have used v2 since the v2 envelope shipped, but installs upgraded
-    before that change still carry v1 rows. This helper performs the
-    one-shot rewrite.
+    Kept for back-compat with any external caller that hard-coded
+    "migrate to v2"; new code should call :func:`migrate_to_v3_with_key`
+    which targets the current envelope version.
 
-    Salt is preserved across the migration so the cached-key-by-salt
-    machinery (`_PROCESS_KEYS`) keeps amortizing Scrypt across slots
-    that shared a salt. Only the nonce + ciphertext + AAD change.
-
-    Refuses to operate on already-v2 blobs and on plaintext.
+    Salt is preserved across the migration. Refuses already-v2 blobs.
     """
     if not slot_name:
         raise ValueError("migrate_v1_to_v2_with_key requires a non-empty slot_name")
     if not is_encrypted(ciphertext):
         raise ValueError("migrate_v1_to_v2_with_key: input is not encrypted")
-    if ciphertext.startswith(ENCRYPTED_PREFIX_V2):
-        raise ValueError("migrate_v1_to_v2_with_key: input is already v2")
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V2) or ciphertext.startswith(ENCRYPTED_PREFIX_V3):
+        raise ValueError("migrate_v1_to_v2_with_key: input is already v2 or newer")
     plaintext = decrypt_with_key(ciphertext, key)
+    env = parse_envelope(ciphertext)
+    # Force v2 (not v3) so the back-compat semantics stay literal.
+    nonce = _stdsecrets.token_bytes(NONCE_LEN)
+    aead = ChaCha20Poly1305(key)
+    aad = _aad_for(slot_name)
+    ct = aead.encrypt(nonce, plaintext.encode("utf-8"), associated_data=aad)
+    blob = env.salt + nonce + ct
+    return f"{ENCRYPTED_PREFIX_V2}{_b64encode(blob)}"
+
+
+def migrate_to_v3_with_key(ciphertext: str, key: bytes, *, slot_name: str) -> str:
+    """Re-encrypt a v1 or v2 blob as v3 with slot + framing-bound AAD.
+
+    The v3 envelope folds the salt and nonce into the AEAD AAD so any
+    on-disk tamper of the framing trips ``InvalidTag`` instead of
+    being noticed only by the underlying AEAD verify. New writes use
+    v3; this helper performs the one-shot rewrite for installs that
+    still carry v1 / v2 rows from before the upgrade.
+
+    Salt is preserved so the cached-key-by-salt machinery
+    (`_PROCESS_KEYS`) keeps amortizing Scrypt across slots that shared
+    a salt. Only the nonce + ciphertext + AAD change.
+
+    Refuses already-v3 blobs and plaintext.
+    """
+    if not slot_name:
+        raise ValueError("migrate_to_v3_with_key requires a non-empty slot_name")
+    if not is_encrypted(ciphertext):
+        raise ValueError("migrate_to_v3_with_key: input is not encrypted")
+    if ciphertext.startswith(ENCRYPTED_PREFIX_V3):
+        raise ValueError("migrate_to_v3_with_key: input is already v3")
+    plaintext = decrypt_with_key(ciphertext, key, slot_name=slot_name)
     env = parse_envelope(ciphertext)
     return encrypt_with_key(plaintext, key, salt=env.salt, slot_name=slot_name)
 
@@ -321,15 +409,15 @@ def decrypt_with_key(ciphertext: str, key: bytes, *, slot_name: str | None = Non
     distinct salt and reuses it across slots that share that salt
     (the common case — `upgrade` writes all slots with the same salt).
 
-    For `$u2$` envelopes, `slot_name` MUST match the slot the
-    ciphertext was originally written under, otherwise the AEAD
+    For `$u2$` and `$u3$` envelopes, `slot_name` MUST match the slot
+    the ciphertext was originally written under, otherwise the AEAD
     verify fires.
     """
     if len(key) != KEY_LEN:
         raise ValueError(f"key must be {KEY_LEN} bytes")
     env = parse_envelope(ciphertext)
     aead = ChaCha20Poly1305(key)
-    aad = _aad_for(slot_name) if ciphertext.startswith(ENCRYPTED_PREFIX_V2) else None
+    aad = _aad_for_envelope(ciphertext, env, slot_name)
     try:
         plaintext = aead.decrypt(env.nonce, env.ciphertext, associated_data=aad)
     except InvalidTag as e:
@@ -483,6 +571,7 @@ __all__ = [
     "DEFAULT_KEY_CACHE_TTL_SEC",
     "ENCRYPTED_PREFIX",
     "ENCRYPTED_PREFIX_V2",
+    "ENCRYPTED_PREFIX_V3",
     "KEY_LEN",
     "NONCE_LEN",
     "SALT_LEN",
@@ -502,6 +591,7 @@ __all__ = [
     "is_encrypted",
     "load_cached_key",
     "lookup_key_for_salt",
+    "migrate_to_v3_with_key",
     "migrate_v1_to_v2_with_key",
     "parse_envelope",
     "remember_key_for_salt",

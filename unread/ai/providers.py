@@ -136,6 +136,39 @@ def make_chat_provider(settings) -> ChatProvider:  # type: ignore[no-untyped-def
     )
 
 
+def _provider_class_defaults(name: str) -> tuple[str, str]:
+    """Return ``(chat, filter)`` defaults from the adapter's class attrs.
+
+    Reading the class attribute avoids constructing the SDK client just
+    to peek at a hard-coded default — relevant for ``unread --help``,
+    ``unread settings``, and any callsite that resolves the model name
+    without intent to dispatch a request.
+    """
+    if name == "openai":
+        from unread.ai.openai_provider import OpenAIProvider
+
+        return OpenAIProvider.default_chat_model, OpenAIProvider.default_filter_model
+    if name == "openrouter":
+        from unread.ai.openai_provider import OpenRouterProvider
+
+        return OpenRouterProvider.default_chat_model, OpenRouterProvider.default_filter_model
+    if name == "local":
+        from unread.ai.openai_provider import LocalProvider
+
+        return LocalProvider.default_chat_model, LocalProvider.default_filter_model
+    if name == "anthropic":
+        from unread.ai.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider.default_chat_model, AnthropicProvider.default_filter_model
+    if name == "google":
+        from unread.ai.google_provider import GoogleProvider
+
+        return GoogleProvider.default_chat_model, GoogleProvider.default_filter_model
+    from unread.ai.openai_provider import OpenAIProvider
+
+    return OpenAIProvider.default_chat_model, OpenAIProvider.default_filter_model
+
+
 def resolve_chat_model(settings) -> str:  # type: ignore[no-untyped-def]
     """Pick the effective chat model for the active provider.
 
@@ -150,7 +183,7 @@ def resolve_chat_model(settings) -> str:  # type: ignore[no-untyped-def]
     provider_name = (settings.ai.provider or "openai").strip().lower()
     if provider_name == "openai" and settings.openai.chat_model_default:
         return settings.openai.chat_model_default
-    return make_chat_provider(settings).default_chat_model
+    return _provider_class_defaults(provider_name)[0]
 
 
 def resolve_filter_model(settings) -> str:  # type: ignore[no-untyped-def]
@@ -160,4 +193,4 @@ def resolve_filter_model(settings) -> str:  # type: ignore[no-untyped-def]
     provider_name = (settings.ai.provider or "openai").strip().lower()
     if provider_name == "openai" and settings.openai.filter_model_default:
         return settings.openai.filter_model_default
-    return make_chat_provider(settings).default_filter_model
+    return _provider_class_defaults(provider_name)[1]

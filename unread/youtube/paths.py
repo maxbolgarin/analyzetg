@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from unread.core.paths import reports_dir, slugify
+from unread.core.paths import assert_under_reports, reports_dir, slugify
 
 
 def _channel_slug(channel_title: str | None, channel_id: str | None) -> str:
@@ -46,7 +46,7 @@ def youtube_report_path(
     """Default disk path for a YouTube analysis report."""
     when = stamp or datetime.now()
     ts = when.strftime("%Y-%m-%d_%H%M%S")
-    return (
+    return assert_under_reports(
         reports_dir()
         / "youtube"
         / _channel_slug(channel_title, channel_id)
@@ -72,7 +72,7 @@ def youtube_dump_dir(
     """
     when = stamp or datetime.now()
     ts = when.strftime("%Y-%m-%d_%H%M%S")
-    return (
+    return assert_under_reports(
         reports_dir()
         / "youtube"
         / _channel_slug(channel_title, channel_id)

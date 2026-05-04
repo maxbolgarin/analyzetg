@@ -15,6 +15,7 @@ import typer
 from rich.console import Console
 
 from unread.config import get_settings
+from unread.core.paths import assert_under_reports as _assert_under_reports
 from unread.core.paths import compute_window as _compute_window
 from unread.core.paths import has_explicit_period as _has_explicit_period
 from unread.core.paths import parse_ymd as _parse_ymd
@@ -1106,7 +1107,7 @@ def _default_output_path(title: str | None, fmt: str) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
     # {reports_dir}/{chat-slug}/dump/dump-{stamp}.{ext}
-    return _reports_dir() / slug / "dump" / f"dump-{stamp}.{ext}"
+    return _assert_under_reports(_reports_dir() / slug / "dump" / f"dump-{stamp}.{ext}")
 
 
 def _print_console(msgs: list[Message], *, title: str | None, fmt: str, count: int) -> None:

@@ -159,8 +159,27 @@ def extract_text(path: Path) -> ExtractResult:
             f"file too large: {path} is {mb:.1f} MiB (cap {cap_mb} MiB). "
             "Pre-process or split before passing to unread."
         )
+    # Chunked read with the cap enforced at the read site, not just
+    # via the upfront stat. Defends against TOCTOU growth between
+    # stat() and read() on log files / streamed mounts that report a
+    # smaller size than what arrives. 1 MiB chunks keep Python's
+    # bytes-concat overhead negligible.
+    chunks: list[bytes] = []
+    bytes_read = 0
     with path.open("rb") as f:
-        raw = f.read()
+        while bytes_read <= _MAX_EXTRACT_BYTES:
+            chunk = f.read(min(1024 * 1024, _MAX_EXTRACT_BYTES + 1 - bytes_read))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+    if bytes_read > _MAX_EXTRACT_BYTES:
+        cap_mb = _MAX_EXTRACT_BYTES // (1024 * 1024)
+        raise ValueError(
+            f"file grew past cap during read: {path} exceeded {cap_mb} MiB. "
+            "Pre-process or split before passing to unread."
+        )
+    raw = b"".join(chunks)
     for enc in ("utf-8", "utf-16", "cp1251", "latin-1"):
         with contextlib.suppress(UnicodeDecodeError):
             return ExtractResult(text=raw.decode(enc), extra={"bytes": len(raw)})

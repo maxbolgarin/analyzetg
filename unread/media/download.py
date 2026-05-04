@@ -183,9 +183,12 @@ async def download_message(
     return out_path
 
 
-async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> list[Path]:
+async def transcode_for_openai(
+    src: Path, media_type: str, tmp_dir: Path, *, prefer_mp3: bool = False
+) -> list[Path]:
     """Prepare audio for OpenAI:
-      - voice (.ogg/opus): pass through.
+      - voice (.ogg/opus): pass through, unless ``prefer_mp3=True``
+        (default Whisper model ``gpt-4o-mini-transcribe`` rejects opus).
       - videonote/video: extract mono 16 kHz mp3 at 64k.
       - split into ≤600 s segments if file > 25 MB.
 
@@ -206,6 +209,40 @@ async def transcode_for_openai(src: Path, media_type: str, tmp_dir: Path) -> lis
             prepared = renamed
         else:
             prepared = src
+        # `gpt-4o-mini-transcribe` (the default since the model swap)
+        # and `gpt-4o-transcribe` reject opus payloads with a 4xx,
+        # even though `whisper-1` accepted them. Force a re-encode to
+        # mp3 when the caller flagged the active model as opus-hostile.
+        if prefer_mp3 and prepared.suffix.lower() in {".ogg", ".oga", ".opus"}:
+            if not await _ffmpeg_present(ffmpeg):
+                raise FfmpegMissing(
+                    f"ffmpeg not found at '{ffmpeg}'. Required for opus→mp3 "
+                    "with gpt-4o-mini-transcribe / gpt-4o-transcribe; "
+                    "install ffmpeg or set `[openai] audio_model_default = "
+                    '"whisper-1"` in `~/.unread/config.toml`.'
+                )
+            mp3_path = tmp_dir / f"{src.stem}_voice.mp3"
+            cmd = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(prepared),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-b:a",
+                "64k",
+                str(mp3_path),
+            ]
+            rc, _, err = await _run(cmd)
+            if rc != 0:
+                raise _ffmpeg_fail(cmd, err, "voice opus→mp3")
+            prepared = mp3_path
     else:
         if not await _ffmpeg_present(ffmpeg):
             raise FfmpegMissing(

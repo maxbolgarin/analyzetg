@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from unread.core.paths import reports_dir, slugify
+from unread.core.paths import assert_under_reports, reports_dir, slugify
 
 
 def _file_slug(name: str, file_id: str) -> str:
@@ -41,5 +41,7 @@ def file_report_path(
     when = stamp or datetime.now()
     ts = when.strftime("%Y-%m-%d_%H%M%S")
     if kind == "stdin":
-        return reports_dir() / "files" / "stdin" / f"{preset}-{ts}.md"
-    return reports_dir() / "files" / kind / f"{_file_slug(name, file_id)}-{preset}-{ts}.md"
+        return assert_under_reports(reports_dir() / "files" / "stdin" / f"{preset}-{ts}.md")
+    return assert_under_reports(
+        reports_dir() / "files" / kind / f"{_file_slug(name, file_id)}-{preset}-{ts}.md"
+    )
