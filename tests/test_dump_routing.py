@@ -99,7 +99,8 @@ def test_telegram_t_me_link_still_routes_to_telegram() -> None:
     tg_mock.assert_called_once()
 
 
-def test_local_file_ref_rejected_with_clear_message(tmp_path) -> None:
+def test_local_file_ref_routes_to_file_adapter(tmp_path) -> None:
+    """`unread dump <local-file>` now routes through cmd_dump_file (was: rejected)."""
     f = tmp_path / "article.txt"
     f.write_text("hello world")
 
@@ -114,13 +115,16 @@ def test_local_file_ref_rejected_with_clear_message(tmp_path) -> None:
             "unread.youtube.dump.cmd_dump_youtube",
             new_callable=AsyncMock,
         ) as yt_mock,
+        patch(
+            "unread.files.dump.cmd_dump_file",
+            new_callable=AsyncMock,
+        ) as file_mock,
         patch("unread.export.commands.tg_client") as tg_mock,
     ):
         result = _runner().invoke(app, ["dump", str(f)])
 
-    assert result.exit_code != 0
-    out = result.output.lower()
-    assert "telegram, youtube, and website" in out or "local files" in out
+    assert result.exit_code == 0, result.output
+    file_mock.assert_called_once()
     web_mock.assert_not_called()
     yt_mock.assert_not_called()
     tg_mock.assert_not_called()

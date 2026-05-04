@@ -310,13 +310,17 @@ async def cmd_dump(
     from unread.cli import _STDIN_REF_SENTINEL, _looks_like_local_file
 
     if ref == _STDIN_REF_SENTINEL or _looks_like_local_file(ref):
-        # Files are their own dump artifact — refuse rather than alias
-        # to analyze (which would silently run the LLM).
-        raise typer.BadParameter(
-            "`unread dump` only supports Telegram, YouTube, and website refs. "
-            "Local files are already in their final form on disk; "
-            "use `unread <path>` (analyze) if you want a summary."
+        from unread.files.dump import cmd_dump_file
+
+        await cmd_dump_file(
+            ref,
+            output=output,
+            console_out=console_out,
+            yes=yes,
+            language=eff_lang_pre,
+            content_language=eff_clang_pre,
         )
+        return
 
     from unread.youtube.urls import is_youtube_url as _is_yt
 
