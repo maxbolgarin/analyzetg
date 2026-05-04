@@ -1,6 +1,6 @@
 """Test-suite fixtures.
 
-Two concerns:
+Three concerns:
 
 1. **Per-process `UNREAD_HOME` isolation.** The CLI bootstrap at
    `unread.cli` import time calls `apply_db_overrides_sync(get_settings())`,
@@ -12,7 +12,14 @@ Two concerns:
    module-load time, before any other import in any test module
    collects.
 
-2. **Locale-override leak guard.** Once `UNREAD_HOME` is pinned, the
+2. **Tmpdir cleanup.** Pre-prod review: the previous `mkdtemp` had no
+   teardown — every test session leaked an `unread-tests-*` dir under
+   the system tmp. Cumulative bloat for developers running the suite
+   thousands of times. `atexit.register` cleans up on interpreter exit;
+   `ignore_errors=True` keeps a half-cleaned tree from raising on
+   teardown (some tests intentionally chmod files to test guards).
+
+3. **Locale-override leak guard.** Once `UNREAD_HOME` is pinned, the
    bootstrap should be a no-op (the tmp DB doesn't exist on first run).
    The autouse fixture below resets the singleton around every test as
    defense-in-depth — tests that explicitly mutate the settings
@@ -21,14 +28,32 @@ Two concerns:
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 
 # CRITICAL: this assignment runs at module-load time, before pytest
 # collects test modules and before any `from unread.*` import resolves.
 # Fixture-scoped or session-scoped fixtures are too late — the bootstrap
 # at `unread.cli:25` runs at import.
-os.environ.setdefault("UNREAD_HOME", tempfile.mkdtemp(prefix="unread-tests-"))
+_TESTS_HOME = tempfile.mkdtemp(prefix="unread-tests-")
+os.environ.setdefault("UNREAD_HOME", _TESTS_HOME)
+
+
+@atexit.register
+def _cleanup_tests_home() -> None:
+    """Remove the per-session tmpdir on interpreter exit.
+
+    Idempotent — pytest may run multiple sessions in one process under
+    `pytest-xdist`, and the dir may already be gone if a test cleaned
+    up. `ignore_errors=True` because a few tests intentionally chmod
+    files to test the .env permission guards; those leave un-removable
+    nodes that we don't want raising on teardown.
+    """
+    # Only clean up if WE created it (not if the user pre-set UNREAD_HOME).
+    if os.environ.get("UNREAD_HOME") == _TESTS_HOME:
+        shutil.rmtree(_TESTS_HOME, ignore_errors=True)
 
 # Fake credentials so per-command gates (e.g. `cmd_ask`'s OpenAI check,
 # `build_client`'s Telegram check) don't bail in unrelated tests. Tests

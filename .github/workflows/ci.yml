@@ -61,3 +61,49 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest -q
+
+  # Provider-matrix smoke tests. Pre-prod hardening: the alternative AI
+  # adapters (Anthropic, Google) only ran their "dispatch" assertion
+  # under the main `test` job; the new provider-specific tests under
+  # tests/test_anthropic_adapter.py and tests/test_google_adapter.py
+  # are the ones that actually exercise translation / finish-reason /
+  # usage / retry. Run them once per provider with the corresponding
+  # env var set so a regression in one adapter can't sneak through.
+  provider-matrix:
+    name: Provider matrix (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ["openai", "anthropic", "google"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run provider-specific tests
+        env:
+          # Pin the active provider so make_chat_provider() routes
+          # smoke calls through the matching adapter; the per-adapter
+          # test files run their stubs regardless. CI fake keys keep
+          # any accidental real-network call from succeeding.
+          UNREAD_TEST_PROVIDER: ${{ matrix.provider }}
+          OPENAI_API_KEY: "sk-test-fake"
+          ANTHROPIC_API_KEY: "sk-ant-test-fake"
+          GOOGLE_API_KEY: "AI-test-fake"
+        run: |
+          # `-k provider_matrix or test_ai_providers or _adapter`
+          # selects the adapter dispatch tests + the per-provider
+          # adapter suites added in Phase 5 (test_anthropic_adapter,
+          # test_google_adapter). Running once per provider catches
+          # regressions a single-provider main-job pass would miss.
+          uv run pytest -q -k "provider_matrix or test_ai_providers or _adapter"
