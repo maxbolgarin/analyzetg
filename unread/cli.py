@@ -939,7 +939,6 @@ _COMMON_PATTERNS: tuple[tuple[str, str], ...] = (
     ('unread ask <ref> "question"', "ask a question about the ref"),
     ("unread dump <ref>", "export the ref's messages to disk"),
     ("unread tg", "open the interactive Telegram picker"),
-    ("unread <ref> --folder NAME", "batch-analyze every chat in a folder"),
 )
 
 
@@ -1776,22 +1775,94 @@ def backfill(
 # =================================================================== 5.4 Analyze
 
 
+def _looks_like_path_prefix(incomplete: str) -> bool:
+    """Heuristic: should we treat `incomplete` as a partial filesystem path?
+
+    We complete paths only when the user has clearly committed to a path
+    shape — leading `./`, `../`, `/`, `~`, or an embedded slash that
+    isn't part of a URL scheme. Bare words like `cleanup` stay free for
+    subcommand-name completion; URLs (`https://…`, `t.me/…`) are also
+    excluded so we don't suggest fake matches under a remote-looking
+    prefix.
+    """
+    if not incomplete:
+        return False
+    if "://" in incomplete:
+        return False
+    if incomplete.lower().startswith(("t.me/", "telegram.me/", "telegram.org/")):
+        return False
+    return (
+        incomplete.startswith(("./", "../", "/", "~"))
+        or incomplete in (".", "..")
+        or "/" in incomplete
+        or "\\" in incomplete
+    )
+
+
+def _complete_path_prefix(incomplete: str) -> list[str]:
+    """Glob filesystem entries matching `incomplete`. Used by ref-arg autocompletion.
+
+    Directories get a trailing `/` so the user can keep tabbing into them.
+    The suggestion preserves the form the user typed: a `./re` prefix
+    yields `./report.pdf`, an absolute `/etc/h` yields `/etc/hostname`,
+    and `~/Doc` yields `~/Documents/` (we keep the `~` glyph the user
+    typed since shells handle the expansion themselves).
+    """
+    if not _looks_like_path_prefix(incomplete):
+        return []
+    # Split the incomplete into a directory-prefix (kept verbatim in the
+    # suggestion) and a name-prefix (used to filter `iterdir`).
+    if incomplete.endswith("/") or incomplete in (".", "..", "~"):
+        dir_prefix = incomplete if incomplete.endswith("/") else f"{incomplete}/"
+        name_prefix = ""
+    else:
+        slash = max(incomplete.rfind("/"), incomplete.rfind("\\"))
+        if slash < 0:
+            return []
+        dir_prefix = incomplete[: slash + 1]
+        name_prefix = incomplete[slash + 1 :]
+    # Resolve the dir-prefix to a real directory on disk.
+    expanded_dir = Path(dir_prefix).expanduser() if dir_prefix.startswith("~") else Path(dir_prefix)
+    if not expanded_dir.is_dir():
+        return []
+    out: list[str] = []
+    for entry in sorted(expanded_dir.iterdir()):
+        if not entry.name.startswith(name_prefix):
+            continue
+        # Hidden files only when the prefix explicitly asked for them.
+        if entry.name.startswith(".") and not name_prefix.startswith("."):
+            continue
+        suggestion = f"{dir_prefix}{entry.name}"
+        if entry.is_dir():
+            suggestion += "/"
+        out.append(suggestion)
+    return out
+
+
 def _complete_root_ref(ctx, args, incomplete):  # type: ignore[no-untyped-def]
-    """Yield visible subcommand names for `unread <Tab>` completion.
+    """Yield path matches and visible subcommand names for `unread <Tab>` completion.
 
     Without this, Click's `_resolve_incomplete` picks the unfilled
     optional `ref` positional as the completion target — and since
     `ref` has no value enumerator (chat handles / URLs / file paths
     are dynamic), the user gets no suggestions at all when pressing
-    Tab right after `unread`. Returning the catalogue here makes the
-    completion match what users expect: a quick look at what
-    subcommands exist. Hidden commands stay hidden.
+    Tab right after `unread`. We hand back a mix of:
+
+      - file/directory entries when `incomplete` looks pathy (so
+        `unread ./re<Tab>` expands to `./reports/`),
+      - subcommand names otherwise (so `unread cle<Tab>` → `cleanup`).
 
     Typer's `autocompletion=` callback signature: ``(ctx, args, incomplete)
-    → list[tuple[str, str] | str]``. Returning ``(name, help)`` tuples
-    so zsh's `_describe` shows the one-liner alongside the name.
+    → list[tuple[str, str] | str]``. Returning a mix of bare strings
+    (paths) and ``(name, help)`` tuples (subcommands) is fine — zsh's
+    `_describe` handles both shapes.
     """
     out: list[tuple[str, str] | str] = []
+    out.extend(_complete_path_prefix(incomplete))
+    if _looks_like_path_prefix(incomplete):
+        # Don't pollute path completion with subcommand names — once the
+        # user committed to a path shape, subcommand suggestions are noise.
+        return out
     root = ctx.command
     # Sort alphabetically so the completion menu matches the order
     # `unread help` prints. `list_commands` returns registration order
@@ -1804,6 +1875,16 @@ def _complete_root_ref(ctx, args, incomplete):  # type: ignore[no-untyped-def]
         if name.startswith(incomplete):
             out.append((name, cmd.help or ""))
     return out
+
+
+def _complete_ref(ctx, args, incomplete):  # type: ignore[no-untyped-def]
+    """File/directory completion for the `ref` arg on `ask` and `dump`.
+
+    Same logic as `_complete_root_ref` but without subcommand-name
+    fallback — `unread ask` / `unread dump` don't have nested
+    subcommands competing with the ref positional.
+    """
+    return _complete_path_prefix(incomplete)
 
 
 @app.callback(invoke_without_command=True)
@@ -2615,6 +2696,7 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
 def ask(
     ref: str | None = typer.Argument(
         None,
+        autocompletion=_complete_ref,
         help=(
             "Chat reference: @user, t.me link (incl. topic links like "
             "t.me/c/<id>/<topic>), fuzzy title, or numeric id. Pass `tg` "
@@ -3474,6 +3556,7 @@ def export(
 def dump(
     ref: str | None = typer.Argument(
         None,
+        autocompletion=_complete_ref,
         help=(
             "Chat reference: @user, t.me link, title (fuzzy), or numeric id. "
             "For a negative numeric id use `--` to separate from flags, e.g. "
