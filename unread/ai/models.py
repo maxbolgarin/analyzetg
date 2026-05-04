@@ -289,6 +289,66 @@ def find_model(model_id: str) -> ModelInfo | None:
     return None
 
 
+def provider_for_model(model_id: str) -> str | None:
+    """Return the canonical provider name for ``model_id`` (or None).
+
+    Resolution order (vendor prefix wins over catalog hit so OpenRouter
+    aliases like ``anthropic/claude-opus-4-7`` route to the underlying
+    vendor's tokenizer / safety margin, not to OpenRouter's bucket):
+
+      1. ``vendor/...`` prefix (OpenRouter convention) — peel off the vendor.
+      2. Exact catalog hit — return the provider whose pool contains it.
+      3. Heuristic on the bare id — ``claude*``/``anthropic*`` → anthropic,
+         ``gemini*``/``google*`` → google, ``gpt*``/``o1*``/``o3*``/``o4*``
+         → openai, otherwise None.
+
+    Used by token counting to apply a per-provider safety margin without
+    requiring the user to maintain a registry entry for every Claude /
+    Gemini variant they might pass on the CLI.
+    """
+    raw = (model_id or "").strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    # 1. vendor/...  prefix — OpenRouter style. The semantic provider
+    # is the vendor (the model behind the OpenRouter facade), not the
+    # router itself, because token counting wants the underlying
+    # tokenizer's safety margin.
+    if "/" in raw:
+        vendor = raw.split("/", 1)[0].lower()
+        if vendor in _REGISTRY or vendor in {"anthropic", "google", "openai"}:
+            return vendor
+    # 2. Exact catalog match
+    for provider, pool in _REGISTRY.items():
+        if any(m.id.lower() == lower for m in pool):
+            return provider
+    # 3. Heuristics
+    if lower.startswith(("claude", "anthropic")):
+        return "anthropic"
+    if lower.startswith(("gemini", "google")):
+        return "google"
+    if lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    return None
+
+
 def supported_providers() -> tuple[str, ...]:
     """Provider names with a curated catalog (ordered for UI consistency)."""
     return ("openai", "anthropic", "google", "openrouter", "local")
+
+
+# Per-provider safety multiplier applied to tiktoken counts. tiktoken
+# uses OpenAI's BPE encodings; Claude and Gemini tokenize the same
+# text into ~10-25% more tokens (different vocab, different merges).
+# Bumping the count keeps the chunker on the safe side of provider
+# context limits without resorting to network calls in the hot loop.
+# OpenAI / OpenRouter / local: 1.0 (tiktoken is exact for OpenAI; for
+# OpenRouter we trust the underlying-model heuristic, which already
+# routes claude/gemini ids to the anthropic/google bucket).
+PROVIDER_TOKEN_SAFETY_MARGIN: dict[str, float] = {
+    "openai": 1.0,
+    "openrouter": 1.0,
+    "local": 1.0,
+    "anthropic": 1.25,
+    "google": 1.25,
+}
