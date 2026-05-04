@@ -442,9 +442,21 @@ def _seed_home_templates() -> None:
                 f"manually and `chmod 600 {env_target}`.[/]"
             )
     if not cfg_target.exists() and cfg_template.exists():
-        from shutil import copyfile
+        # Pre-prod review: also seed config.toml.example via
+        # secret_write_text. The example file isn't itself sensitive,
+        # but the user's eventual edits will hold settings (model
+        # picks, base URLs) and the file lives in ~/.unread next to
+        # the credentials. 0o600 from creation closes the brief
+        # world-readable window between copyfile + chmod.
+        from unread.util.fsmode import secret_write_text
 
-        copyfile(cfg_template, cfg_target)
+        try:
+            secret_write_text(cfg_target, cfg_template.read_text(encoding="utf-8"))
+        except OSError as e:
+            console.print(
+                f"[yellow]Couldn't seed {cfg_target}: {e} — copy {cfg_template} "
+                f"manually and `chmod 600 {cfg_target}`.[/]"
+            )
 
 
 def _dispatch_analyze(**kwargs) -> None:
