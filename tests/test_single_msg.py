@@ -36,7 +36,7 @@ async def test_iter_messages_max_msg_id_is_inclusive(repo: Repo) -> None:
         await repo.upsert_messages(
             [Message(chat_id=1, msg_id=mid, date=base, sender_name="a", text=f"m{mid}")]
         )
-    out = await repo.iter_messages(1, max_msg_id=30)
+    out = [m async for m in repo.iter_messages(1, max_msg_id=30)]
     assert [m.msg_id for m in out] == [10, 20, 30]
 
 
@@ -46,7 +46,7 @@ async def test_iter_messages_exact_single_msg(repo: Repo) -> None:
         await repo.upsert_messages(
             [Message(chat_id=1, msg_id=mid, date=base, sender_name="a", text=f"m{mid}")]
         )
-    out = await repo.iter_messages(1, min_msg_id=19, max_msg_id=20)
+    out = [m async for m in repo.iter_messages(1, min_msg_id=19, max_msg_id=20)]
     assert [m.msg_id for m in out] == [20]
 
 
@@ -59,12 +59,12 @@ async def test_iter_messages_thread_none_skips_filter(repo: Repo) -> None:
             Message(chat_id=1, msg_id=20, date=base, thread_id=5, sender_name="a", text="topic"),
         ]
     )
-    flat_only = await repo.iter_messages(1, thread_id=0)
+    flat_only = [m async for m in repo.iter_messages(1, thread_id=0)]
     topic_msgs = {m.msg_id for m in flat_only}
     # thread_id=0 matches NULL thread_id rows (flat-chat semantics).
     assert topic_msgs == {10}
 
-    all_msgs = await repo.iter_messages(1, thread_id=None)
+    all_msgs = [m async for m in repo.iter_messages(1, thread_id=None)]
     assert {m.msg_id for m in all_msgs} == {10, 20}
 
 

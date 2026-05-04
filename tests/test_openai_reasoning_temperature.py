@@ -55,7 +55,7 @@ class _FakeCompletions:
 
     async def create(self, **kwargs: Any) -> _FakeResponse:
         self._captured.calls.append(kwargs)
-        return _FakeResponse()  # noqa: PLR0911 — fresh instance per call
+        return _FakeResponse()
 
 
 class _FakeChat:

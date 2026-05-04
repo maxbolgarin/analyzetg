@@ -55,6 +55,7 @@ def _cleanup_tests_home() -> None:
     if os.environ.get("UNREAD_HOME") == _TESTS_HOME:
         shutil.rmtree(_TESTS_HOME, ignore_errors=True)
 
+
 # Fake credentials so per-command gates (e.g. `cmd_ask`'s OpenAI check,
 # `build_client`'s Telegram check) don't bail in unrelated tests. Tests
 # that specifically exercise the missing-credential path can call

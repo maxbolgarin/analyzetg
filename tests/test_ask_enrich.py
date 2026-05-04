@@ -52,8 +52,14 @@ async def test_ask_inline_enrich_runs_before_retrieval():
         order.append("resolve")
         return MagicMock(chat_id=42, thread_id=None, msg_id=None, title="X", username="x")
 
+    async def _empty_iter(*args, **kwargs):
+        # iter_messages is now an async generator — yield one mock so
+        # the caller's `async for ... in repo.iter_messages(...)` loop
+        # produces a single message exactly like the old list shape did.
+        yield MagicMock()
+
     fake_repo = AsyncMock()
-    fake_repo.iter_messages = AsyncMock(return_value=[MagicMock()])
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value={"username": "x", "title": "X"})
 
     fake_client = MagicMock()
@@ -120,8 +126,14 @@ async def test_ask_no_enrich_skips_enrichment():
     async def fake_resolve(client, repo, ref):
         return MagicMock(chat_id=42, thread_id=None, msg_id=None, title="X", username="x")
 
+    async def _empty_iter(*args, **kwargs):
+        # iter_messages is now an async generator — yield one mock so
+        # the caller's `async for ... in repo.iter_messages(...)` loop
+        # produces a single message exactly like the old list shape did.
+        yield MagicMock()
+
     fake_repo = AsyncMock()
-    fake_repo.iter_messages = AsyncMock(return_value=[MagicMock()])
+    fake_repo.iter_messages = _empty_iter
     fake_repo.get_chat = AsyncMock(return_value={"username": "x", "title": "X"})
 
     fake_client = MagicMock()
