@@ -1,14 +1,16 @@
-"""Tests for the auto-migration of v1 (`$u1$`) AEAD ciphertexts to v2 (`$u2$`).
+"""Tests for AEAD envelope migration on read.
 
-Pre-prod blocker #2 (partial fix): new writes use the v2 slot-bound
-envelope, but existing installs that ran `unread security upgrade`
-before that change still have v1 rows in `data.sqlite::secrets`. A v1
-row can be silently swapped between slots without detection.
+Three envelope generations exist on disk:
 
-The fix is a transparent rewrite: any time the user's passphrase
-successfully decrypts a v1 row, the row is re-encrypted as v2 and
-written back. After one read pass on a passphrase-backed install, every
-secrets row carries slot-bound AAD.
+  - ``$u1$`` — original. AEAD AAD = ``None``. Slot swap and framing
+    tamper both go undetected until AEAD verify fires.
+  - ``$u2$`` — slot-bound. AEAD AAD = ``"unread:v2:" + slot_name``. Slot
+    swaps fail ``InvalidTag``; framing bytes are still un-bound.
+  - ``$u3$`` — slot + framing-bound. AEAD AAD = ``"unread:v3:" +
+    slot_name + salt + nonce``. Both slot swap and framing tamper fail.
+
+New writes always emit ``$u3$``. Auto-migration on read upgrades v1 and
+v2 rows to v3 in a single rewrite.
 """
 
 from __future__ import annotations
@@ -21,11 +23,13 @@ import pytest
 from unread.security.crypto import (
     ENCRYPTED_PREFIX,
     ENCRYPTED_PREFIX_V2,
+    ENCRYPTED_PREFIX_V3,
     PassphraseError,
     decrypt_with_key,
     derive_key,
     encrypt_with_key,
     envelope_version,
+    migrate_to_v3_with_key,
     migrate_v1_to_v2_with_key,
     parse_envelope,
 )
@@ -34,7 +38,6 @@ from unread.security.crypto import (
 def test_migrate_v1_to_v2_with_key_round_trip():
     salt = b"\x02" * 16
     key = derive_key("pp", salt)
-    # v1 envelope: encrypt without slot_name.
     v1_blob = encrypt_with_key("the-secret", key, salt=salt)
     assert v1_blob.startswith(ENCRYPTED_PREFIX)
     assert envelope_version(v1_blob) == 1
@@ -44,16 +47,26 @@ def test_migrate_v1_to_v2_with_key_round_trip():
     assert envelope_version(v2_blob) == 2
     # Salt is preserved so the cached-key-by-salt machinery keeps working.
     assert parse_envelope(v2_blob).salt == salt
-    # Decrypts cleanly under the matching slot name.
     assert decrypt_with_key(v2_blob, key, slot_name="openai.api_key") == "the-secret"
 
 
 def test_migrate_v1_to_v2_rejects_already_v2():
     salt = b"\x03" * 16
     key = derive_key("pp", salt)
-    v2_blob = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
-    with pytest.raises(ValueError, match="already v2"):
+    # encrypt_with_key(slot_name=...) emits v3 by default; force v2 via
+    # the explicit v1→v2 helper to seed a truly-v2 row.
+    v1 = encrypt_with_key("v", key, salt=salt)
+    v2_blob = migrate_v1_to_v2_with_key(v1, key, slot_name="openai.api_key")
+    with pytest.raises(ValueError, match="already v2 or newer"):
         migrate_v1_to_v2_with_key(v2_blob, key, slot_name="openai.api_key")
+
+
+def test_migrate_v1_to_v2_rejects_already_v3():
+    salt = b"\x06" * 16
+    key = derive_key("pp", salt)
+    v3_blob = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
+    with pytest.raises(ValueError, match="already v2 or newer"):
+        migrate_v1_to_v2_with_key(v3_blob, key, slot_name="openai.api_key")
 
 
 def test_migrate_v1_to_v2_rejects_plaintext():
@@ -64,7 +77,7 @@ def test_migrate_v1_to_v2_rejects_plaintext():
 
 
 def test_migrated_v2_blocks_slot_swap():
-    """The whole point — once migrated, a slot swap fails AEAD verify."""
+    """v2: once migrated, a slot swap fails AEAD verify."""
     salt = b"\x05" * 16
     key = derive_key("pp", salt)
     v1_blob = encrypt_with_key("openai-key-value", key, salt=salt)
@@ -73,19 +86,110 @@ def test_migrated_v2_blocks_slot_swap():
         decrypt_with_key(v2_blob, key, slot_name="telegram.api_hash")
 
 
+# ---- v3 -----------------------------------------------------------------
+
+
+def test_encrypt_with_slot_name_emits_v3():
+    salt = b"\x07" * 16
+    key = derive_key("pp", salt)
+    blob = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
+    assert blob.startswith(ENCRYPTED_PREFIX_V3)
+    assert envelope_version(blob) == 3
+
+
+def test_v3_round_trip():
+    salt = b"\x08" * 16
+    key = derive_key("pp", salt)
+    blob = encrypt_with_key("the-secret-v3", key, salt=salt, slot_name="openai.api_key")
+    assert decrypt_with_key(blob, key, slot_name="openai.api_key") == "the-secret-v3"
+
+
+def test_v3_blocks_slot_swap():
+    salt = b"\x09" * 16
+    key = derive_key("pp", salt)
+    blob = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
+    with pytest.raises(PassphraseError):
+        decrypt_with_key(blob, key, slot_name="telegram.api_hash")
+
+
+def test_v3_blocks_salt_tamper():
+    """Flipping a salt byte trips InvalidTag — v2 was implicit-only."""
+    import base64
+
+    salt = b"\x0a" * 16
+    key = derive_key("pp", salt)
+    blob = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
+    body = base64.urlsafe_b64decode(blob[len(ENCRYPTED_PREFIX_V3) :] + "==")
+    tampered_body = bytes([body[0] ^ 0x01]) + body[1:]
+    tampered = ENCRYPTED_PREFIX_V3 + base64.urlsafe_b64encode(tampered_body).rstrip(b"=").decode()
+    with pytest.raises(PassphraseError):
+        decrypt_with_key(tampered, key, slot_name="openai.api_key")
+
+
+def test_v3_blocks_nonce_tamper():
+    import base64
+
+    salt = b"\x0b" * 16
+    key = derive_key("pp", salt)
+    blob = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
+    body = bytearray(base64.urlsafe_b64decode(blob[len(ENCRYPTED_PREFIX_V3) :] + "=="))
+    body[16] ^= 0x01  # nonce starts at offset 16 (after the 16-byte salt)
+    tampered = ENCRYPTED_PREFIX_V3 + base64.urlsafe_b64encode(bytes(body)).rstrip(b"=").decode()
+    with pytest.raises(PassphraseError):
+        decrypt_with_key(tampered, key, slot_name="openai.api_key")
+
+
+def test_migrate_v1_to_v3():
+    salt = b"\x0c" * 16
+    key = derive_key("pp", salt)
+    v1 = encrypt_with_key("from-v1", key, salt=salt)
+    v3 = migrate_to_v3_with_key(v1, key, slot_name="openai.api_key")
+    assert v3.startswith(ENCRYPTED_PREFIX_V3)
+    assert parse_envelope(v3).salt == salt  # salt preserved
+    assert decrypt_with_key(v3, key, slot_name="openai.api_key") == "from-v1"
+
+
+def test_migrate_v2_to_v3():
+    salt = b"\x0d" * 16
+    key = derive_key("pp", salt)
+    v1 = encrypt_with_key("from-v2", key, salt=salt)
+    v2 = migrate_v1_to_v2_with_key(v1, key, slot_name="openai.api_key")
+    v3 = migrate_to_v3_with_key(v2, key, slot_name="openai.api_key")
+    assert v3.startswith(ENCRYPTED_PREFIX_V3)
+    assert parse_envelope(v3).salt == salt
+    assert decrypt_with_key(v3, key, slot_name="openai.api_key") == "from-v2"
+
+
+def test_migrate_to_v3_rejects_already_v3():
+    salt = b"\x0e" * 16
+    key = derive_key("pp", salt)
+    v3 = encrypt_with_key("v", key, salt=salt, slot_name="openai.api_key")
+    with pytest.raises(ValueError, match="already v3"):
+        migrate_to_v3_with_key(v3, key, slot_name="openai.api_key")
+
+
+def test_migrate_to_v3_rejects_plaintext():
+    salt = b"\x0f" * 16
+    key = derive_key("pp", salt)
+    with pytest.raises(ValueError, match="not encrypted"):
+        migrate_to_v3_with_key("plain", key, slot_name="openai.api_key")
+
+
+# ---- end-to-end through `read_secrets` ------------------------------------
+
+
 def _seed_passphrase_install(
     install_home: Path,
     *,
     passphrase: str,
     plaintext_secrets: dict[str, str],
-    legacy_v1: bool = True,
+    seed_version: int = 1,
 ) -> Path:
     """Build a minimal data.sqlite that looks like a passphrase-backend install.
 
-    Used by the migration smoke tests so we don't have to drive the
-    full `cmd_upgrade` path (which prompts on the TTY). When
-    `legacy_v1=True`, encrypts each slot with the v1 envelope (no
-    slot_name) — emulating an install upgraded before the v2 ship.
+    ``seed_version`` controls the on-disk envelope: 1 → ``$u1$``,
+    2 → ``$u2$``, 3 → ``$u3$``. Pre-v3 installs are what the
+    auto-migration path on read is supposed to upgrade.
     """
     import base64
     from datetime import UTC, datetime
@@ -101,8 +205,6 @@ def _seed_passphrase_install(
     salt_b64 = base64.urlsafe_b64encode(salt).rstrip(b"=").decode("ascii")
     now = datetime.now(UTC).isoformat()
 
-    # Verify allowlists at test time so a typo in this fixture flags
-    # against the real schema instead of seeding an unreadable row.
     assert "security.kdf_salt" in OVERRIDE_KEYS
     assert "secrets.backend" in OVERRIDE_KEYS
     for slot in plaintext_secrets:
@@ -133,10 +235,15 @@ def _seed_passphrase_install(
             ("secrets.backend", "passphrase", now),
         )
         for slot, value in plaintext_secrets.items():
-            if legacy_v1:
-                blob = encrypt_with_key(value, key, salt=salt)  # no slot_name → v1
-            else:
+            if seed_version == 1:
+                blob = encrypt_with_key(value, key, salt=salt)
+            elif seed_version == 2:
+                v1 = encrypt_with_key(value, key, salt=salt)
+                blob = migrate_v1_to_v2_with_key(v1, key, slot_name=slot)
+            elif seed_version == 3:
                 blob = encrypt_with_key(value, key, salt=salt, slot_name=slot)
+            else:  # pragma: no cover - test misuse
+                raise ValueError(f"unknown seed_version {seed_version}")
             conn.execute(
                 "INSERT INTO secrets(key, value, updated_at) VALUES(?, ?, ?)",
                 (slot, blob, now),
@@ -156,10 +263,21 @@ def _read_back_secrets(db_path: Path) -> dict[str, str]:
     return dict(rows)
 
 
-def test_read_passphrase_secrets_auto_migrates_v1_to_v2(tmp_path, monkeypatch):
-    """End-to-end: reading a passphrase install with v1 rows transparently
-    upgrades every row to v2. The plaintext returned to the caller is
-    unchanged; the on-disk envelopes change shape."""
+def _drive_read(install_home: Path, monkeypatch, passphrase: str) -> dict[str, str]:
+    monkeypatch.setenv("UNREAD_PASSPHRASE", passphrase)
+    monkeypatch.setenv("UNREAD_HOME", str(install_home))
+    from unread.config import get_settings, reset_settings
+
+    reset_settings()
+    import unread.secrets as _secrets
+    from unread.secrets import read_secrets
+
+    _secrets._PROCESS_PASSPHRASE = None
+    return read_secrets(get_settings())
+
+
+def test_read_passphrase_secrets_auto_migrates_v1_to_v3(tmp_path, monkeypatch):
+    """End-to-end: a v1 install transparently upgrades to v3 on first read."""
     install_home = tmp_path / "home"
     db_path = _seed_passphrase_install(
         install_home,
@@ -169,73 +287,62 @@ def test_read_passphrase_secrets_auto_migrates_v1_to_v2(tmp_path, monkeypatch):
             "anthropic.api_key": "sk-ant-real-value",
             "telegram.api_hash": "telegram-hash-value",
         },
-        legacy_v1=True,
+        seed_version=1,
     )
 
-    # Sanity: pre-migration shape is v1 across the board.
     pre = _read_back_secrets(db_path)
-    assert all(v.startswith(ENCRYPTED_PREFIX) for v in pre.values())
     assert all(envelope_version(v) == 1 for v in pre.values())
 
-    # Drive the read path. Pre-supply the passphrase so the test doesn't
-    # block on a TTY prompt.
-    monkeypatch.setenv("UNREAD_PASSPHRASE", "pp")
-    # `read_secrets` reads through `settings.storage.data_path` — point
-    # the singleton at our test install.
-    monkeypatch.setenv("UNREAD_HOME", str(install_home))
-    from unread.config import reset_settings
-
-    reset_settings()
-    import unread.secrets as _secrets
-    from unread.config import get_settings
-    from unread.secrets import read_secrets
-
-    _secrets._PROCESS_PASSPHRASE = None  # ensure the env var is what's read
-    settings = get_settings()
-    out = read_secrets(settings)
+    out = _drive_read(install_home, monkeypatch, "pp")
     assert out["openai.api_key"] == "sk-openai-real-value"
     assert out["anthropic.api_key"] == "sk-ant-real-value"
     assert out["telegram.api_hash"] == "telegram-hash-value"
 
-    # Post-migration: every row is now v2.
     post = _read_back_secrets(db_path)
-    assert all(v.startswith(ENCRYPTED_PREFIX_V2) for v in post.values()), post
-    assert all(envelope_version(v) == 2 for v in post.values())
+    assert all(v.startswith(ENCRYPTED_PREFIX_V3) for v in post.values()), post
+    assert all(envelope_version(v) == 3 for v in post.values())
 
-    # And the v2 rows refuse a slot swap (the whole point of v2).
+    # The post-v3 row refuses both slot swap and framing tamper.
     salt = parse_envelope(post["openai.api_key"]).salt
     key = derive_key("pp", salt)
     with pytest.raises(PassphraseError):
         decrypt_with_key(post["openai.api_key"], key, slot_name="telegram.api_hash")
 
 
-def test_read_passphrase_secrets_skips_when_already_v2(tmp_path, monkeypatch):
-    """Idempotent: a fully-v2 install does no rewrites on read."""
+def test_read_passphrase_secrets_auto_migrates_v2_to_v3(tmp_path, monkeypatch):
+    """A v2 install (slot-bound but framing-unbound) upgrades to v3."""
     install_home = tmp_path / "home"
     db_path = _seed_passphrase_install(
         install_home,
         passphrase="pp",
-        plaintext_secrets={"openai.api_key": "sk-test-already-v2"},
-        legacy_v1=False,  # already v2
+        plaintext_secrets={"openai.api_key": "sk-from-v2"},
+        seed_version=2,
+    )
+    pre = _read_back_secrets(db_path)
+    assert envelope_version(pre["openai.api_key"]) == 2
+
+    out = _drive_read(install_home, monkeypatch, "pp")
+    assert out["openai.api_key"] == "sk-from-v2"
+
+    post = _read_back_secrets(db_path)
+    assert envelope_version(post["openai.api_key"]) == 3
+
+
+def test_read_passphrase_secrets_skips_when_already_v3(tmp_path, monkeypatch):
+    """Idempotent: a fully-v3 install does no rewrites on read."""
+    install_home = tmp_path / "home"
+    db_path = _seed_passphrase_install(
+        install_home,
+        passphrase="pp",
+        plaintext_secrets={"openai.api_key": "sk-test-already-v3"},
+        seed_version=3,
     )
     pre = _read_back_secrets(db_path)
     pre_value = pre["openai.api_key"]
-    assert pre_value.startswith(ENCRYPTED_PREFIX_V2)
+    assert pre_value.startswith(ENCRYPTED_PREFIX_V3)
 
-    monkeypatch.setenv("UNREAD_PASSPHRASE", "pp")
-    monkeypatch.setenv("UNREAD_HOME", str(install_home))
-    from unread.config import reset_settings
+    out = _drive_read(install_home, monkeypatch, "pp")
+    assert out["openai.api_key"] == "sk-test-already-v3"
 
-    reset_settings()
-    import unread.secrets as _secrets
-
-    _secrets._PROCESS_PASSPHRASE = None
-    from unread.config import get_settings
-    from unread.secrets import read_secrets
-
-    settings = get_settings()
-    assert read_secrets(settings)["openai.api_key"] == "sk-test-already-v2"
-
-    # The on-disk row is byte-for-byte unchanged.
     post = _read_back_secrets(db_path)
     assert post["openai.api_key"] == pre_value

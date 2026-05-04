@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from unread.cli import _fmt_bytes, _parse_duration_days
+from unread.cli import _fmt_bytes, _parse_duration_days, _run
 
 # --- _parse_duration_days -----------------------------------------------
 
@@ -58,3 +60,25 @@ def test_fmt_bytes_gib_ceiling() -> None:
     result = _fmt_bytes(5 * 1024 * 1024 * 1024)
     assert result.endswith("GiB")
     assert "5.0" in result
+
+
+# --- _run (sync-context guard) -----------------------------------------
+
+
+def test_run_rejects_call_inside_event_loop() -> None:
+    """`_run` must refuse to run when an event loop is already active.
+
+    Without the guard, `asyncio.run` raises a confusing
+    "asyncio.run() cannot be called from a running event loop"
+    deep inside the callee. The explicit check up front names the
+    misuse: a CLI entry point was invoked from async context.
+    """
+
+    async def _drive() -> None:
+        async def _noop() -> None:
+            return None
+
+        with pytest.raises(RuntimeError, match="running event loop"):
+            _run(_noop())
+
+    asyncio.run(_drive())

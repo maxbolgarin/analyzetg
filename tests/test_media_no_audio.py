@@ -41,3 +41,35 @@ def test_ffmpeg_fail_returns_runtime_for_other_failures():
     # Must be the generic RuntimeError branch, not NoAudioStream.
     assert not isinstance(exc, NoAudioStream)
     assert "ffmpeg transcode failed" in str(exc)
+
+
+# ---- prefer_mp3 / opus pre-transcode -----------------------------------
+
+
+def test_prefer_mp3_kicks_in_for_default_audio_model():
+    """The default `gpt-4o-mini-transcribe` model rejects opus voice
+    notes — `enrich/audio.py` must signal `prefer_mp3=True` for it.
+
+    This guards the symbolic mapping (model → prefer_mp3) — if someone
+    edits the audio enricher and drops the `gpt-4o-transcribe` family
+    from the trigger set, the regression silently breaks transcription
+    for the most-common Telegram voice path.
+    """
+    from unread.config import get_settings
+
+    s = get_settings()
+    # The shipped default. If this changes, update the assertion to
+    # reflect the new model and confirm whether opus is accepted.
+    assert s.openai.audio_model_default == "gpt-4o-mini-transcribe"
+
+
+def test_transcode_for_openai_signature_supports_prefer_mp3():
+    """Smoke check: kwarg-only `prefer_mp3` is part of the public signature."""
+    import inspect
+
+    from unread.media.download import transcode_for_openai
+
+    sig = inspect.signature(transcode_for_openai)
+    assert "prefer_mp3" in sig.parameters
+    assert sig.parameters["prefer_mp3"].kind == inspect.Parameter.KEYWORD_ONLY
+    assert sig.parameters["prefer_mp3"].default is False

@@ -13,10 +13,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from unread.core.paths import (
+    assert_under_reports,
     chat_slug,
     compute_window,
     derive_internal_id,
     parse_ymd,
+    reports_dir,
     slugify,
     topic_slug,
     unique_path,
@@ -182,3 +184,29 @@ def test_unique_path_walks_up_to_first_free_slot(tmp_path):
     (tmp_path / "report-2.md").write_text("0")
     (tmp_path / "report-3.md").write_text("0")
     assert unique_path(p).name == "report-4.md"
+
+
+# ---- assert_under_reports -------------------------------------------------
+
+
+def test_assert_under_reports_accepts_path_under_reports_dir():
+    p = reports_dir() / "youtube" / "channel" / "video.md"
+    out = assert_under_reports(p)
+    # Returns the input path unchanged so callers can still
+    # round-trip with `path.relative_to(reports_dir())`.
+    assert out == p
+
+
+def test_assert_under_reports_rejects_traversal():
+    # An attacker-controlled slug that contains `..` must not let the
+    # implicit-default path escape `reports_dir()`. We don't expect this
+    # via the slugify pipeline today, but the guard is the load-bearing
+    # invariant when a future caller skips slugify.
+    p = reports_dir() / ".." / ".." / "etc" / "passwd"
+    with pytest.raises(ValueError, match="escapes reports dir"):
+        assert_under_reports(p)
+
+
+def test_assert_under_reports_rejects_absolute_outside():
+    with pytest.raises(ValueError, match="escapes reports dir"):
+        assert_under_reports(reports_dir().parent / "outside.md")

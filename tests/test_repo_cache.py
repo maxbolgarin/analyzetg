@@ -105,8 +105,11 @@ async def test_cache_purge_by_age(repo: Repo) -> None:
 
     removed = await repo.cache_purge(older_than_days=30)
     assert removed == 2
-    # h2 survived.
-    assert await repo.cache_get("h2") is not None
+    # h2 survived intact — verify the body, not just existence, so a
+    # bug that purged-but-rewrote the row would still trip the test.
+    survivor = await repo.cache_get("h2")
+    assert survivor is not None
+    assert survivor["result"] == "r2"
     assert await repo.cache_get("h0") is None
 
 
@@ -149,8 +152,10 @@ async def test_cache_purge_by_preset_and_model(repo: Repo) -> None:
     removed = await repo.cache_purge(preset="summary", model="gpt-5.4")
     assert removed == 1
     assert await repo.cache_get("a") is None
-    assert await repo.cache_get("b") is not None
-    assert await repo.cache_get("c") is not None
+    b = await repo.cache_get("b")
+    c = await repo.cache_get("c")
+    assert b is not None and b["preset"] == "summary" and b["model"] == "gpt-5.4-nano"
+    assert c is not None and c["preset"] == "digest" and c["model"] == "gpt-5.4"
 
 
 async def test_cache_purge_zero_days_is_noop(repo: Repo) -> None:
@@ -167,7 +172,9 @@ async def test_cache_purge_zero_days_is_noop(repo: Repo) -> None:
     )
     removed = await repo.cache_purge(older_than_days=0, preset="summary")
     assert removed == 0
-    assert await repo.cache_get("zero") is not None
+    untouched = await repo.cache_get("zero")
+    assert untouched is not None
+    assert untouched["result"] == "r" and untouched["preset"] == "summary"
 
 
 async def test_cache_stats_totals_and_groups(repo: Repo) -> None:

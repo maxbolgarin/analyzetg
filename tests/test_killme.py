@@ -279,7 +279,9 @@ def test_reject_unsafe_home_rejects_filesystem_root():
     the entire root filesystem with it on `killme`."""
     from unread.killme import _reject_unsafe_home
 
-    assert _reject_unsafe_home(Path("/")) is not None
+    reason = _reject_unsafe_home(Path("/"))
+    assert reason is not None
+    assert isinstance(reason, str) and reason.strip(), "rejection reason must be a non-empty string"
 
 
 def test_reject_unsafe_home_rejects_user_home(tmp_path, monkeypatch):
@@ -287,7 +289,9 @@ def test_reject_unsafe_home_rejects_user_home(tmp_path, monkeypatch):
     from unread.killme import _reject_unsafe_home
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    assert _reject_unsafe_home(tmp_path) is not None
+    reason = _reject_unsafe_home(tmp_path)
+    assert reason is not None
+    assert isinstance(reason, str) and reason.strip()
 
 
 def test_reject_unsafe_home_rejects_system_dirs():
@@ -295,7 +299,9 @@ def test_reject_unsafe_home_rejects_system_dirs():
     from unread.killme import _reject_unsafe_home
 
     for d in ("/usr", "/etc", "/var", "/home", "/Applications"):
-        assert _reject_unsafe_home(Path(d)) is not None, d
+        reason = _reject_unsafe_home(Path(d))
+        assert reason is not None, d
+        assert isinstance(reason, str) and reason.strip(), d
 
 
 def test_reject_unsafe_home_rejects_top_level_dirs():
@@ -303,7 +309,9 @@ def test_reject_unsafe_home_rejects_top_level_dirs():
     from unread.killme import _reject_unsafe_home
 
     # `/foo` is 2 parts ('/', 'foo') — refuse.
-    assert _reject_unsafe_home(Path("/foo")) is not None
+    reason = _reject_unsafe_home(Path("/foo"))
+    assert reason is not None
+    assert isinstance(reason, str) and reason.strip()
 
 
 def test_reject_unsafe_home_accepts_nested_install(tmp_path):

@@ -1,15 +1,14 @@
-"""Tests for the v2 (`$u2$`) AEAD envelope with slot-name binding.
+"""Tests for the slot-bound AEAD envelopes.
 
-Pre-prod review #2: v1 envelopes had `associated_data=None` so a
-copy-paste of the ciphertext from `openai.api_key` into
-`telegram.api_hash` decrypted cleanly. v2 binds the slot name as AAD
-so a slot swap fires `InvalidTag`.
+Three envelope versions exist:
+  - ``$u1$``: legacy, no AAD binding. Slot swap and framing tamper
+    both undetected pre-AEAD.
+  - ``$u2$``: AAD = ``"unread:v2:" + slot_name``. Slot swap fires.
+  - ``$u3$``: AAD = ``"unread:v3:" + slot_name + salt + nonce``. Slot
+    swap *and* framing tamper both fire. New writes always emit v3.
 
-These tests pin:
-  * Round-trip encrypt(slot_name=...) → decrypt(slot_name=...) works.
-  * Decrypt with the wrong slot_name fails.
-  * Legacy v1 ciphertexts continue to decrypt (back-compat).
-  * `envelope_version` returns the right tag.
+These tests pin the slot-binding semantics for v2 and v3 simultaneously
+(v3 is a strict superset of v2's slot-binding guarantee).
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import pytest
 from unread.security.crypto import (
     ENCRYPTED_PREFIX,
     ENCRYPTED_PREFIX_V2,
+    ENCRYPTED_PREFIX_V3,
     PassphraseError,
     decrypt,
     decrypt_with_key,
@@ -30,10 +30,10 @@ from unread.security.crypto import (
 )
 
 
-def test_encrypt_with_slot_emits_v2():
+def test_encrypt_with_slot_emits_v3():
     blob = encrypt("the-secret", "the-passphrase", slot_name="openai.api_key")
-    assert blob.startswith(ENCRYPTED_PREFIX_V2)
-    assert envelope_version(blob) == 2
+    assert blob.startswith(ENCRYPTED_PREFIX_V3)
+    assert envelope_version(blob) == 3
 
 
 def test_encrypt_without_slot_emits_v1_for_backcompat():
@@ -42,24 +42,23 @@ def test_encrypt_without_slot_emits_v1_for_backcompat():
     assert envelope_version(blob) == 1
 
 
-def test_v2_round_trip_with_matching_slot():
+def test_v3_round_trip_with_matching_slot():
     blob = encrypt("the-secret", "pp", slot_name="openai.api_key")
     plaintext = decrypt(blob, "pp", slot_name="openai.api_key")
     assert plaintext == "the-secret"
 
 
-def test_v2_decrypt_with_wrong_slot_raises():
-    """The whole point of v2 — a copy-paste of the openai ciphertext
-    into the telegram.api_hash row must fail AEAD verify."""
+def test_v3_decrypt_with_wrong_slot_raises():
+    """A copy-paste of the openai ciphertext into the
+    telegram.api_hash row must fail AEAD verify."""
     blob = encrypt("openai-key-value", "pp", slot_name="openai.api_key")
     with pytest.raises(PassphraseError):
         decrypt(blob, "pp", slot_name="telegram.api_hash")
 
 
-def test_v2_decrypt_with_no_slot_raises():
-    """Failing to pass slot_name on a v2 blob is a programmer bug —
-    the AEAD verify fires because no AAD is provided where some was
-    expected."""
+def test_v3_decrypt_with_no_slot_raises():
+    """Failing to pass slot_name on a v3 blob is a programmer bug —
+    surfaced explicitly so the failure mode names the misuse."""
     blob = encrypt("v", "pp", slot_name="openai.api_key")
     with pytest.raises(PassphraseError):
         decrypt(blob, "pp")
@@ -83,25 +82,34 @@ def test_v1_ignores_slot_name():
     assert plaintext == "v1-value"
 
 
-def test_with_key_path_also_supports_v2():
+def test_with_key_path_also_supports_v3():
     """The amortized-Scrypt path used by `_persist_upgrade` must also
-    emit v2 when `slot_name` is supplied."""
+    emit v3 when `slot_name` is supplied."""
     salt = b"\x01" * 16
     key = derive_key("pp", salt)
     blob = encrypt_with_key("plain", key, salt=salt, slot_name="openai.api_key")
-    assert blob.startswith(ENCRYPTED_PREFIX_V2)
+    assert blob.startswith(ENCRYPTED_PREFIX_V3)
     assert decrypt_with_key(blob, key, slot_name="openai.api_key") == "plain"
     with pytest.raises(PassphraseError):
         decrypt_with_key(blob, key, slot_name="anthropic.api_key")
 
 
-def test_v2_swap_with_v1_fallback_disallowed():
-    """Cannot strip the `$u2$` prefix and pretend it's `$u1$`. Body
+def test_v3_swap_with_v1_fallback_disallowed():
+    """Cannot strip the `$u3$` prefix and pretend it's `$u1$`. Body
     layout is identical so an attacker might try; but the AEAD verify
-    still fires because the original encrypt used slot-name AAD."""
+    still fires because the original encrypt used slot+framing AAD."""
     blob = encrypt("v", "pp", slot_name="openai.api_key")
-    forged_v1 = ENCRYPTED_PREFIX + blob[len(ENCRYPTED_PREFIX_V2) :]
+    forged_v1 = ENCRYPTED_PREFIX + blob[len(ENCRYPTED_PREFIX_V3) :]
     # parse_envelope succeeds (same body shape) but decrypt fires.
     parse_envelope(forged_v1)
     with pytest.raises(PassphraseError):
         decrypt(forged_v1, "pp")
+
+
+def test_v3_swap_with_v2_prefix_disallowed():
+    """A v3 blob retagged as v2 must also fail: the v2 AAD is
+    framing-free, so it differs from what was used at encrypt time."""
+    blob = encrypt("v", "pp", slot_name="openai.api_key")
+    forged_v2 = ENCRYPTED_PREFIX_V2 + blob[len(ENCRYPTED_PREFIX_V3) :]
+    with pytest.raises(PassphraseError):
+        decrypt(forged_v2, "pp", slot_name="openai.api_key")

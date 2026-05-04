@@ -48,5 +48,7 @@ async def test_cache_purge_respects_age(repo: Repo) -> None:
 
     purged = await repo.cache_purge(older_than_days=30)
     assert purged == 1
-    assert await repo.cache_get("hash_new") is not None
+    survivor = await repo.cache_get("hash_new")
+    assert survivor is not None
+    assert survivor["result"] == "result_new"
     assert await repo.cache_get("hash_old") is None
