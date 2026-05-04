@@ -1,0 +1,23 @@
+A short sample text used by the smoke E2E tests.
+
+The quick brown fox jumps over the lazy dog. This sentence is intentionally
+boring so that any LLM-style summary preset has unambiguous content to work
+with. The text continues for several short paragraphs to give the chunker
+something to size, but never exceeds a few hundred tokens so the test stays
+fast and the OpenAI mock can return a deterministic response.
+
+Section: Why this fixture exists.
+
+Smoke E2E tests answer one question: does `unread` survive a full
+analyze round-trip on a fresh install with a real (but small) input file?
+Without this, every other test could pass while the orchestrator throws
+on a missing module, a stale schema migration, or a broken format-check.
+The fixture is text-only so no ffmpeg / Whisper / vision dependency
+sneaks into the test path.
+
+Section: What we expect.
+
+The smoke run mocks the AI provider. A real run would hit OpenAI / Anthropic
+/ Google. The point is to confirm the wiring (CLI → command → settings →
+provider dispatch → formatter → cache write → report file) holds together
+end-to-end, not to validate the model output itself.
