@@ -27,16 +27,12 @@ def test_redacts_nested_dict_one_level():
 
 
 def test_redacts_nested_dict_two_levels():
-    out = _redact(
-        {"event": "test", "outer": {"inner": {"token": "very-secret"}}}
-    )
+    out = _redact({"event": "test", "outer": {"inner": {"token": "very-secret"}}})
     assert out["outer"]["inner"]["token"] == "***REDACTED***"
 
 
 def test_redacts_in_list_of_dicts():
-    out = _redact(
-        {"event": "test", "calls": [{"api_key": "k1"}, {"api_key": "k2"}]}
-    )
+    out = _redact({"event": "test", "calls": [{"api_key": "k1"}, {"api_key": "k2"}]})
     assert all(item["api_key"] == "***REDACTED***" for item in out["calls"])
 
 

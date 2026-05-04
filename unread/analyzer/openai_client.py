@@ -5,7 +5,10 @@ module owns the policy that's identical across providers:
 
   - Single-call → log usage / cost / context fields.
   - On `truncated=True` (output cut at `max_tokens`), retry once with
-    a doubled budget, capped at `_MAX_RETRY_TOKENS`.
+    a doubled budget, capped at the per-model `max_output_tokens` from
+    :mod:`unread.ai.models` (or 16k fallback for unknown models).
+  - On :class:`ProviderSafetyBlockedError` (Gemini's safety refusal),
+    surface a yellow user-visible status and re-raise — never retry.
   - Re-export :class:`ChatResult` from the canonical `unread.ai`
     module so existing callers that destructure it keep working.
 

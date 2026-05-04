@@ -75,9 +75,9 @@ os.environ.setdefault("UNREAD_SCRYPT_N", str(2**10))
 # E402 (imports not at top): the `UNREAD_HOME` setdefault above MUST run
 # before `unread.config` is imported, otherwise the singleton resolves
 # to the developer's real ~/.unread/. Don't reorder.
-import pytest
+import pytest  # noqa: E402
 
-from unread.config import reset_settings
+from unread.config import reset_settings  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
