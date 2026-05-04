@@ -173,7 +173,7 @@ On a fresh install this is a four-step interactive wizard:
 
    Then paste the corresponding key — or press Enter to skip.
    Skipping leaves the install usable for `dump`, `describe`, `sync`,
-   `folders`, `chats *`, `backup`/`restore`, etc.; only `analyze` /
+   `describe folders`, `chats *`, `backup`/`restore`, etc.; only `analyze` /
    `ask` need a key.
 
    > **Capability gaps.** Whisper / embeddings / vision are OpenAI-only.
@@ -382,7 +382,7 @@ doesn't replace it.
 
 ## Command reference
 
-`unread --help` shows three panels.
+`unread --help` shows four panels.
 
 ### Main (everyday)
 
@@ -392,9 +392,8 @@ doesn't replace it.
 | `unread tg [<ref>] [flags]` / `unread telegram [<ref>] [flags]` | Same as the bare form, but auto-runs `init` if no Telegram session exists. |
 | `unread init [--force]` | Full interactive setup: install folder, AI provider + key, optional Telegram login. `--force` wipes the saved session before logging in. |
 | `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help tg`, `unread help init`. |
-| `unread tg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
-| `unread ask ["question"] [<ref>] [flags]` | Q&A across your synced archive — no Telegram round-trip. No args opens a wizard. |
-| `unread dump [<ref>] [flags]` | Dump history to md/jsonl/csv. No OpenAI call by default. |
+| `unread ask [<ref>] ["question"] [flags]` | Q&A over any ref (Telegram, YouTube, website, local file, stdin) — no Telegram round-trip for non-TG sources. No args opens a wizard. |
+| `unread dump [<ref>] [flags]` | Dump history / extracted text to md/jsonl/csv. Accepts Telegram refs, URLs, local files, and stdin. No OpenAI call by default. |
 | `unread migrate [--move] [--dry-run]` | Move legacy cwd-relative `./storage` and `./reports` into `~/.unread/`. |
 
 > **Subcommand-name collisions.** `unread <ref>` will route to a
@@ -403,18 +402,21 @@ doesn't replace it.
 > `unread tg "cleanup"` or `unread -- cleanup` for the rare case of
 > a chat that shares a subcommand name.
 
-### Sync & subscriptions
+### Telegram
 
 | Command | Purpose |
 |---|---|
-| `unread sync` | Pull new messages for every active subscription. |
+| `unread tg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
+| `unread describe folders` | List your Telegram folders (use with `--folder NAME`). |
+| `unread login [--force]` | Re-run the Telegram-only login step. `--force` wipes the saved session first. |
+| `unread logout` | Remove the local Telegram session. |
 | `unread chats add/list/enable/disable/remove` | Manage subscriptions. Optional — one-off `analyze` already fetches. |
+| `unread sync` | Pull new messages for every active subscription. |
 
 ### Maintenance
 
 | Command | Purpose |
 |---|---|
-| `unread tg folders` | List your Telegram folders (use with `--folder NAME`). |
 | `unread stats [--by …]` | Token spend / cache hit rate — by chat, preset, model, day, kind. |
 | `unread cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
 | `unread cache stats / ls / show / purge / export` | Analysis-cache maintenance (`stats` also surfaces OpenAI prompt-cache hit rate). |
@@ -725,21 +727,28 @@ by default. Every cited claim is a clickable link back to the source:
 
 ---
 
-## `unread ask` — Q&A across your synced archive
+## `unread ask` — Q&A over any source
 
 ```bash
 unread ask "what did we decide about the migration?" @somegroup
+unread ask https://youtu.be/dQw4w9WgXcQ "what is the main argument?"
+unread ask ./notes.pdf "what are the action items?"
 unread ask                                                 # opens the wizard
 ```
 
-Reads only your **local DB** — no Telegram round-trip during retrieval.
-The corpus is everything `analyze` / `dump` / `sync` has already pulled
-(transcripts, image descriptions, doc extracts, link summaries
-included).
+For **Telegram refs**, reads only your **local DB** — no Telegram
+round-trip during retrieval. The corpus is everything `analyze` /
+`dump` / `sync` has already pulled (transcripts, image descriptions,
+doc extracts, link summaries included).
 
-**Synopsis**: `unread ask "QUESTION" [<ref>] [flags]`. The positional
-`<ref>` accepts any chat reference (`@user`, `t.me` link, topic URL,
-fuzzy title, numeric id). A topic URL like
+For **non-Telegram refs** (YouTube URLs, website URLs, local files,
+stdin), `ask` extracts the source text directly — no Telegram
+client is opened.
+
+**Synopsis**: `unread ask [<ref>] ["QUESTION"] [flags]`. The positional
+`<ref>` accepts any Telegram chat reference (`@user`, `t.me` link, topic URL,
+fuzzy title, numeric id) **or** any non-Telegram ref (YouTube URL,
+website URL, local file path, `-` / piped stdin). A topic URL like
 `https://t.me/c/1234567890/4` auto-fills `--thread`. Without
 `<ref>` / `--chat` / `--folder` / `--global` the command opens the
 wizard (chat picker → period → enrich → confirm → backfill → answer);
@@ -812,6 +821,30 @@ unread ask "..." @somegroup --show-retrieved --max-cost 0.05
 unread ask "..." @somegroup --no-followup
 ```
 
+### Ask over non-Telegram sources
+
+`unread ask <ref> "QUESTION"` accepts the same set of ref shapes as
+`unread <ref>` and `unread dump <ref>`. The pre-Telegram dispatch picks
+a source-specific extractor based on the ref shape, so a YouTube ask
+never opens a Telegram client.
+
+```bash
+unread ask https://youtu.be/dQw4w9WgXcQ "what's the main argument?"
+unread ask https://example.com/article "summarize the methodology"
+unread ask ./notes.pdf "what are the action items?"
+echo "raw text…" | unread ask "what is this about?"
+```
+
+For documents under the `[ask].doc_full_text_cutoff_tokens` threshold
+(default 32k tokens), `ask` sends the full extracted text to the model
+in one call. Above the cutoff, `ask` falls back to chunked retrieval —
+the same machinery used for chat-archive queries. Tune the cutoff by
+setting `doc_full_text_cutoff_tokens` under `[ask]` in
+`~/.unread/config.toml`.
+
+`--chat`, `--folder`, and `--global` are rejected when the ref is a
+URL/file/stdin — a doc ref already names the source.
+
 ### Cost feel
 
 - **Retrieval**: free (local SQL).
@@ -822,10 +855,12 @@ Cost is logged under `phase=ask` in `usage_log` — see `unread stats --by kind`
 
 ---
 
-## `unread dump` — chat history to a file
+## `unread dump` — history and extracted text to a file
 
-No OpenAI call by default. Same backfill + filter pipeline as `analyze`,
-just writes raw messages instead of an analysis.
+No OpenAI call by default. Accepts the same set of ref shapes as
+`unread <ref>`: Telegram refs, YouTube URLs, website URLs, local files,
+and stdin. For Telegram refs, the same backfill + filter pipeline as
+`analyze` is used, just writing raw messages instead of an analysis.
 
 ```bash
 unread dump @somegroup -o history.md --last-days 30
@@ -870,6 +905,22 @@ unread dump https://youtu.be/<id> --mode=video
 picker only fires on a real terminal. Telegram-only flags
 (`--folder`, `--since`, `--from-msg`, `--save-media`, `--mark-read`,
 …) are rejected with a clear error when used against a URL.
+
+### `dump` for local files and stdin
+
+`unread dump <path>` extracts the file's text via the appropriate
+per-kind extractor (PDF, DOCX, audio/video transcript, image OCR, plain
+text) and writes the result as markdown to
+`~/.unread/reports/files/<kind>/`. Stdin works too:
+
+```bash
+unread dump ./report.pdf                  # → ~/.unread/reports/files/pdf/...
+unread dump ./meeting.mp3                 # transcribes, then dumps
+echo "raw text…" | unread dump            # stdin → ~/.unread/reports/files/stdin/
+```
+
+No LLM call — `dump` is the "save extracted markdown" verb;
+`unread <path>` (analyze) and `unread ask <path>` are the LLM verbs.
 
 ---
 
@@ -1225,13 +1276,13 @@ streams live; each iteration is preceded by `── Run K  YYYY-MM-DDThh:mm:ss`.
 
 ---
 
-## `unread tg folders` — Telegram folder integration
+## `unread describe folders` — Telegram folder integration
 
 Telegram "folders" (dialog filters) become a first-class scope:
 
 ```bash
-unread tg folders                               # list every folder + chat counts
-unread --folder Work                    # batch every unread chat in folder
+unread describe folders                         # list every folder + chat counts
+unread --folder Work                            # batch every unread chat in folder
 unread dump --folder Work                       # same for dump
 unread ask "..." --folder Work                  # Q&A scoped to folder
 ```
