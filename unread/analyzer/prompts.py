@@ -54,7 +54,14 @@ USER_MARKER = "---USER---"
 # transcript" — adds a video addendum block and timestamp-aware citation
 # guidance. compose_system_prompt now takes `source_kind`. Cached rows
 # from v5 are still semantically valid for chats but get re-keyed.
-BASE_VERSION = "v6"
+# v7: untrusted-content sentinels. The formatter now wraps every
+# third-party body (message text, transcripts, image / doc excerpts,
+# fetched link summaries) in `<<<UNTRUSTED_CONTENT id=…>>> /
+# <<<END_UNTRUSTED>>>` markers; `_base.md` instructs the model to treat
+# anything inside those blocks as data, never as instructions. v6
+# results were generated against the un-wrapped prompt and must be
+# re-run so the new sentinel discipline takes effect.
+BASE_VERSION = "v7"
 
 
 # ---------------------------------------------------------------------------

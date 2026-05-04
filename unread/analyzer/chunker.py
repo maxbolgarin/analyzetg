@@ -56,8 +56,26 @@ def model_context_window(model: str) -> int:
 
 
 def _fmt_line(m: Message) -> str:
-    # Re-use the same formatter so chunk boundaries line up exactly with rendered output.
-    return format_messages([m]).split("\n")[-1]
+    """Render exactly the per-message section the formatter would emit.
+
+    `format_messages([m])` prepends a small `Messages: N` preamble + a
+    blank line; everything from the first message header onward is the
+    per-message rendering (now multi-line because of the untrusted-
+    content sentinels). Strip the preamble and return the rest so the
+    chunker's token math matches what eventually ships in the prompt.
+    """
+    rendered = format_messages([m])
+    if not rendered:
+        return ""
+    lines = rendered.split("\n")
+    # Find the first line that starts a message header — `[<ts> #<id>]` —
+    # everything from there to the end is the message rendering.
+    for i, line in enumerate(lines):
+        if line.startswith("[") and "#" in line:
+            return "\n".join(lines[i:])
+    # Defensive: no header pattern matched (msg had no body and was
+    # dropped). Return the whole rendering so token math is conservative.
+    return rendered
 
 
 def build_chunks(
