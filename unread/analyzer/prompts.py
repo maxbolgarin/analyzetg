@@ -61,7 +61,18 @@ USER_MARKER = "---USER---"
 # anything inside those blocks as data, never as instructions. v6
 # results were generated against the un-wrapped prompt and must be
 # re-run so the new sentinel discipline takes effect.
-BASE_VERSION = "v7"
+# v8: three language axes split. `_base.md` no longer says "write in X
+# (or the source's language if it's clearly something else)" — the
+# old "follow source if different" clause caused mixed-language reports
+# (e.g., Russian section headings on a Chinese-source analysis). Now
+# the base rules unconditionally instruct "write the analysis in
+# {report-language}; quote source spans in their original language".
+# `compose_system_prompt` also gained an optional `source_language`
+# kwarg that injects a one-line Whisper-style hint when the user sets
+# `locale.content_language`. The hint is part of the cache key under a
+# new `source_language` payload field (only emitted when set, so users
+# who don't opt in keep their existing cache rows).
+BASE_VERSION = "v8"
 
 
 # ---------------------------------------------------------------------------
@@ -432,14 +443,26 @@ def compose_system_prompt(
     topic_titles: dict[int, str] | None = None,
     language: str = "en",
     source_kind: str = "chat",
+    source_language: str = "",
 ) -> str:
     """Merge the shared base rules with a preset-specific system prompt.
 
-    `language` here is the **prompt / content language** — i.e., it
-    selects which `presets/<language>/` tree the loader reads. Callers
-    in `pipeline.run_analysis` pass `content_language` (not the UI
-    `language`) so the LLM gets a natively-language prompt while the UI
-    can be in something else.
+    `language` is the **report language** — i.e., it selects which
+    `presets/<language>/` tree the loader reads. Callers in
+    `pipeline.run_analysis` resolve this via
+    `_resolve_report_lang(settings)`, which falls back through
+    `locale.report_language` → `locale.language` → "en". The LLM writes
+    the analysis in this language; the UI can be in something else.
+
+    `source_language` is a Whisper-style **source-content hint**. When
+    non-empty, one line is injected after the base rules:
+
+        The source content is in <X>. Treat citations and quotations
+        as that language; do not translate them.
+
+    When empty (the default), no line is added — the LLM auto-detects
+    from the content. Resolved by callers via `_resolve_source_hint`,
+    which reads `locale.content_language` directly with no fallback.
 
     `source_kind` ∈ {"chat", "video"} hints whether the input is a
     chat / forum stream or a video transcript. Drives the preamble's
@@ -450,16 +473,62 @@ def compose_system_prompt(
     Order of concatenation matters for the model:
       1. BASE — global rules (citation format, reactions, media tags,
          anti-fabrication). Loaded from `presets/<language>/_base.md`.
-      2. Forum addendum — **only when `topic_titles` is non-empty**.
+      2. Source-language hint — **only when `source_language` is set**.
+         Single line; placed before the forum addendum so the model
+         reads it as a high-level fact about the input.
+      3. Forum addendum — **only when `topic_titles` is non-empty**.
          Explains the `=== Topic: X ===` separators and the "don't blend
          topics" rule.
-      3. Preset system — the specific task (summarize, extract links, etc.).
+      4. Preset system — the specific task (summarize, extract links, etc.).
 
     Build order is `system → static_context → dynamic` (CLAUDE.md
     invariant #2) — unchanged.
     """
     _ = source_kind  # currently informational; preset bodies handle kind-specific guidance
     parts: list[str] = [_load_base_system(language)]
+    hint = (source_language or "").strip()
+    # GPT-style models default to mirroring the source language for the
+    # analysis body even when the system prompt repeatedly tells them to
+    # write in a specific output language (the bug: Chinese Wikipedia with
+    # `report_language=ru` produced Chinese bullets despite multiple
+    # "write in Russian" instructions). Three different injection paths
+    # depending on what we know about the source:
+    #   1. Hint set + differs   → strong, both languages named, explicit
+    #      mirror prohibition. The most effective wording.
+    #   2. Hint set + matches   → soft note (no mirror conflict possible).
+    #   3. Hint NOT set         → generic enforcement: tell the LLM to
+    #      detect the source itself, distinguish it from the report
+    #      language, and write in the report language regardless. This is
+    #      the fallback when URL-based / metadata-based source detection
+    #      didn't fire — better than no directive at all.
+    if hint and hint != language:
+        parts.append(
+            f"LANGUAGE SETUP — the source content is in `{hint}`, but the "
+            f"output (analysis prose, bullets, headings) MUST be in `{language}`. "
+            f"This is non-negotiable: every bullet, every paragraph, every "
+            f"section heading is in `{language}`, even though the source you "
+            f"are reading is in `{hint}`. The ONLY allowed `{hint}` text in "
+            f'your output is inside direct quotations (in «» or "") and '
+            f"proper nouns. If you find yourself writing analysis prose in "
+            f"`{hint}`, stop and rewrite it in `{language}`."
+        )
+    elif hint:
+        parts.append(
+            f"The source content you are analyzing is in `{hint}` (same as "
+            f"the output language). Quote spans verbatim in `{hint}`."
+        )
+    else:
+        parts.append(
+            f"OUTPUT LANGUAGE: write the analysis in `{language}`. Detect "
+            f"the source content's language from the messages below — if it "
+            f"differs from `{language}`, write the analysis in `{language}` "
+            f"anyway. The detected source language and the report language "
+            f"are two separate things: the source determines what language "
+            f"the **input** is in; `{language}` determines what language "
+            f"YOUR output is in, and the two MUST stay distinct. Direct "
+            f'quotations (in «» / "") stay in the source language; '
+            f"everything else — bullets, prose, headings — is in `{language}`."
+        )
     if topic_titles:
         parts.append(_FORUM_CONTEXT.get(language, _FORUM_CONTEXT["en"]))
     parts.append(preset_system)
@@ -522,21 +591,25 @@ def load_custom_preset(prompt_file: Path, *, language: str = "en") -> Preset:
 # `from unread.analyzer.prompts import PRESETS / BASE_SYSTEM / REDUCE_PROMPT`
 # remains the import idiom in many call sites (commands, interactive,
 # tests). Resolve these lazily via __getattr__ so they reflect the
-# *current* `settings.locale.language` at access time. Each access is
-# cheap (cached).
+# *current* report-language at access time. Each access is cheap (cached).
+#
+# We resolve via `locale.report_language → locale.language → "en"`
+# (mirroring `pipeline._resolve_report_lang`) and inline the logic to
+# avoid a `prompts ↔ pipeline` import cycle.
+
+
+def _active_report_lang() -> str:
+    from unread.config import get_settings
+
+    locale = get_settings().locale
+    return (getattr(locale, "report_language", "") or getattr(locale, "language", "") or "en").lower()
 
 
 def __getattr__(name: str) -> Any:  # PEP 562
     if name == "PRESETS":
-        from unread.config import get_settings
-
-        return get_presets(get_settings().locale.language)
+        return get_presets(_active_report_lang())
     if name == "BASE_SYSTEM":
-        from unread.config import get_settings
-
-        return _load_base_system(get_settings().locale.language)
+        return _load_base_system(_active_report_lang())
     if name == "REDUCE_PROMPT":
-        from unread.config import get_settings
-
-        return _load_reduce_prompt(get_settings().locale.language)
+        return _load_reduce_prompt(_active_report_lang())
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

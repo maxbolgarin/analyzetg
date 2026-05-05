@@ -52,6 +52,123 @@ _SEGMENT_CHARS = 3500
 _PARAGRAPH_RE = re.compile(r"\n{2,}")
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 
+# Leading IETF / BCP-47 language tag normalization. Accepts `ru`,
+# `ru-RU`, `ru_RU`, `zh-Hans`, `zh-Hant-TW`, etc. Returns the leading
+# 2-letter ISO 639-1 code so downstream consumers (preset loader, i18n,
+# settings UI) get a code they can render.
+# Match a leading 2-3 letter language code followed by an explicit
+# separator (`-`, `_`, whitespace) or end-of-string. Can't rely on `\b`
+# because Python treats `_` as a word character — so `\b` doesn't fire
+# between `en` and `_US`, and `en_US` would then match the wrong
+# substring.
+_LANG_TAG_HEAD_RE = re.compile(r"^\s*([A-Za-z]{2,3})(?:[-_]|\s|$)")
+# Cheap regex fallback for `<html lang="..">` when BeautifulSoup is
+# unavailable. Greedy on the opening `<html` so attributes that come
+# before `lang` (e.g. `class`, `dir`, `xmlns`) don't mask the match.
+_HTML_LANG_RE = re.compile(r"<html\b[^>]*\blang\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+
+def _normalize_lang_tag(tag: str | None) -> str | None:
+    """BCP-47 / IETF tag → ISO 639-1 2-letter code, lowercased.
+
+    Examples: ``"ru-RU"`` → ``"ru"``, ``"en_US"`` → ``"en"``,
+    ``"zh-Hans"`` → ``"zh"``, ``"  RU  "`` → ``"ru"``,
+    ``"eng"`` → None (3-letter ISO 639-2/3 not currently supported by
+    the preset / i18n layer).
+    """
+    if not tag:
+        return None
+    m = _LANG_TAG_HEAD_RE.match(tag)
+    if not m:
+        return None
+    code = m.group(1).lower()
+    return code if len(code) == 2 else None
+
+
+def _detect_html_language(html: str, *, url: str = "") -> str | None:
+    """Detect the page language from raw HTML, walking the priority chain.
+
+    Order (first non-empty wins):
+      1. ``<html lang="...">`` — primary HTML5 mechanism, set by most CMS.
+      2. ``<meta http-equiv="content-language" content="...">`` — older
+         equivalent; still common on legacy CMS output.
+      3. ``<meta property="og:locale" content="ru_RU">`` — Open Graph,
+         used by social-share-aware sites (CMSes with SEO plugins).
+      4. ``<link rel="alternate" hreflang="ru" href="..." />`` — only
+         used when the alternate's ``href`` matches the page's own URL
+         or the canonical link, otherwise the alternates list other
+         language versions of the page (not the current one's language).
+
+    Returns a 2-letter ISO 639-1 code, or None when no rule fires.
+    Uses BeautifulSoup when available; falls back to a regex for the
+    primary `<html lang>` rule when BS4 isn't installed.
+    """
+    if not html:
+        return None
+    if not _HAS_BS4:
+        m = _HTML_LANG_RE.search(html)
+        return _normalize_lang_tag(m.group(1)) if m else None
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")  # type: ignore[misc]
+    except Exception:  # pragma: no cover - extremely defensive
+        return None
+
+    # 1. <html lang="ru">
+    if soup.html is not None and soup.html.get("lang"):
+        code = _normalize_lang_tag(soup.html.get("lang"))
+        if code:
+            return code
+
+    # 2. <meta http-equiv="content-language" content="ru">
+    meta_http = soup.find(
+        "meta",
+        attrs={"http-equiv": lambda v: bool(v) and v.lower() == "content-language"},
+    )
+    if meta_http is not None:
+        code = _normalize_lang_tag(meta_http.get("content"))
+        if code:
+            return code
+
+    # 3. <meta property="og:locale" content="ru_RU">
+    og_locale = soup.find("meta", attrs={"property": "og:locale"})
+    if og_locale is not None:
+        code = _normalize_lang_tag(og_locale.get("content"))
+        if code:
+            return code
+
+    # 4. <link rel="alternate" hreflang="ru" href="...">
+    # The hreflang list enumerates all language versions; we can only
+    # use it to identify the CURRENT page's language by matching the
+    # alternate's href against the canonical URL or the input URL.
+    canonical = soup.find("link", attrs={"rel": "canonical"})
+    canonical_href = (canonical.get("href") if canonical else "") or ""
+    targets = {h for h in (canonical_href, url) if h}
+    for link in soup.find_all("link", attrs={"rel": "alternate"}):
+        hreflang = (link.get("hreflang") or "").strip()
+        href = (link.get("href") or "").strip()
+        if not hreflang or hreflang.lower() == "x-default" or not href:
+            continue
+        if targets and href in targets:
+            code = _normalize_lang_tag(hreflang)
+            if code:
+                return code
+
+    return None
+
+
+def _content_language_from_header(value: str | None) -> str | None:
+    """Parse RFC 7231 Content-Language header → first ISO 639-1 code.
+
+    The header may carry multiple comma-separated tags
+    (``"en, ru-RU"``); we take the first one and normalize it. Empty /
+    malformed → None.
+    """
+    if not value:
+        return None
+    first = value.split(",", 1)[0]
+    return _normalize_lang_tag(first)
+
 
 class WebsiteFetchError(Exception):
     """Raised when fetch_page can't produce usable article text.
@@ -96,9 +213,16 @@ async def fetch_page_with_html(url: str, *, settings: Settings) -> tuple[Website
     """
     cfg = settings.website
     normalized = normalize_url(url)
-    html, raw_size = await _http_get(url, cfg.fetch_timeout_sec, cfg.user_agent, cfg.max_html_bytes)
+    html, raw_size, header_lang = await _http_get(
+        url, cfg.fetch_timeout_sec, cfg.user_agent, cfg.max_html_bytes
+    )
     return _extract_page_from_html(
-        html, url=url, normalized=normalized, raw_size=raw_size, settings=settings
+        html,
+        url=url,
+        normalized=normalized,
+        raw_size=raw_size,
+        settings=settings,
+        header_language=header_lang,
     ), html
 
 
@@ -109,8 +233,14 @@ def _extract_page_from_html(
     normalized: str,
     raw_size: int,
     settings: Settings,
+    header_language: str | None = None,
 ) -> WebsitePage:
-    """Run extractor + segmentation. Pure post-fetch logic — no I/O."""
+    """Run extractor + segmentation. Pure post-fetch logic — no I/O.
+
+    ``header_language`` is the parsed RFC 7231 ``Content-Language``
+    response header (when the server sent it). It feeds the priority
+    chain that resolves the final ``metadata.language``.
+    """
     cfg = settings.website
     metadata: WebsiteMetadata | None = None
     text: str = ""
@@ -139,6 +269,25 @@ def _extract_page_from_html(
         raise WebsiteFetchError(_explain_empty_extraction(url, html, raw_size))
 
     assert metadata is not None  # one of the branches above sets it
+
+    # Resolve the final language with the documented priority chain
+    # (highest-confidence signal wins, and we ALWAYS run the HTML pass —
+    # trafilatura's metadata.language is hit-and-miss on real pages):
+    #   1. HTTP Content-Language response header
+    #   2. <html lang>, <meta http-equiv>, <meta og:locale>, <link hreflang>
+    #   3. Whatever trafilatura/BS4 already put in metadata.language
+    # URL-based inference and LLM-side fallback live in the analyzer
+    # (commands.cmd_analyze_website + analyzer.prompts) — they're a
+    # layer below this and only fire when this chain returns empty.
+    detected = header_language or _detect_html_language(html, url=url)
+    if detected:
+        metadata.language = detected
+    elif metadata.language:
+        # Trafilatura / BS4 already set something — normalize it so a
+        # downstream comparison `metadata.language == "ru"` works even
+        # when trafilatura returned `"ru-RU"`.
+        metadata.language = _normalize_lang_tag(metadata.language) or metadata.language.lower()
+
     paragraphs = _segment_paragraphs(text, max_chars=_SEGMENT_CHARS)
     if cfg.max_paragraphs > 0 and len(paragraphs) > cfg.max_paragraphs:
         log.warning(
@@ -204,8 +353,14 @@ async def _http_get(
     timeout_sec: int,
     user_agent: str,
     max_bytes: int,
-) -> tuple[str, int]:
-    """Fetch raw HTML or raise `WebsiteFetchError`. Returns (text, raw_size)."""
+) -> tuple[str, int, str | None]:
+    """Fetch raw HTML or raise `WebsiteFetchError`.
+
+    Returns ``(text, raw_size, content_language)`` where the third
+    element is the RFC 7231 ``Content-Language`` response header parsed
+    down to an ISO 639-1 code, or None when the server didn't send it
+    (which is most servers — `<html lang>` is more commonly used).
+    """
     from unread.util.safe_fetch import BlockedURLError, safe_get
 
     try:
@@ -234,13 +389,15 @@ async def _http_get(
     if "text/html" not in ctype and "application/xhtml+xml" not in ctype and "text/plain" not in ctype:
         raise WebsiteFetchError(f"Unexpected content-type {ctype!r} for {url!r}.")
 
+    header_lang = _content_language_from_header(resp.headers.get("content-language"))
+
     raw_size = len(resp.content)
     text = resp.text
     if raw_size > max_bytes:
         log.warning("website.fetch.truncated", url=url, raw_size=raw_size, cap=max_bytes)
         text = text[:max_bytes]
         raw_size = max_bytes
-    return text, raw_size
+    return text, raw_size, header_lang
 
 
 def _extract_with_trafilatura(html: str, *, url: str, normalized: str) -> tuple[WebsiteMetadata, str]:

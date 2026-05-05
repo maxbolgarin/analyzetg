@@ -120,9 +120,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Свой диапазон дат…",
     },
     "wiz_period_n_msgs": {"en": "{n} msgs", "ru": "{n} сообщ."},
-    # Optional model-side hint (only emitted when content_language differs
-    # from active language). Stays in the active language so the model
-    # parses the hint reliably.
+    # Legacy hint string. The new source-language injection is handled
+    # by `compose_system_prompt(..., source_language=...)`; this entry is
+    # kept only for backward-compat with anything that still imports the
+    # key. Safe to remove once no caller does.
     "content_language_hint": {
         "en": "The chat content is predominantly in {language}.",
         "ru": "Содержимое чата преимущественно на языке: {language}.",
@@ -169,9 +170,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Manage Telegram subscriptions (what to sync).",
         "ru": "Управление подписками Telegram (что синхронизировать).",
     },
+    "cmd_tg_group": {
+        "en": "Telegram setup, inspection, and subscriptions. Bare `unread tg` opens the interactive chat picker.",
+        "ru": "Настройка, просмотр и подписки Telegram. Команда `unread tg` без аргументов открывает интерактивный выбор чата.",
+    },
     "cmd_folders": {
-        "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`). Invoke as `unread describe folders`.",
-        "ru": "Список папок Telegram (для `unread --folder NAME` / `unread dump --folder NAME`). Команда: `unread describe folders`.",
+        "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`). Invoke as `unread tg describe folders`.",
+        "ru": "Список папок Telegram (для `unread --folder NAME` / `unread dump --folder NAME`). Команда: `unread tg describe folders`.",
     },
     "cmd_stats": {
         "en": "Aggregate API spend, cache hit rate and run counts.",
@@ -421,16 +426,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "unread settings — интерактивный редактор.",
     },
     "settings_banner_hint": {
-        "en": "↑/↓ navigate, Enter open, ESC back, ESC twice or 'Done' to exit.",
-        "ru": "↑/↓ навигация, Enter — открыть, ESC — назад, двойной ESC или «Готово» — выход.",
+        "en": "↑/↓ navigate, Enter open, ESC or 'Done' to exit.",
+        "ru": "↑/↓ навигация, Enter — открыть, ESC или «Готово» — выход.",
     },
     "settings_pick_prompt": {
-        "en": "Pick a setting (or an action) — type to filter, ESC twice to exit",
-        "ru": "Выберите настройку (или действие) — введите текст для фильтра, двойной ESC — выход",
-    },
-    "settings_press_esc_again_to_exit": {
-        "en": "Press ESC again to exit (or pick 'Done').",
-        "ru": "Нажмите ESC ещё раз для выхода (или выберите «Готово»).",
+        "en": "Pick a setting (or an action) — type to filter, ESC to exit",
+        "ru": "Выберите настройку (или действие) — введите текст для фильтра, ESC — выход",
     },
     "settings_show_row": {
         "en": "📋  Show effective settings (printable table)",
@@ -482,12 +483,18 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "lang_axes_hint": {
         "en": (
-            "  → UI language set to {lang}. To also change LLM analysis output "
-            "language, set `locale.content_language` to the same code."
+            "  → UI language set to {lang}. To also change the language the LLM "
+            "writes the analysis in, set `locale.report_language` to the same code "
+            "(or leave empty to follow the UI). `locale.content_language` is a "
+            "separate Whisper-style hint about the *source* — leave empty to let "
+            "the AI auto-detect."
         ),
         "ru": (
-            "  → Язык интерфейса: {lang}. Чтобы выходные тексты анализа также "
-            "стали на этом языке, установите `locale.content_language`."
+            "  → Язык интерфейса: {lang}. Чтобы анализы LLM выходили на этом же "
+            "языке, задайте `locale.report_language` тем же кодом (или оставьте "
+            "пустым, чтобы следовать UI). `locale.content_language` — отдельная "
+            "Whisper-подсказка про *исходный* язык; оставьте пустым, чтобы AI "
+            "определил сам."
         ),
     },
     "settings_drop_n_q": {
@@ -571,9 +578,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     "settings_cat_analyze": {"en": "Analyze tuning", "ru": "Настройка анализа"},
     # Setting labels
     "set_label_locale_language": {"en": "UI language", "ru": "Язык интерфейса"},
+    "set_label_locale_report_language": {
+        "en": "Report language (LLM output)",
+        "ru": "Язык отчёта (вывод LLM)",
+    },
     "set_label_locale_content_language": {
-        "en": "Content / LLM-input language",
-        "ru": "Язык контента / промптов LLM",
+        "en": "Source-content language hint",
+        "ru": "Подсказка языка исходного контента",
     },
     "set_label_audio_language": {
         "en": "Whisper transcription hint",
@@ -610,12 +621,28 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     # Setting descriptions
     "set_desc_locale_language": {
-        "en": "Wizard, report headings, formatter labels.",
-        "ru": "Визард, заголовки отчётов, метки форматтера.",
+        "en": "Wizard, settings menu, banners, status messages — UI only.",
+        "ru": "Визард, меню настроек, баннеры, статус — только UI.",
+    },
+    "set_desc_locale_report_language": {
+        "en": (
+            "Language the LLM writes analyses / answers / report headings in. "
+            "Picks `presets/<lang>/`. Empty = follow UI language."
+        ),
+        "ru": (
+            "Язык, на котором LLM пишет анализы / ответы / заголовки отчётов. "
+            "Выбирает `presets/<lang>/`. Пусто = следовать UI-языку."
+        ),
     },
     "set_desc_locale_content_language": {
-        "en": "Picks `presets/<lang>/` tree. Empty = follow UI language.",
-        "ru": "Выбирает дерево `presets/<lang>/`. Пусто = следовать UI-языку.",
+        "en": (
+            "Whisper-style hint: tell the AI what language the source is in. "
+            "Empty = let the AI auto-detect. Set only as an override."
+        ),
+        "ru": (
+            "Подсказка в стиле Whisper: на каком языке исходный контент. "
+            "Пусто = AI сам определит. Задавать только как override."
+        ),
     },
     "set_desc_audio_language": {
         "en": "Empty = autodetect. Decoupled from UI / content language.",
@@ -1047,6 +1074,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "report_meta_enrichment": {"en": "**Enrichment:**", "ru": "**Обогащение:**"},
     "report_meta_enrichment_detail": {"en": "**Enrichment detail:**", "ru": "**Детали обогащения:**"},
+    "report_meta_transcript": {"en": "**Transcript:**", "ru": "**Транскрипт:**"},
+    "report_meta_transcript_kind_manual": {"en": "manual subs", "ru": "ручные субтитры"},
+    "report_meta_transcript_kind_auto": {"en": "auto-captions", "ru": "авто-субтитры"},
+    "report_meta_transcript_kind_audio": {"en": "Whisper audio", "ru": "Whisper по аудио"},
     "report_meta_redact": {
         "en": "**PII redacted (LLM input only):**",
         "ru": "**Скрыто PII (только во входе LLM):**",
@@ -1268,7 +1299,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "0 сообщений за этот период — анализировать нечего.",
     },
     "wiz_plan_dump_free": {"en": "(dump is free — no OpenAI).", "ru": "(dump бесплатный — без OpenAI)."},
-    # ---- runner.py: `unread chats run` -------------------------------------
+    # ---- runner.py: `unread tg chats run` -------------------------------------
     "run_no_enabled_subs": {
         "en": "No enabled subscriptions to run.",
         "ru": "Нет включённых подписок для запуска.",
@@ -1307,14 +1338,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "run_mode_cancel": {"en": "← Cancel", "ru": "← Отмена"},
     "run_plan_title": {
-        "en": "`unread chats run` plan — {n} subscription(s)",
-        "ru": "План `unread chats run` — подписок: {n}",
+        "en": "`unread tg chats run` plan — {n} subscription(s)",
+        "ru": "План `unread tg chats run` — подписок: {n}",
     },
     "run_flat_plan_title": {
-        "en": "`unread chats run --flat` plan — {n} subscription(s)",
-        "ru": "План `unread chats run --flat` — подписок: {n}",
+        "en": "`unread tg chats run --flat` plan — {n} subscription(s)",
+        "ru": "План `unread tg chats run --flat` — подписок: {n}",
     },
-    "run_results_title": {"en": "`unread chats run` results", "ru": "Результаты `unread chats run`"},
+    "run_results_title": {"en": "`unread tg chats run` results", "ru": "Результаты `unread tg chats run`"},
     "run_enrich_none": {"en": "none", "ru": "ничего"},
     "run_enrich_all": {"en": "all", "ru": "всё"},
     "run_enrich_config_defaults": {
@@ -1436,6 +1467,38 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "{n} analysis_cache rows older than {days} days.",
         "ru": "{n} строк analysis_cache старше {days} дн.",
     },
+    "cli_cache_purged_all_msg": {
+        "en": "{n} analysis_cache rows total.",
+        "ru": "{n} строк analysis_cache всего.",
+    },
+    "cli_cache_nothing_to_purge": {
+        "en": "Nothing to purge — no cached rows match the filter.",
+        "ru": "Нечего удалять — под фильтр не попало ни одной строки кэша.",
+    },
+    "cli_cache_scope_all": {
+        "en": "every cached row, no filter",
+        "ru": "все строки кэша, без фильтра",
+    },
+    "cli_cache_older_than": {
+        "en": "older than {days} days",
+        "ru": "старше {days} дн.",
+    },
+    "cli_cache_purge_preview_title": {
+        "en": "Cache purge preview",
+        "ru": "Предпросмотр очистки кэша",
+    },
+    "cli_cache_breakdown_title": {
+        "en": "Top affected (preset @ model):",
+        "ru": "Наиболее затронутые (пресет @ модель):",
+    },
+    "cli_cache_breakdown_more": {
+        "en": "… plus {n:,} more rows in other (preset, model) groups.",
+        "ru": "… плюс ещё {n:,} строк в других (пресет, модель) группах.",
+    },
+    "cli_cache_purge_proceed_q": {
+        "en": "Proceed with cache purge?",
+        "ru": "Продолжить очистку кэша?",
+    },
     "cli_vacuumed_label": {"en": "Vacuumed", "ru": "VACUUM"},
     "cli_db_vacuumed_msg": {"en": "DB — reclaimed {size}.", "ru": "БД — освобождено {size}."},
     "cli_no_usage_label": {"en": "No usage logged yet", "ru": "Лог использования пуст"},
@@ -1501,10 +1564,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "older than {days} days.",
         "ru": "старше {days} дн.",
     },
+    "cli_cleanup_no_messages_at_all": {
+        "en": "— the messages table is empty.",
+        "ru": "— таблица messages пуста.",
+    },
+    "cli_cleanup_age_all": {
+        "en": "every message, no age filter",
+        "ru": "все сообщения, без фильтра по возрасту",
+    },
     "cli_cleanup_already_clean_label": {"en": "Already clean", "ru": "Уже чисто"},
     "cli_cleanup_already_clean_msg": {
         "en": "{n} matching rows older than {days} days, but nothing left to null (text already NULL{tail}).",
         "ru": "{n} подходящих строк старше {days} дн., но обнулять уже нечего (текст уже NULL{tail}).",
+    },
+    "cli_cleanup_already_clean_msg_all": {
+        "en": "{n} rows total, but nothing left to null (text already NULL{tail}).",
+        "ru": "{n} строк всего, но обнулять уже нечего (текст уже NULL{tail}).",
     },
     "cli_cleanup_transcripts_kept": {
         "en": "; transcripts kept",
@@ -1518,6 +1593,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "  совпавших сообщений:        {messages}\n  [red]строк к обезличиванию[/]:    {to_redact}\n  [red]текста к обнулению[/]:        {with_text}\n  транскриптов к обнулению: {transcripts}\n[grey70]Метаданные (ids, даты, авторы) сохраняются.[/]",
     },
     "cli_cleanup_kept_label": {"en": "(kept)", "ru": "(сохранено)"},
+    "cli_cleanup_breakdown_title": {
+        "en": "Top affected chats:",
+        "ru": "Наиболее затронутые чаты:",
+    },
+    "cli_cleanup_breakdown_no_title": {
+        "en": "(chat {chat_id})",
+        "ru": "(чат {chat_id})",
+    },
+    "cli_cleanup_breakdown_more": {
+        "en": "… plus {n:,} more rows in other chats.",
+        "ru": "… плюс ещё {n:,} строк в других чатах.",
+    },
     "cli_cleanup_proceed_q": {
         "en": "Proceed with redaction?",
         "ru": "Продолжить обезличивание?",
@@ -1527,6 +1614,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cli_redacted_msg": {
         "en": "{n} messages older than {days} days{tail}.",
         "ru": "{n} сообщений старше {days} дн.{tail}.",
+    },
+    "cli_redacted_msg_all": {
+        "en": "{n} messages total{tail}.",
+        "ru": "{n} сообщений всего{tail}.",
     },
     "cli_redacted_transcripts_kept": {
         "en": " (transcripts kept)",
@@ -1565,10 +1656,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "файл(ов): {n} → {path}",
     },
     # ---- watch / backup / restore ---------------------------------------
-    "cli_watch_need_inner": {
-        "en": "Pass an inner command, e.g. unread watch --interval 1h analyze --folder Work",
-        "ru": "Передайте внутреннюю команду, например: unread watch --interval 1h analyze --folder Work",
-    },
     "cli_watch_interval_positive": {
         "en": "--interval must be > 0.",
         "ru": "--interval должен быть > 0.",
@@ -1840,8 +1927,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Сессия Telegram истекла или повреждена",
     },
     "tg_session_expired_hint": {
-        "en": "Re-authenticate with `unread login --force`. This will delete the local session file and start a fresh login.",
-        "ru": "Авторизуйтесь заново через `unread login --force`. Команда удалит локальный файл сессии и проведёт новый вход.",
+        "en": "Re-authenticate with `unread tg login --force`. This will delete the local session file and start a fresh login.",
+        "ru": "Авторизуйтесь заново через `unread tg login --force`. Команда удалит локальный файл сессии и проведёт новый вход.",
     },
     # ---- YouTube ------------------------------------------------------
     "youtube_fetch_failed": {
@@ -2042,7 +2129,7 @@ _STRINGS: dict[str, dict[str, str]] = {
 }
 
 
-# Common ISO codes → display names used by the optional content_language
+# Common ISO codes → display names used by the optional source-language
 # hint and any `Respond in <X>` style append. Unknown codes degrade to
 # `code.title()`.
 LANGUAGE_NAMES: dict[str, str] = {

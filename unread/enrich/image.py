@@ -132,7 +132,9 @@ async def enrich_image(
         )
 
     used_model = model or settings.enrich.vision_model
-    lang = (language or settings.locale.language or "en").lower()
+    # Fall back through report_language → language so descriptions match
+    # the analysis output language regardless of UI locale.
+    lang = (language or settings.locale.report_language or settings.locale.language or "en").lower()
     sys_prompt, user_prompt = _resolve_prompts(lang)
 
     tmp_dir = settings.media.tmp_dir

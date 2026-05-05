@@ -242,7 +242,8 @@ async def cmd_dump_youtube(
     output: Path | None,
     console_out: bool,
     language: str,
-    content_language: str,
+    report_language: str,
+    source_language: str,
     yes: bool,
 ) -> None:
     """Dump a YouTube video. Mode picks the artifact (transcript / audio / video)."""

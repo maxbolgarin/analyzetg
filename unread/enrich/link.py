@@ -212,7 +212,10 @@ async def enrich_url(
         return None
 
     used_model = model or settings.enrich.link_model or settings.openai.filter_model_default
-    lang = (language or settings.locale.language or "en").lower()
+    # Fall back through report_language → language so a multi-axis user
+    # who set `report_language=ru` but kept UI English still gets RU
+    # link summaries.
+    lang = (language or settings.locale.report_language or settings.locale.language or "en").lower()
     title_lbl, content_lbl, summary_lbl = _USER_LABELS.get(lang, _USER_LABELS["en"])
     sys_prompt = _SYSTEM_PROMPT.get(lang, _SYSTEM_PROMPT["en"])
     oai = make_client()

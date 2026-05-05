@@ -61,12 +61,35 @@ def _avg_tokens_per_msg(content_lang: str | None) -> int:
 AVG_TOKENS_PER_MSG = _AVG_TOKENS_BY_LANG["en"]
 
 
-def _resolve_content_lang(settings: Any) -> str:
-    """`content_language` falls back to `language` when empty."""
+def _resolve_report_lang(settings: Any) -> str:
+    """Pick the language the LLM writes the analysis / answer in.
+
+    Resolution: ``locale.report_language`` (when non-empty) → ``locale.language``
+    → ``"en"``. This drives preset tree selection, formatter labels going
+    *into* the prompt, the system prompt's base rules, the saved-report
+    section headings, the ask system prompt, and image / link enricher
+    prompts. The UI language (``locale.language``) is independent and only
+    affects strings the human reads in the CLI.
+    """
     locale = getattr(settings, "locale", None)
     if locale is None:
         return "en"
-    return (locale.content_language or locale.language or "en").lower()
+    return (locale.report_language or locale.language or "en").lower()
+
+
+def _resolve_source_hint(settings: Any) -> str:
+    """Whisper-style source-content language hint.
+
+    Returns the explicit ``locale.content_language`` value (lowercased,
+    stripped) or ``""`` when unset. **No fallback** to anything else —
+    empty means "let the LLM auto-detect the source language from the
+    content itself", which is the right default for almost every input.
+    Set this only when you want to override the model's detection.
+    """
+    locale = getattr(settings, "locale", None)
+    if locale is None:
+        return ""
+    return (locale.content_language or "").strip().lower()
 
 
 def _resolve_language(settings: Any) -> str:
@@ -99,7 +122,7 @@ def estimate_cost(
     from unread.util.pricing import chat_cost
     from unread.util.tokens import count_tokens as _ct
 
-    avg_tok = _avg_tokens_per_msg(_resolve_content_lang(settings))
+    avg_tok = _avg_tokens_per_msg(_resolve_report_lang(settings))
     total_input_body = max(1, int(n_messages * avg_tok))
 
     from unread.util.pricing import chat_pricing_for
@@ -210,6 +233,14 @@ class AnalysisResult:
     # patterns scrubbed before sending to the LLM. Surfaced in the run
     # summary so the user knows at a glance what was hidden.
     redact_counts: dict[str, int] = field(default_factory=dict)
+    # Captions / Whisper provenance for YouTube runs — empty for Telegram
+    # runs. `transcript_lang_kind` is one of "manual", "auto", "audio".
+    # Surfaced in the report metadata so the user can see at a glance
+    # which subtitle track the analysis is based on (a Russian channel
+    # with manual English subs + ru auto-captions can confusingly look
+    # English in the cited quotes if the wrong track was picked).
+    transcript_lang: str = ""
+    transcript_lang_kind: str = ""
 
 
 @dataclass(slots=True)
@@ -279,14 +310,14 @@ class AnalysisOptions:
             "dedupe_forwards": self.dedupe_forwards
             if self.dedupe_forwards is not None
             else s.analyze.dedupe_forwards,
-            # `content_language` selects which presets/<lang>/ tree the
-            # analysis uses (and thus the language of the LLM's prompt
-            # input AND the LLM's output). `locale.language` is UI-only
-            # (saved-report headings, wizard) — it does NOT affect any
-            # LLM input, so it is intentionally OMITTED from the cache
-            # key to avoid wasted cache misses on UI-only toggles. If
-            # you ever make `language` flow into the prompt, add it back.
-            "content_language": _resolve_content_lang(s),
+            # The cache-payload key is **still spelled "content_language"**
+            # even though the underlying setting was renamed to
+            # `report_language` in v1.x. The wire-format key is sticky on
+            # purpose: renaming it would change every existing row's hash
+            # and force a global re-analysis on upgrade. The *value* is
+            # the resolved report language — what the LLM writes in,
+            # which has always been what entered the cache key.
+            "content_language": _resolve_report_lang(s),
             "audio_language": s.openai.audio_language or "",
             "temperature": s.openai.temperature,
             "output_budget": preset.output_budget_tokens,
@@ -315,6 +346,15 @@ class AnalysisOptions:
             # tooling.
             "redact": self.redact if self.redact is not None else s.analyze.redact,
         }
+        # Source-language hint (Whisper-style override). Conditionally
+        # emitted so users who never set the hint keep hitting the same
+        # cache rows they had before the field was introduced — the
+        # default-empty case must not bust existing entries on upgrade.
+        # When set, it changes the system prompt the LLM sees, so it
+        # absolutely must enter the hash.
+        source_hint = _resolve_source_hint(s)
+        if source_hint:
+            payload["source_language"] = source_hint
         if self.enrich:
             payload["enrich_options"] = {
                 "vision_model": self.enrich.vision_model,
@@ -350,10 +390,10 @@ def _with_prompt_inputs(
 def _load_preset(opts: AnalysisOptions, language: str = "en") -> Preset:
     """Load the requested preset from `presets/<language>/`.
 
-    `language` here is the LLM-input / content language — `run_analysis`
-    passes `content_language` to it. The kwarg name is kept generic so
-    the helper stays callable from contexts that don't think in terms of
-    UI-vs-content (e.g., direct test fixtures).
+    `language` here is the **report language** — `run_analysis` passes
+    the resolved `report_language` to it. The kwarg name is kept generic
+    so the helper stays callable from contexts that don't think in terms
+    of UI-vs-report (e.g., direct test fixtures).
     """
     if opts.preset == "custom":
         if not opts.prompt_file:
@@ -436,7 +476,8 @@ async def run_analysis(
     messages: list[Any] | None = None,
     chat_groups: dict[int, dict] | None = None,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     link_template_override: str | None = None,
 ) -> AnalysisResult:
     """Run the end-to-end analysis for a chat/thread/period.
@@ -466,13 +507,17 @@ async def run_analysis(
     settings = get_settings()
     if language is None:
         language = _resolve_language(settings)
-    if content_language is None:
-        content_language = _resolve_content_lang(settings)
-    # `content_language` selects the prompts tree (presets/<lang>/) and
-    # everything LLM-facing. `language` is only the UI / report-heading
-    # language. They can differ — e.g. EN UI analyzing a RU chat with
-    # native RU prompts. The user picks per `[locale]` config.
-    preset = _load_preset(opts, language=content_language)
+    if report_language is None:
+        report_language = _resolve_report_lang(settings)
+    if source_language is None:
+        source_language = _resolve_source_hint(settings)
+    # `report_language` selects the prompts tree (presets/<lang>/) and
+    # every LLM-facing string (system prompt, formatter labels, reduce
+    # prompt, ask system prompt). `language` is only the UI / saved-
+    # report-heading language. They can differ — e.g. EN UI analyzing a
+    # RU chat with native RU prompts. `source_language` is a Whisper-
+    # style hint about the *input* content; empty means "auto-detect".
+    preset = _load_preset(opts, language=report_language)
 
     final_model = opts.model_override or preset.final_model or settings.openai.chat_model_default
     filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
@@ -597,7 +642,7 @@ async def run_analysis(
         link_template=link_template,
         topic_titles=topic_titles,
         chat_groups=chat_groups,
-        language=content_language,
+        language=report_language,
         source_kind=opts.source_kind,
     )
     # user_overhead: template minus {messages} — static, cacheable
@@ -616,9 +661,33 @@ async def run_analysis(
     composed_system = compose_system_prompt(
         preset.system,
         topic_titles=topic_titles,
-        language=content_language,
+        language=report_language,
         source_kind=opts.source_kind,
+        source_language=source_language,
     )
+
+    # Final-position language reminder appended to the END of every user
+    # prompt when source and report languages differ. Earlier-in-prompt
+    # directives in `_base.md` and the system-prompt source-language line
+    # are clear but consistently lose to the model's source-mirror bias on
+    # heavily non-target-language input (the bug: Chinese Wikipedia article
+    # with `report_language=ru` still produces Chinese bullets despite
+    # multiple "write in Russian, unconditional" instructions). Adding the
+    # same instruction *after* the message body — where recency bias is
+    # strongest — reliably suppresses the mirror behavior. Empty when the
+    # source-hint is unset OR matches the report language; the prompt then
+    # stays byte-identical with prior runs to preserve OpenAI prompt-cache
+    # hits for the common case.
+    final_lang_reminder = ""
+    if source_language and source_language != report_language:
+        final_lang_reminder = (
+            f"\n\n---\n\nLANGUAGE REMINDER: the analysis you write above must "
+            f"be in `{report_language}`. Every bullet, every paragraph, every "
+            f"section heading is in `{report_language}` — even though the "
+            f"source content above is in `{source_language}`. Direct quotations "
+            f'inside «» / "" stay in `{source_language}`; everything else, '
+            f"including your own analytic prose, is in `{report_language}`."
+        )
 
     # --- Choose chunking strategy
     chunking_model = final_model if not preset.needs_reduce else filter_model
@@ -679,7 +748,7 @@ async def run_analysis(
                 link_template=link_template,
                 topic_titles=topic_titles,
                 chat_groups=chat_groups,
-                language=content_language,
+                language=report_language,
                 source_kind=opts.source_kind,
             )
         )
@@ -689,6 +758,8 @@ async def run_analysis(
             msg_count=len(msgs),
             messages=dynamic,
         )
+        if final_lang_reminder:
+            user = user + final_lang_reminder
         call_options = _with_prompt_inputs(
             options_payload,
             system=composed_system,
@@ -788,7 +859,7 @@ async def run_analysis(
                     link_template=link_template,
                     topic_titles=topic_titles,
                     chat_groups=chat_groups,
-                    language=content_language,
+                    language=report_language,
                     source_kind=opts.source_kind,
                 )
             )
@@ -798,6 +869,8 @@ async def run_analysis(
                 msg_count=len(chunk.messages),
                 messages=dynamic,
             )
+            if final_lang_reminder:
+                user = user + final_lang_reminder
             call_options = _with_prompt_inputs(
                 options_payload,
                 system=composed_system,
@@ -835,20 +908,22 @@ async def run_analysis(
         any_truncated = any_truncated or tr
 
     # Reduce stage prompt is fed to the LLM → labels and instructions in
-    # `content_language` so the model sees one coherent language.
-    fragment_label = i18n_t("fragment_label", content_language)
+    # the report language so the model sees one coherent language.
+    fragment_label = i18n_t("fragment_label", report_language)
     joined = "\n\n---\n\n".join(f"[{fragment_label} {i + 1}]\n{r[1]}" for i, r in enumerate(map_results))
     from unread.analyzer.prompts import _load_reduce_prompt as _load_reduce
 
-    reduce_prompt = _load_reduce(content_language)
+    reduce_prompt = _load_reduce(report_language)
     reduce_user = (
         f"{reduce_prompt}\n\n"
-        f"{i18n_t('period_label', content_language)}: {_fmt_period(period)}\n"
-        f"{i18n_t('chat_label', content_language)}: {title or '—'}\n"
-        f"{i18n_t('messages_label', content_language)}: {len(msgs)}\n"
-        f"{i18n_t('fragment_count_label', content_language)}: {len(map_results)}\n\n"
+        f"{i18n_t('period_label', report_language)}: {_fmt_period(period)}\n"
+        f"{i18n_t('chat_label', report_language)}: {title or '—'}\n"
+        f"{i18n_t('messages_label', report_language)}: {len(msgs)}\n"
+        f"{i18n_t('fragment_count_label', report_language)}: {len(map_results)}\n\n"
         f"{joined}"
     )
+    if final_lang_reminder:
+        reduce_user = reduce_user + final_lang_reminder
     reduce_options = _with_prompt_inputs(
         options_payload,
         system=composed_system,

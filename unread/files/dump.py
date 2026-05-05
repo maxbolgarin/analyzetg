@@ -39,7 +39,8 @@ async def cmd_dump_file(
     console_out: bool = False,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
 ) -> None:
     """Save a local file (or stdin bytes) to ~/.unread/reports/files/.
 

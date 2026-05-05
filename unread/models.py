@@ -51,7 +51,7 @@ class Subscription:
     transcribe_voice: bool = True
     transcribe_videonote: bool = True
     transcribe_video: bool = False
-    # Per-subscription analyze defaults consumed by `unread chats run`. NULL /
+    # Per-subscription analyze defaults consumed by `unread tg chats run`. NULL /
     # empty values fall back to config / CLI defaults.
     preset: str = "summary"
     period: str = "unread"  # unread | last24h | last96h | last7 | last30 | last90 | year_start | full

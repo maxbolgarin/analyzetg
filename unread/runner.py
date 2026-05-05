@@ -1,7 +1,7 @@
-"""`unread chats run` — walk every enabled subscription, sync + analyze each.
+"""`unread tg chats run` — walk every enabled subscription, sync + analyze each.
 
 Each subscription stores its own `preset`, `period`, `enrich_kinds`,
-`mark_read`, and `post_to` (set during `unread chats add`). `unread chats run` walks
+`mark_read`, and `post_to` (set during `unread tg chats add`). `unread tg chats run` walks
 the enabled list and dispatches each one through the same machinery as
 `unread analyze` would. Global flags on the command override the per-sub
 value for that run only — handy for "run everyone with `--preset
@@ -93,7 +93,7 @@ async def _has_linked_comments_sub(repo, channel_chat_id: int, all_subs: list[Su
     """Return True when this channel has a sibling `comments` sub.
 
     Used to auto-pass `--with-comments` for the channel's analyze run so
-    `unread chats run` matches the user's stated intent at `chats add` time.
+    `unread tg chats run` matches the user's stated intent at `chats add` time.
     """
     chat_row = await repo.get_chat(channel_chat_id)
     linked = (chat_row or {}).get("linked_chat_id")
@@ -416,7 +416,7 @@ async def cmd_run(
         summary.add_row(str(r["chat_id"]), r["title"][:40], status, r["err"] or "")
     console.print(summary)
     console.print(f"[bold]{_tf('run_results_summary', ok=ok_count, total=len(results))}[/]")
-    # Exit non-zero on partial failure so `unread chats run && next-step.sh`
+    # Exit non-zero on partial failure so `unread tg chats run && next-step.sh`
     # doesn't silently continue when subscriptions failed.
     failed_count = len(results) - ok_count
     if failed_count > 0:
@@ -576,15 +576,16 @@ async def _cmd_run_flat(
                     include_transcripts=True,
                     mark_read=mr_eff,
                     with_comments=with_comments,
-                    # Pre-prod review: language / content_language used to
+                    # Pre-prod review: language / report_language used to
                     # be dropped on this code path even though
                     # `prepare_chat_run` accepts them, so reports came
                     # back in the default locale regardless of
-                    # `--language` / `--content-language`. Pull from
+                    # `--language` / `--report-language`. Pull from
                     # settings (which already reflects the CLI overrides)
                     # so the run honors the user's choice.
                     language=settings.locale.language,
-                    content_language=getattr(settings.locale, "content_language", None),
+                    report_language=getattr(settings.locale, "report_language", None)
+                    or settings.locale.language,
                 )
             except typer.Exit as e:
                 if e.exit_code == 0:

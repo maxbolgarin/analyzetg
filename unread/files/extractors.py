@@ -324,7 +324,9 @@ async def extract_image(path: Path) -> ExtractResult:
     if not settings.openai.api_key:
         raise RuntimeError(_t("error_image_no_openai"))
 
-    lang = (settings.locale.content_language or settings.locale.language or "en").lower()
+    # Image-description prompt is fed to the LLM; pick the report language
+    # so the description matches the rest of the analysis output.
+    lang = (settings.locale.report_language or settings.locale.language or "en").lower()
     sys_prompt, user_prompt = _resolve_prompts(lang)
     mime = _mime_from_path(path)
     with path.open("rb") as f:

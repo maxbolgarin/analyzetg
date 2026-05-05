@@ -125,7 +125,8 @@ async def _dispatch_dump_youtube(
     output: Path | None,
     console_out: bool,
     language: str,
-    content_language: str,
+    report_language: str,
+    source_language: str,
     yes: bool,
     telegram_only_flags: dict[str, object],
 ) -> None:
@@ -144,7 +145,8 @@ async def _dispatch_dump_youtube(
         output=output,
         console_out=console_out,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
         yes=yes,
     )
 
@@ -157,7 +159,8 @@ async def _dispatch_dump_website(
     output: Path | None,
     console_out: bool,
     language: str,
-    content_language: str,
+    report_language: str,
+    source_language: str,
     yes: bool,
     telegram_only_flags: dict[str, object],
 ) -> None:
@@ -174,7 +177,8 @@ async def _dispatch_dump_website(
         output=output,
         console_out=console_out,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
         yes=yes,
     )
 
@@ -209,7 +213,8 @@ async def cmd_dump(
     with_comments: bool = False,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     mode: str | None = None,
     youtube_source: str = "auto",
     max_images: int = 50,
@@ -265,7 +270,8 @@ async def cmd_dump(
             folder=folder,
             yes=yes,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
         )
         return
 
@@ -286,7 +292,8 @@ async def cmd_dump(
             console_out=console_out,
             mark_read=mark_read,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
         )
         return
 
@@ -308,7 +315,12 @@ async def cmd_dump(
     # tg_client(...)` below.
     settings_for_lang = get_settings()
     eff_lang_pre = (language or settings_for_lang.locale.language or "en").lower()
-    eff_clang_pre = (content_language or settings_for_lang.locale.content_language or eff_lang_pre).lower()
+    eff_rlang_pre = (report_language or settings_for_lang.locale.report_language or eff_lang_pre).lower()
+    eff_slang_pre = (
+        (source_language if source_language is not None else settings_for_lang.locale.content_language)
+        .strip()
+        .lower()
+    )
 
     from unread.cli import _STDIN_REF_SENTINEL, _looks_like_local_file
 
@@ -321,7 +333,8 @@ async def cmd_dump(
             console_out=console_out,
             yes=yes,
             language=eff_lang_pre,
-            content_language=eff_clang_pre,
+            report_language=eff_rlang_pre,
+            source_language=eff_slang_pre,
         )
         return
 
@@ -335,7 +348,8 @@ async def cmd_dump(
             output=output,
             console_out=console_out,
             language=eff_lang_pre,
-            content_language=eff_clang_pre,
+            report_language=eff_rlang_pre,
+            source_language=eff_slang_pre,
             yes=yes,
             telegram_only_flags={
                 "--folder": folder,
@@ -373,7 +387,8 @@ async def cmd_dump(
             output=output,
             console_out=console_out,
             language=eff_lang_pre,
-            content_language=eff_clang_pre,
+            report_language=eff_rlang_pre,
+            source_language=eff_slang_pre,
             yes=yes,
             telegram_only_flags={
                 "--folder": folder,
@@ -452,13 +467,14 @@ async def cmd_dump(
         # Resolve effective languages once so every dispatch path below
         # gets the same values without re-reading settings each time.
         eff_language = (language or settings.locale.language or "en").lower()
-        eff_content_language = (
-            content_language
-            or settings.locale.content_language
-            or language
-            or settings.locale.language
-            or "en"
+        eff_report_language = (
+            report_language or settings.locale.report_language or language or settings.locale.language or "en"
         ).lower()
+        eff_source_language = (
+            (source_language if source_language is not None else settings.locale.content_language)
+            .strip()
+            .lower()
+        )
 
         if is_forum and all_per_topic:
             await _dump_forum_per_topic(
@@ -484,7 +500,8 @@ async def cmd_dump(
                 save_media_types=save_media_kinds,
                 yes=yes,
                 language=eff_language,
-                content_language=eff_content_language,
+                report_language=eff_report_language,
+                source_language=eff_source_language,
             )
             return
 
@@ -571,7 +588,8 @@ async def cmd_dump(
             save_media_types=save_media_kinds,
             with_comments=with_comments,
             language=eff_language,
-            content_language=eff_content_language,
+            report_language=eff_report_language,
+            source_language=eff_source_language,
         )
 
 
@@ -603,7 +621,8 @@ async def _dump_single(
     save_media_types: set[str] | None = None,
     with_comments: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
 ) -> None:
     """Dump one chat / thread / flat-forum using the shared pipeline."""
     from unread.core.pipeline import prepare_chat_run
@@ -637,7 +656,8 @@ async def _dump_single(
         mark_read=mark_read,
         with_comments=with_comments,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     )
 
     if save_media and prepared.messages:
@@ -692,7 +712,8 @@ async def _dump_forum_per_topic(
     save_media_types: set[str] | None = None,
     yes: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
 ) -> None:
     """One dump per topic, using the shared per-topic iterator.
 
@@ -741,7 +762,8 @@ async def _dump_forum_per_topic(
         mark_read=mark_read,
         yes=yes,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     ):
         try:
             if save_media and prepared.messages:
@@ -907,7 +929,8 @@ async def run_all_unread_dump(
     folder: str | None = None,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
 ) -> None:
     """Public: dump every unread chat in one batch (was the old no-ref default).
 
@@ -916,7 +939,10 @@ async def run_all_unread_dump(
     """
     settings = get_settings()
     eff_language = (language or settings.locale.language or "en").lower()
-    eff_content_language = (content_language or settings.locale.content_language or eff_language).lower()
+    eff_report_language = (report_language or settings.locale.report_language or eff_language).lower()
+    eff_source_language = (
+        (source_language if source_language is not None else settings.locale.content_language).strip().lower()
+    )
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _dump_no_ref(
             client=client,
@@ -935,7 +961,8 @@ async def run_all_unread_dump(
             folder=folder,
             yes=yes,
             language=eff_language,
-            content_language=eff_content_language,
+            report_language=eff_report_language,
+            source_language=eff_source_language,
         )
 
 
@@ -957,7 +984,8 @@ async def _dump_no_ref(
     folder: str | None = None,
     yes: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
 ) -> None:
     # Tri-state: ask once unless --yes was passed (default: keep unread).
     import sys as _sys
@@ -1014,7 +1042,8 @@ async def _dump_no_ref(
         folder=folder,
         yes=yes,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     ):
         msgs = prepared.messages
         title = prepared.chat_title

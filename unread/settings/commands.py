@@ -99,13 +99,20 @@ _SETTINGS: tuple[SettingDef, ...] = (
         "set_label_ai_base_url",
         "set_desc_ai_base_url",
     ),
-    # Languages
+    # Languages — three independent axes; see :class:`unread.config.LocaleCfg`.
     SettingDef(
         "locale.language",
         "settings_cat_languages",
         "ui_lang",
         "set_label_locale_language",
         "set_desc_locale_language",
+    ),
+    SettingDef(
+        "locale.report_language",
+        "settings_cat_languages",
+        "ui_lang_clear",
+        "set_label_locale_report_language",
+        "set_desc_locale_report_language",
     ),
     SettingDef(
         "locale.content_language",
@@ -296,25 +303,13 @@ async def _interactive(repo) -> None:
         apply_db_overrides_sync(get_settings(), db_path)
 
     saved_anything = False
-    # Double-ESC guard: a single ESC at the top-level menu sets this
-    # flag and prints a hint instead of bailing. The next iteration's
-    # ESC then exits cleanly. ESC inside a sub-picker is handled in
-    # the per-type editors and acts as "back" — it returns to this
-    # loop with `_was_esc_at_top` reset, so a sub-picker ESC followed
-    # by a top-level ESC still requires the double press to exit.
-    _was_esc_at_top = False
     while True:
         overrides = await repo.get_all_app_settings()
         s = get_settings()
         try:
             choice = await _pick_setting_to_edit(overrides, s)
         except KeyboardInterrupt:
-            if _was_esc_at_top:
-                break
-            _was_esc_at_top = True
-            console.print(f"[grey70]{_t('settings_press_esc_again_to_exit')}[/]")
-            continue
-        _was_esc_at_top = False
+            break
 
         if choice is None or choice == _SENTINEL_DONE:
             break
@@ -401,12 +396,12 @@ async def _interactive(repo) -> None:
                     _apply_one_override(get_settings(), stale_key, "")
             if cleared:
                 console.print(f"[grey70]{_tf('provider_switch_cleared_models', keys=', '.join(cleared))}[/]")
-        # Advisory: when the user changes UI language but content_language
+        # Advisory: when the user changes UI language but report_language
         # is empty/unset, remind them that LLM output language is a
-        # separate axis.
+        # separate axis (and content_language is yet another, source-hint).
         if sdef.key == "locale.language" and new_value:
-            content_lang = (overrides.get("locale.content_language") or "").strip()
-            if not content_lang:
+            report_lang = (overrides.get("locale.report_language") or "").strip()
+            if not report_lang:
                 console.print(f"[grey70]{_tf('lang_axes_hint', lang=new_value)}[/]")
         saved_anything = True
 
@@ -473,7 +468,17 @@ def _current_display(sd: SettingDef, overrides: dict[str, str], s: Any) -> str:
     if sd.kind == "ui_lang":
         return str(s.locale.language or "en")
     if sd.kind == "ui_lang_clear":
-        return str(s.locale.content_language or _t("settings_value_follows_ui"))
+        # Two rows share this widget — locale.report_language (empty
+        # falls back to UI) and locale.content_language (empty means
+        # "let the LLM auto-detect from the source"). Display the right
+        # value AND the right "empty" placeholder for each.
+        section, attr = sd.key.split(".", 1)
+        cur = getattr(getattr(s, section), attr, "") or ""
+        if cur:
+            return str(cur)
+        if sd.key == "locale.content_language":
+            return _t("settings_value_autodetect")
+        return _t("settings_value_follows_ui")
     if sd.kind == "audio_lang":
         return str(s.openai.audio_language or _t("settings_value_autodetect"))
     if sd.kind in {"model", "audio_model", "vision_model"}:
@@ -504,7 +509,14 @@ async def _edit_one(sd: SettingDef, overrides: dict[str, str], s: Any) -> str | 
         return await _pick_language(sd, cur, allow_clear=False)
     if sd.kind == "ui_lang_clear":
         cur = overrides.get(sd.key) or ""
-        return await _pick_language(sd, cur, allow_clear=True, clear_label=_t("settings_clear_follow_ui"))
+        # The two rows have different "clear" semantics: report_language
+        # follows the UI; content_language switches to LLM auto-detect.
+        clear_label = (
+            _t("settings_clear_autodetect")
+            if sd.key == "locale.content_language"
+            else _t("settings_clear_follow_ui")
+        )
+        return await _pick_language(sd, cur, allow_clear=True, clear_label=clear_label)
     if sd.kind == "audio_lang":
         cur = overrides.get(sd.key) or ""
         return await _pick_language(

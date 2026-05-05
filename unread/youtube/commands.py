@@ -244,7 +244,9 @@ def _render_metadata_panel(meta: YoutubeMetadata, *, audio_estimate: float) -> P
     cap_label = "[green]available[/]" if captions else "[yellow]none[/] (Whisper required)"
     rows.append(f"[bold]Captions[/] {cap_label}")
     if audio_estimate > 0:
-        rows.append(f"[bold]Whisper estimate[/] ~${audio_estimate:.4f}")
+        rows.append(
+            f"[bold]Whisper estimate[/] ~${audio_estimate:.4f} (audio transcription only; analysis cost is extra)"
+        )
     rows.append(f"[bold]URL[/]      {meta.url}")
     if meta.description:
         desc = meta.description.strip().splitlines()[0][:200]
@@ -276,12 +278,18 @@ async def _interactive_pick_source(
     from unread.util.prompt import separator as _sep
 
     has_captions = _has_any_captions(meta)
-    audio_label = f"Audio + Whisper — ~${audio_estimate:.4f}" if audio_estimate > 0 else "Audio + Whisper"
+    audio_label = (
+        f"Audio + Whisper — ~${audio_estimate:.4f} + analysis"
+        if audio_estimate > 0
+        else "Audio + Whisper + analysis"
+    )
     choices: list = [
         Choice(value="auto", label="Auto — captions if available, otherwise Whisper (recommended)"),
     ]
     if has_captions:
-        choices.append(Choice(value="captions", label="Captions only — free, fast"))
+        choices.append(
+            Choice(value="captions", label="Captions only — cheaper (skips Whisper; analysis still costs)")
+        )
     choices.append(Choice(value="audio", label=audio_label))
     choices.append(_sep())
     choices.append(Choice(value="__cancel__", label="Cancel"))
@@ -333,6 +341,7 @@ async def cmd_analyze_youtube(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     no_cache: bool = False,
     max_cost: float | None = None,
     dry_run: bool = False,
@@ -341,7 +350,8 @@ async def cmd_analyze_youtube(
     post_to: str | None = None,
     post_saved: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
     youtube_source: TranscriptSource = "auto",
     yes: bool = False,
 ) -> None:
@@ -378,6 +388,7 @@ async def cmd_analyze_youtube(
     async with open_repo(settings.storage.data_path) as repo:
         cached = None if no_cache else await repo.get_youtube_video(video_id)
         timed_cues: list[tuple[int, str]] | None = None
+        transcript_lang_kind: str | None = None
         if cached and cached.get("transcript"):
             console.print(f"[grey70]Using cached YouTube metadata + transcript ({video_id})[/]")
             metadata = _restore_metadata_from_row(cached)
@@ -385,6 +396,7 @@ async def cmd_analyze_youtube(
             transcript_source: str = cached.get("transcript_source") or "captions"
             transcript_cost = float(cached.get("transcript_cost_usd") or 0.0)
             transcript_lang = cached.get("language")
+            transcript_lang_kind = cached.get("transcript_lang_kind")
             timed_raw = cached.get("transcript_timed_json")
             if timed_raw:
                 try:
@@ -393,6 +405,12 @@ async def cmd_analyze_youtube(
                     timed_cues = [(int(s), str(t)) for s, t in _json.loads(timed_raw)]
                 except (TypeError, ValueError):
                     timed_cues = None
+            # Match the fresh-fetch UX: render the metadata panel for
+            # cached runs too. Audio cost estimate is meaningless on the
+            # cached path (the transcript already exists, no Whisper
+            # call coming) so we pass 0.0 — the panel still shows title /
+            # channel / duration / language, which is the useful part.
+            console.print(_render_metadata_panel(metadata, audio_estimate=0.0))
         else:
             console.print(f"[grey70]Fetching YouTube metadata for {video_id}…[/]")
             try:
@@ -441,6 +459,7 @@ async def cmd_analyze_youtube(
             transcript_cost = tres.cost_usd
             transcript_lang = tres.language
             timed_cues = tres.timed_cues
+            transcript_lang_kind = None if tres.is_auto is None else ("auto" if tres.is_auto else "manual")
 
             cost_str = f", ${transcript_cost:.4f}" if transcript_cost > 0 else ""
             console.print(
@@ -468,6 +487,7 @@ async def cmd_analyze_youtube(
                 ),
                 transcript_cost_usd=transcript_cost,
                 transcript_timed=timed_cues,
+                transcript_lang_kind=transcript_lang_kind,
             )
 
         if not transcript_text.strip():
@@ -475,7 +495,7 @@ async def cmd_analyze_youtube(
             raise typer.Exit(2)
 
         messages = _build_synthetic_messages(metadata, transcript_text, timed_cues=timed_cues)
-        loaded_preset = _load_preset_for_commands(effective_preset, prompt_file, language=content_language)
+        loaded_preset = _load_preset_for_commands(effective_preset, prompt_file, language=report_language)
 
         if dry_run:
             n = len(messages)
@@ -553,7 +573,8 @@ async def cmd_analyze_youtube(
             opts=opts,
             messages=messages,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             link_template_override=link_template,
         )
 
@@ -565,12 +586,21 @@ async def cmd_analyze_youtube(
             result.enrich_cost_usd += transcript_cost
             result.enrich_kinds = list({*result.enrich_kinds, transcript_source})
 
+        # Surface which captions track the analysis is based on so the user
+        # can spot a Russian-channel-with-English-manual-subs mismatch.
+        if transcript_lang:
+            result.transcript_lang = transcript_lang
+        if transcript_source == "audio":
+            result.transcript_lang_kind = "audio"
+        elif transcript_lang_kind:
+            result.transcript_lang_kind = transcript_lang_kind
+
         if self_check and result.final_result and messages:
             verification, verification_err = await _self_check(
                 result=result,
                 messages=messages,
                 repo=repo,
-                content_language=content_language,
+                report_language=report_language,
             )
             heading = _t("verification_heading", language)
             if verification:
@@ -602,7 +632,8 @@ async def cmd_analyze_youtube(
             result,
             output=output_path,
             title=metadata.title or video_id,
-            console_out=console_out,
+            console_out=not no_console,
+            no_save=console_out,
         )
 
         post_target = post_to if post_to else ("me" if post_saved else None)

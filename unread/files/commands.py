@@ -261,6 +261,7 @@ async def cmd_analyze_file(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     no_cache: bool = False,
     max_cost: float | None = None,
     dry_run: bool = False,
@@ -268,7 +269,8 @@ async def cmd_analyze_file(
     post_to: str | None = None,
     post_saved: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
     yes: bool = False,
 ) -> None:
     """Analyze a local file or stdin. Same flag set as the chat / website paths."""
@@ -365,7 +367,7 @@ async def cmd_analyze_file(
             extra=meta_extra,
         )
 
-        loaded_preset = _load_preset_for_commands(effective_preset, prompt_file, language=content_language)
+        loaded_preset = _load_preset_for_commands(effective_preset, prompt_file, language=report_language)
 
         if dry_run:
             n = len(messages)
@@ -425,7 +427,8 @@ async def cmd_analyze_file(
             opts=opts,
             messages=messages,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             link_template_override=link_template,
         )
 
@@ -434,7 +437,7 @@ async def cmd_analyze_file(
                 result=result,
                 messages=messages,
                 repo=repo,
-                content_language=content_language,
+                report_language=report_language,
             )
             heading = _t("verification_heading", language)
             if verification:
@@ -457,6 +460,7 @@ async def cmd_analyze_file(
             result,
             output=output_path,
             title=name,
+            console_out=not no_console,
             no_save=console_out,
         )
 

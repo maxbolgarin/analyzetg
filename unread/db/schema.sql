@@ -28,9 +28,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     transcribe_voice     INTEGER DEFAULT 1,
     transcribe_videonote INTEGER DEFAULT 1,
     transcribe_video     INTEGER DEFAULT 0,
-    -- Per-subscription analyze defaults consumed by `unread chats run`. NULL /
+    -- Per-subscription analyze defaults consumed by `unread tg chats run`. NULL /
     -- empty values fall back to config / CLI defaults; explicit values
-    -- here let `unread chats run` walk every enabled sub and analyze each one
+    -- here let `unread tg chats run` walk every enabled sub and analyze each one
     -- with its own settings without re-prompting.
     preset               TEXT DEFAULT 'summary',
     period               TEXT DEFAULT 'unread',
@@ -243,6 +243,7 @@ CREATE TABLE IF NOT EXISTS youtube_videos (
     language            TEXT,
     transcript          TEXT,
     transcript_source   TEXT,        -- 'captions' | 'audio'
+    transcript_lang_kind TEXT,       -- 'manual' | 'auto' (captions only; null for audio)
     transcript_model    TEXT,        -- whisper model id when source='audio'
     transcript_cost_usd REAL,
     transcript_timed_json TEXT,      -- JSON [[start_sec, "text"], …]; only for captions

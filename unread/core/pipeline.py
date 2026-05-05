@@ -377,7 +377,7 @@ async def prepare_chat_run(
     skip_filter: bool = False,
     with_comments: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
 ) -> PreparedRun:
     """Prepare a single chat run: resolve → backfill → enrich → ready for consumer.
 
@@ -477,7 +477,7 @@ async def prepare_chat_run(
             repo=repo,
             opts=enrich_opts,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
         )
         summary = enrich_stats.summary()
         if summary:
@@ -546,7 +546,7 @@ async def prepare_chat_runs_per_topic(
     mark_read: bool = False,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
 ):
     """Yield one PreparedRun per forum topic.
 
@@ -614,7 +614,7 @@ async def prepare_chat_runs_per_topic(
                 topic_markers=None,
                 mark_read=mark_read,
                 language=language,
-                content_language=content_language,
+                report_language=report_language,
             )
             yield prepared
         except typer.Exit:
@@ -641,7 +641,7 @@ async def prepare_all_unread_runs(
     folder: str | None = None,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
 ):
     """Yield one PreparedRun per chat with unread messages.
 
@@ -731,7 +731,7 @@ async def prepare_all_unread_runs(
                     topic_markers=topic_markers,
                     mark_read=mark_read,
                     language=language,
-                    content_language=content_language,
+                    report_language=report_language,
                 )
                 yield prepared
                 continue
@@ -793,7 +793,7 @@ async def prepare_all_unread_runs(
                 min_msg_chars=min_msg_chars,
                 mark_read=mark_read,
                 language=language,
-                content_language=content_language,
+                report_language=report_language,
             )
             yield prepared
         except typer.Exit:

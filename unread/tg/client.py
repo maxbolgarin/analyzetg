@@ -128,9 +128,14 @@ async def offer_inline_tg_init(reason: str) -> bool:
     that already knows interactive prompts are safe.
 
     `reason`:
-      - ``"missing_creds"`` — api_id / api_hash are blank.
+      - ``"missing_creds"`` — api_id / api_hash are blank. No inline
+        confirm: ``cmd_init``'s own ``_run_telegram_creds_step`` asks
+        "Set up Telegram login now? (y/N)" as the single decline gate,
+        so a second prompt here would just make the user press y twice.
       - ``"session_expired"`` — creds present, on-disk session
-        unauthorized (revoked / corrupted / password rotated).
+        unauthorized (revoked / corrupted / password rotated). Confirm
+        before proceeding because nothing else gates the re-auth phone
+        prompt.
 
     On accept, the function:
 
@@ -148,16 +153,17 @@ async def offer_inline_tg_init(reason: str) -> bool:
     from rich.console import Console
 
     from unread.config import reset_settings
-    from unread.util.prompt import confirm
 
     console = Console()
     if reason == "missing_creds":
         console.print("[yellow]Telegram is not configured (api_id / api_hash missing).[/]")
+        # No confirm here — the wizard's first step asks for consent.
     else:
-        console.print("[yellow]Telegram session expired or invalid.[/]")
+        from unread.util.prompt import confirm
 
-    if not confirm("Run `unread login` now and continue?", default=True):
-        return False
+        console.print("[yellow]Telegram session expired or invalid.[/]")
+        if not confirm("Run `unread login` now and continue?", default=True):
+            return False
 
     # Deferred import to break the tg.client ↔ tg.commands cycle —
     # tg.commands imports build_client from this module at top of file.

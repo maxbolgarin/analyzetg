@@ -84,7 +84,7 @@ def retry_on_flood(
             # Final attempt — convert FloodWaitError to a friendly RuntimeError
             # so per-subscription handlers in runner.py can report the chat
             # cleanly instead of letting a raw Telethon exception crash the
-            # whole `unread chats run`.
+            # whole `unread tg chats run`.
             try:
                 return await fn(*args, **kwargs)
             except FloodWaitError as e:

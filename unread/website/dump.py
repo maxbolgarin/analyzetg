@@ -88,7 +88,8 @@ async def cmd_dump_website(
     output: Path | None,
     console_out: bool,
     language: str,
-    content_language: str,
+    report_language: str,
+    source_language: str,
     yes: bool,
 ) -> None:
     """Dump a single web page to disk. Markdown body + optional inlined images."""

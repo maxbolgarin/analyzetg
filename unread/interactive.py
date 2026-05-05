@@ -399,7 +399,8 @@ async def run_interactive_analyze(
     post_to: str | None = None,
     with_comments: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
 ) -> None:
     """Default UX for `unread analyze` (no ref). Walk wizard, then run.
 
@@ -429,7 +430,8 @@ async def run_interactive_analyze(
             mark_read=answers.mark_read,
             yes=True,  # wizard already confirmed the plan, no second prompt
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
         )
         return
 
@@ -445,7 +447,8 @@ async def run_interactive_analyze(
     args["by"] = by
     args["post_to"] = post_to
     args["language"] = language
-    args["content_language"] = content_language
+    args["report_language"] = report_language
+    args["source_language"] = source_language
     # CLI explicit value wins; wizard answer fills in when CLI didn't set it.
     args["with_comments"] = with_comments or bool(answers.with_comments)
     await cmd_analyze(**args)
@@ -461,7 +464,8 @@ async def run_interactive_dump(
     console_out: bool = False,
     mark_read: bool | None = None,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
 ) -> None:
     """Default UX for `unread dump` (no ref). Wizard without preset step."""
     answers = await _collect_answers(
@@ -486,7 +490,8 @@ async def run_interactive_dump(
             mark_read=answers.mark_read,
             yes=True,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             **_build_enrich_kwargs(answers),
         )
         return
@@ -500,7 +505,8 @@ async def run_interactive_dump(
         include_transcripts=include_transcripts,
     )
     args["language"] = language
-    args["content_language"] = content_language
+    args["report_language"] = report_language
+    args["source_language"] = source_language
     await cmd_dump(**args)
 
 
@@ -606,7 +612,8 @@ async def run_interactive_ask(
     yes: bool = False,
     no_followup: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     mark_read: bool | None = None,
 ) -> None:
     """Default UX for `unread ask` (no <ref>, no --chat/--folder/--global).
@@ -693,7 +700,8 @@ async def run_interactive_ask(
         yes=yes,
         no_followup=no_followup,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
         build_index=False,
         mark_read=effective_mark_read,
         **enrich_kwargs,
@@ -1179,7 +1187,9 @@ async def _collect_answers(
                 if mode == "analyze" and not run_on_all and preset is not None:
                     n_msgs = _count_for_period(period, period_counts)
                     if n_msgs is not None and n_msgs > 0:
-                        wizard_presets = get_presets(settings.locale.language or "en")
+                        wizard_presets = get_presets(
+                            settings.locale.report_language or settings.locale.language or "en"
+                        )
                         chosen_preset = (
                             wizard_presets.get(preset)
                             or wizard_presets.get("summary")
@@ -1649,7 +1659,7 @@ def _chat_row(
     terminal widths. Title is unpadded (trails everything).
 
     `subscribed=True` prefixes the title with a star so users browsing
-    `unread chats add` see at a glance which dialogs they've already
+    `unread tg chats add` see at a glance which dialogs they've already
     subscribed to (and avoid duplicate-adding).
     """
     star = "★ " if subscribed else "  "
@@ -1685,7 +1695,7 @@ async def _pick_chat(
 
     `subscribed_ids`, when provided, prefixes each row whose chat_id is
     in the set with a `★` so the user can see what's already in
-    `unread chats list` without leaving the picker. Empty set / None
+    `unread tg chats list` without leaving the picker. Empty set / None
     behaves like before.
 
     `offer_all_local` (used by the ask wizard) adds a "Search ALL synced
@@ -1823,7 +1833,7 @@ async def _pick_from_all(
     """Scan every dialog and present a searchable list.
 
     `subscribed_ids` prefixes each subscribed row with a `★` so the
-    `unread chats add` flow shows what's already on the subscription list.
+    `unread tg chats add` flow shows what's already on the subscription list.
 
     `offer_all_local` (used by the ask wizard) prepends a "Search ALL
     synced chats (local DB)" row that returns the `ALL_LOCAL` sentinel.
@@ -2030,7 +2040,8 @@ async def _pick_preset():
     """
     from unread.config import get_settings
 
-    active_lang = (get_settings().locale.language or "en").lower()
+    locale = get_settings().locale
+    active_lang = (locale.report_language or locale.language or "en").lower()
     presets_for_lang = get_presets(active_lang)
 
     preferred = [
@@ -2283,10 +2294,10 @@ async def _pick_period(
     "From message" — otherwise it's None.
 
     `static_only=True` hides "Custom date range…" and "From a specific
-    message…". Used by `unread chats add` where the persisted `period`
+    message…". Used by `unread tg chats add` where the persisted `period`
     field has to be a static key (unread/last7/last30/full) — a
     one-shot date range or msg id can't be the recurring default for
-    `unread chats run`.
+    `unread tg chats run`.
 
     "Unread" is always available — including for all-flat forum mode, where
     it resolves to "since the forum's dialog-level read marker" (the same

@@ -217,7 +217,8 @@ async def cmd_ask(
     no_enrich: bool = False,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     mark_read: bool | None = None,
 ) -> None:
     """Ask a free-form question; get a single LLM answer with citations.
@@ -274,7 +275,8 @@ async def cmd_ask(
             yes=yes,
             no_followup=no_followup,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             mark_read=mark_read,
         )
 
@@ -337,9 +339,14 @@ async def cmd_ask(
             raise typer.Exit(2)
     settings = get_settings()
     effective_language = (language or settings.locale.language or "en").lower()
-    effective_content_language = (
-        content_language or settings.locale.content_language or effective_language
+    effective_report_language = (
+        report_language or settings.locale.report_language or effective_language
     ).lower()
+    # Whisper-style source-content hint. Empty = LLM auto-detects from
+    # the cited messages. CLI flag wins over saved settings.
+    effective_source_language = (
+        (source_language if source_language is not None else settings.locale.content_language).strip().lower()
+    )
     since_dt, until_dt = compute_window(since, until, last_days, last_hours, last_minutes)
 
     # Skip the Telegram open when the request is fully local — see
@@ -471,7 +478,8 @@ async def cmd_ask(
                         repo=repo,
                         opts=enrich_opts,
                         language=effective_language,
-                        content_language=effective_content_language,
+                        report_language=effective_report_language,
+                        source_language=effective_source_language,
                     )
                     summary = stats.summary()
                     if summary:
@@ -571,7 +579,8 @@ async def cmd_ask(
                 yes=yes,
                 fallback_pool=prior_pool if is_followup else None,
                 language=effective_language,
-                content_language=effective_content_language,
+                report_language=effective_report_language,
+                source_language=effective_source_language,
             )
 
         # First turn — same shape as before --interactive existed.
@@ -698,7 +707,8 @@ async def _run_single_turn(
     yes: bool,
     fallback_pool: list[tuple] | None = None,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
 ) -> tuple[str, list[tuple]]:
     """Retrieve → rerank → format → preview → answer for one question.
 
@@ -840,13 +850,15 @@ async def _run_single_turn(
             thread_id=thread,
         )
 
-    # `content_language` drives LLM-facing strings: system prompt,
+    # `report_language` drives LLM-facing strings: system prompt,
     # user-template labels (Question:/Context:/Answer:), chat-group
     # header `=== Chat: ... ===`, and the formatter labels in the
     # context block. `language` is used only for what the user sees
     # rendered by `unread` (cost preview, status messages — already English
-    # in the source).
-    llm_lang = content_language
+    # in the source). `source_language`, when set, is appended below as a
+    # one-line Whisper-style hint so the LLM trusts the input is in that
+    # language without trying to infer it.
+    llm_lang = report_language
     if chat_ids is not None and len(chat_ids) == 1:
         single_chat_id = chat_ids[0]
         formatted = format_messages(msgs, link_template=chat_links.get(single_chat_id), language=llm_lang)
@@ -864,6 +876,12 @@ async def _run_single_turn(
     )
 
     system_prompt = _resolve_system_prompt(llm_lang)
+    if source_language:
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"The source content is in {source_language}. "
+            "Treat citations and quotations as that language; do not translate them."
+        )
     # Cost preview against the *full* messages list (system + history + user).
     messages = _build_history_messages(system_prompt, history, user_text)
     prompt_tokens = sum(count_tokens(m["content"], used_model) for m in messages)

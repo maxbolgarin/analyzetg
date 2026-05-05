@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import aiosqlite
 
@@ -351,7 +351,7 @@ class Repo:
         await self._add_missing_columns("usage_log", {"cached_tokens": "INTEGER"})
         await self._add_missing_columns(
             "youtube_videos",
-            {"transcript_timed_json": "TEXT"},
+            {"transcript_timed_json": "TEXT", "transcript_lang_kind": "TEXT"},
         )
         await self._migrate_legacy_media_transcripts()
 
@@ -1013,11 +1013,13 @@ class Repo:
         retention_days: int,
         chat_id: int | None = None,
         keep_transcripts: bool = True,
+        all_messages: bool = False,
     ) -> dict[str, int]:
         """Preview what redact_old_messages would affect. Returns
         {"messages": N, "with_text": N, "with_transcript": N, "to_redact": N}.
-        `to_redact` = rows that actually have something to null given `keep_transcripts`."""
-        if retention_days <= 0:
+        `to_redact` = rows that actually have something to null given `keep_transcripts`.
+        `all_messages=True` disables the retention filter (every row counts)."""
+        if not all_messages and retention_days <= 0:
             return {"messages": 0, "with_text": 0, "with_transcript": 0, "to_redact": 0}
         sql = (
             "SELECT COUNT(*) AS n,"
@@ -1025,12 +1027,18 @@ class Repo:
             " SUM(CASE WHEN transcript IS NOT NULL THEN 1 ELSE 0 END) AS with_transcript,"
             " SUM(CASE WHEN text IS NOT NULL"
             "          OR (? = 0 AND transcript IS NOT NULL) THEN 1 ELSE 0 END) AS to_redact"
-            " FROM messages WHERE datetime(date) < datetime('now', ?)"
+            " FROM messages"
         )
-        args: list[Any] = [1 if keep_transcripts else 0, f"-{retention_days} days"]
+        args: list[Any] = [1 if keep_transcripts else 0]
+        where: list[str] = []
+        if not all_messages:
+            where.append("datetime(date) < datetime('now', ?)")
+            args.append(f"-{retention_days} days")
         if chat_id is not None:
-            sql += " AND chat_id=?"
+            where.append("chat_id=?")
             args.append(chat_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         cur = await self._conn.execute(sql, args)
         row = await cur.fetchone()
         await cur.close()
@@ -1041,30 +1049,172 @@ class Repo:
             "to_redact": int(row["to_redact"] or 0),
         }
 
+    async def redactable_breakdown(
+        self,
+        retention_days: int,
+        chat_id: int | None = None,
+        keep_transcripts: bool = True,
+        all_messages: bool = False,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Per-chat preview of what `redact_old_messages` would touch.
+
+        Returns up to `limit` chats sorted by row-count desc:
+        ``[{"chat_id": ..., "title": ..., "rows": N, "oldest": iso, "newest": iso}, …]``.
+        Each entry counts only rows that actually have something to null
+        (mirrors the `to_redact` predicate from `count_redactable_messages`)
+        so the breakdown sums to the same total the user already saw.
+        """
+        if not all_messages and retention_days <= 0:
+            return []
+        sql = (
+            "SELECT m.chat_id AS chat_id,"
+            "       COALESCE(c.title, '') AS title,"
+            "       COUNT(*) AS rows_n,"
+            "       MIN(m.date) AS oldest,"
+            "       MAX(m.date) AS newest"
+            " FROM messages m LEFT JOIN chats c ON c.id = m.chat_id"
+        )
+        args: list[Any] = []
+        where: list[str] = []
+        if not all_messages:
+            where.append("datetime(m.date) < datetime('now', ?)")
+            args.append(f"-{retention_days} days")
+        if chat_id is not None:
+            where.append("m.chat_id = ?")
+            args.append(chat_id)
+        # Same predicate the UPDATE uses so the breakdown matches `to_redact`.
+        if keep_transcripts:
+            where.append("m.text IS NOT NULL")
+        else:
+            where.append("(m.text IS NOT NULL OR m.transcript IS NOT NULL)")
+        sql += " WHERE " + " AND ".join(where)
+        sql += " GROUP BY m.chat_id, c.title ORDER BY rows_n DESC LIMIT ?"
+        args.append(int(limit))
+        cur = await self._conn.execute(sql, args)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [
+            {
+                "chat_id": int(r["chat_id"]),
+                "title": r["title"] or "",
+                "rows": int(r["rows_n"] or 0),
+                "oldest": r["oldest"],
+                "newest": r["newest"],
+            }
+            for r in rows
+        ]
+
+    async def tg_overview(self) -> dict[str, Any]:
+        """Aggregate counts across the whole `messages` table.
+
+        Returns a dict with: ``messages``, ``chats``, ``with_text``,
+        ``with_transcript``, plus ``oldest`` / ``newest``. Used by
+        ``cache tg`` (default ls header) and ``cache tg stats`` to give
+        a one-shot snapshot of what's in the local Telegram cache,
+        without applying the redaction predicate.
+        """
+        sql = (
+            "SELECT COUNT(*) AS messages,"
+            " COUNT(DISTINCT chat_id) AS chats,"
+            " SUM(CASE WHEN text IS NOT NULL THEN 1 ELSE 0 END) AS with_text,"
+            " SUM(CASE WHEN transcript IS NOT NULL THEN 1 ELSE 0 END) AS with_transcript,"
+            " MIN(date) AS oldest,"
+            " MAX(date) AS newest"
+            " FROM messages"
+        )
+        cur = await self._conn.execute(sql)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row or not row["messages"]:
+            return {
+                "messages": 0,
+                "chats": 0,
+                "with_text": 0,
+                "with_transcript": 0,
+                "oldest": None,
+                "newest": None,
+            }
+        return {
+            "messages": int(row["messages"] or 0),
+            "chats": int(row["chats"] or 0),
+            "with_text": int(row["with_text"] or 0),
+            "with_transcript": int(row["with_transcript"] or 0),
+            "oldest": row["oldest"],
+            "newest": row["newest"],
+        }
+
+    async def tg_chats_summary(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Per-chat row counts joined with the chats table for titles.
+
+        Returns up to ``limit`` rows, sorted by message-count desc.
+        Each entry: ``{chat_id, title, messages, with_text,
+        with_transcript, oldest, newest}``. This is the cache-focused
+        counterpart to :meth:`redactable_breakdown` — it counts ALL
+        messages, not just the ones a future ``cache tg purge`` would
+        touch, so the user can see what's stored on disk regardless of
+        retention age.
+        """
+        sql = (
+            "SELECT m.chat_id AS chat_id,"
+            " COALESCE(c.title, '') AS title,"
+            " COUNT(*) AS messages,"
+            " SUM(CASE WHEN m.text IS NOT NULL THEN 1 ELSE 0 END) AS with_text,"
+            " SUM(CASE WHEN m.transcript IS NOT NULL THEN 1 ELSE 0 END) AS with_transcript,"
+            " MIN(m.date) AS oldest,"
+            " MAX(m.date) AS newest"
+            " FROM messages m LEFT JOIN chats c ON c.id = m.chat_id"
+            " GROUP BY m.chat_id"
+            " ORDER BY COUNT(*) DESC LIMIT ?"
+        )
+        cur = await self._conn.execute(sql, (int(limit),))
+        rows = await cur.fetchall()
+        await cur.close()
+        return [
+            {
+                "chat_id": int(r["chat_id"]),
+                "title": r["title"] or "",
+                "messages": int(r["messages"] or 0),
+                "with_text": int(r["with_text"] or 0),
+                "with_transcript": int(r["with_transcript"] or 0),
+                "oldest": r["oldest"],
+                "newest": r["newest"],
+            }
+            for r in rows
+        ]
+
     async def redact_old_messages(
         self,
         retention_days: int,
         chat_id: int | None = None,
         keep_transcripts: bool = True,
+        all_messages: bool = False,
     ) -> int:
-        if retention_days <= 0:
+        """Null out message text (and optionally transcripts) for rows older
+        than `retention_days`. `all_messages=True` skips the retention filter
+        and operates on every row regardless of age."""
+        if not all_messages and retention_days <= 0:
             return 0
         sql = "UPDATE messages SET text=NULL"
         if not keep_transcripts:
             sql += ", transcript=NULL"
         # datetime() parses both our stored ISO-T strings and SQLite's space-separated
         # output, so we can compare them directly.
-        sql += " WHERE datetime(date) < datetime('now', ?)"
-        args: list[Any] = [f"-{retention_days} days"]
+        args: list[Any] = []
+        where: list[str] = []
+        if not all_messages:
+            where.append("datetime(date) < datetime('now', ?)")
+            args.append(f"-{retention_days} days")
         if chat_id is not None:
-            sql += " AND chat_id=?"
+            where.append("chat_id=?")
             args.append(chat_id)
         # Skip rows that have nothing left to null — otherwise rowcount
         # reports matches, not actual redactions.
         if keep_transcripts:
-            sql += " AND text IS NOT NULL"
+            where.append("text IS NOT NULL")
         else:
-            sql += " AND (text IS NOT NULL OR transcript IS NOT NULL)"
+            where.append("(text IS NOT NULL OR transcript IS NOT NULL)")
+        sql += " WHERE " + " AND ".join(where)
         cur = await self._conn.execute(sql, args)
         await self._conn.commit()
         return cur.rowcount or 0
@@ -1259,6 +1409,7 @@ class Repo:
         transcript_model: str | None,
         transcript_cost_usd: float | None,
         transcript_timed: list[tuple[int, str]] | None = None,
+        transcript_lang_kind: str | None = None,
     ) -> None:
         """Upsert a YouTube video row. `tags` flattens to a JSON array.
 
@@ -1275,11 +1426,12 @@ class Repo:
             INSERT INTO youtube_videos(
                 video_id, url, title, channel_id, channel_title, channel_url,
                 description, upload_date, duration_sec, view_count, like_count,
-                tags, language, transcript, transcript_source, transcript_model,
+                tags, language, transcript, transcript_source,
+                transcript_lang_kind, transcript_model,
                 transcript_cost_usd, transcript_timed_json,
                 fetched_at, transcribed_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
                 url=excluded.url,
                 title=excluded.title,
@@ -1295,6 +1447,7 @@ class Repo:
                 language=excluded.language,
                 transcript=COALESCE(excluded.transcript, youtube_videos.transcript),
                 transcript_source=COALESCE(excluded.transcript_source, youtube_videos.transcript_source),
+                transcript_lang_kind=COALESCE(excluded.transcript_lang_kind, youtube_videos.transcript_lang_kind),
                 transcript_model=COALESCE(excluded.transcript_model, youtube_videos.transcript_model),
                 transcript_cost_usd=COALESCE(excluded.transcript_cost_usd, youtube_videos.transcript_cost_usd),
                 transcript_timed_json=COALESCE(excluded.transcript_timed_json, youtube_videos.transcript_timed_json),
@@ -1317,6 +1470,7 @@ class Repo:
                 language,
                 transcript,
                 transcript_source,
+                transcript_lang_kind,
                 transcript_model,
                 transcript_cost_usd,
                 timed_json,
@@ -1477,6 +1631,180 @@ class Repo:
             ),
         )
         await self._conn.commit()
+
+    # ----------------------------------------------- source-cache management
+
+    # `cache sources` CLI helpers. Three source-of-content tables share a
+    # similar shape: every row carries a stable id, a human-readable
+    # label, and a `fetched_at`. The helpers below let `cache sources ls`
+    # / `cache sources purge` operate over them uniformly without each
+    # CLI command knowing the per-table column quirks.
+    _SOURCE_CACHE_TABLES: ClassVar[dict[str, dict[str, str]]] = {
+        "website": {
+            "table": "website_pages",
+            "id_col": "page_id",
+            "label_col": "url",
+            "domain_col": "domain",
+        },
+        "youtube": {
+            "table": "youtube_videos",
+            "id_col": "video_id",
+            "label_col": "url",
+            "domain_col": None,  # all rows are youtube.com → no domain filter
+        },
+        "file": {
+            "table": "local_files",
+            "id_col": "file_id",
+            "label_col": "name",
+            "domain_col": None,
+        },
+    }
+
+    @classmethod
+    def source_cache_kinds(cls) -> tuple[str, ...]:
+        """Return the supported `kind` values for source-cache helpers."""
+        return tuple(cls._SOURCE_CACHE_TABLES.keys())
+
+    async def get_source_cache(self, kind: str, source_id: str) -> dict[str, Any] | None:
+        """Fetch one cached source row by id. Dispatches per-kind to the
+        existing per-table getter so callers don't need to know which
+        table backs which kind. Returns None when the row is absent."""
+        if kind == "website":
+            return await self.get_website_page(source_id)
+        if kind == "youtube":
+            return await self.get_youtube_video(source_id)
+        if kind == "file":
+            return await self.get_local_file(source_id)
+        raise ValueError(f"Unknown source-cache kind: {kind!r}")
+
+    async def list_source_cache(
+        self,
+        kind: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List cached source rows for one kind, newest-first.
+
+        Each row carries `id`, `label`, `domain` (when applicable), and
+        `fetched_at`. Used by `cache sources ls` to show what's on disk
+        without dumping the full row payload.
+        """
+        meta = self._SOURCE_CACHE_TABLES.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown source-cache kind: {kind!r}")
+        domain_select = meta["domain_col"] or "NULL"
+        sql = (
+            f"SELECT {meta['id_col']} AS id, {meta['label_col']} AS label, "
+            f"{domain_select} AS domain, fetched_at "
+            f"FROM {meta['table']} ORDER BY fetched_at DESC LIMIT ?"
+        )
+        cur = await self._conn.execute(sql, (int(limit),))
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def count_source_cache(
+        self,
+        kind: str,
+        *,
+        url: str | None = None,
+        domain: str | None = None,
+        older_than_days: int | None = None,
+    ) -> dict[str, Any]:
+        """Count rows that match the filters; returns rows + age range.
+
+        Filters are AND-ed together. Empty / None filters are skipped.
+        Returns ``{"rows": N, "oldest": iso8601 | None, "newest": iso8601 | None}``.
+        """
+        meta = self._SOURCE_CACHE_TABLES.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown source-cache kind: {kind!r}")
+        where, params = self._source_cache_where(
+            meta, url=url, domain=domain, older_than_days=older_than_days
+        )
+        sql = (
+            f"SELECT COUNT(*) AS rows, MIN(fetched_at) AS oldest, "
+            f"MAX(fetched_at) AS newest FROM {meta['table']} {where}"
+        )
+        cur = await self._conn.execute(sql, params)
+        row = await cur.fetchone()
+        await cur.close()
+        return dict(row) if row else {"rows": 0, "oldest": None, "newest": None}
+
+    async def purge_source_cache(
+        self,
+        kind: str,
+        *,
+        url: str | None = None,
+        domain: str | None = None,
+        older_than_days: int | None = None,
+        all_entries: bool = False,
+    ) -> int:
+        """Delete rows that match the filters. Returns deleted count.
+
+        Refuses to delete everything unless ``all_entries=True`` AND no
+        other filter is set — that's the explicit "wipe this kind"
+        signal. Without it, an empty filter set raises rather than
+        silently nuking the table.
+        """
+        meta = self._SOURCE_CACHE_TABLES.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown source-cache kind: {kind!r}")
+        no_filters = url is None and domain is None and older_than_days is None
+        if no_filters and not all_entries:
+            raise ValueError(
+                "purge_source_cache called with no filters and all_entries=False — "
+                "refusing to wipe the table by accident"
+            )
+        if all_entries and not no_filters:
+            raise ValueError("all_entries=True is mutually exclusive with url / domain / older_than_days")
+        where, params = self._source_cache_where(
+            meta, url=url, domain=domain, older_than_days=older_than_days
+        )
+        sql = f"DELETE FROM {meta['table']} {where}"
+        cur = await self._conn.execute(sql, params)
+        await self._conn.commit()
+        deleted = cur.rowcount or 0
+        await cur.close()
+        return deleted
+
+    @staticmethod
+    def _source_cache_where(
+        meta: dict[str, str],
+        *,
+        url: str | None,
+        domain: str | None,
+        older_than_days: int | None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build a WHERE clause + bound params for the source-cache filters.
+
+        If a filter is requested but its column doesn't exist on this
+        kind (e.g. ``domain`` on the ``youtube_videos`` table), we
+        append ``0 = 1`` so the query matches nothing. The alternative —
+        silently dropping the filter — would let
+        ``purge_source_cache("youtube", domain="x.com")`` wipe every row
+        in the table because the WHERE clause would end up empty.
+        Match-nothing is the safe default; the per-kind semantics fall
+        out cleanly (only kinds with a real ``domain_col`` ever return
+        rows for a domain filter).
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if url:
+            clauses.append(f"{meta['label_col']} = ?")
+            params.append(url)
+        if domain:
+            if meta["domain_col"]:
+                clauses.append(f"{meta['domain_col']} = ?")
+                params.append(domain)
+            else:
+                clauses.append("0 = 1")  # filter unsupported on this kind
+        if older_than_days is not None and older_than_days > 0:
+            clauses.append("fetched_at < datetime('now', ?)")
+            params.append(f"-{int(older_than_days)} days")
+        if not clauses:
+            return "", tuple(params)
+        return "WHERE " + " AND ".join(clauses), tuple(params)
 
     # ----------------------------------------------- last-run-args (wizard)
 
@@ -1791,6 +2119,84 @@ class Repo:
         cur = await self._conn.execute(sql, args)
         await self._conn.commit()
         return cur.rowcount or 0
+
+    async def cache_purge_preview(
+        self,
+        older_than_days: int | None = None,
+        preset: str | None = None,
+        model: str | None = None,
+        breakdown_limit: int = 10,
+    ) -> dict[str, Any]:
+        """What `cache_purge` would remove with the same filters.
+
+        Returns ``{"rows": N, "result_bytes": N, "saved_cost_usd": X,
+        "oldest": iso, "newest": iso, "by_group": [{"preset", "model",
+        "rows", "result_bytes", "saved_cost_usd"}, …]}``. Used by
+        `unread cache purge` to show a preview before the destructive
+        DELETE fires.
+        """
+        if older_than_days is not None and older_than_days <= 0:
+            return {
+                "rows": 0,
+                "result_bytes": 0,
+                "saved_cost_usd": 0.0,
+                "oldest": None,
+                "newest": None,
+                "by_group": [],
+            }
+        where: list[str] = []
+        args: list[Any] = []
+        if older_than_days is not None:
+            where.append("datetime(created_at) < datetime('now', ?)")
+            args.append(f"-{older_than_days} days")
+        if preset:
+            where.append("preset=?")
+            args.append(preset)
+        if model:
+            where.append("model=?")
+            args.append(model)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        cur = await self._conn.execute(
+            "SELECT COUNT(*) AS rows,"
+            " COALESCE(SUM(LENGTH(result)), 0) AS result_bytes,"
+            " COALESCE(SUM(cost_usd), 0) AS saved_cost_usd,"
+            " MIN(created_at) AS oldest,"
+            " MAX(created_at) AS newest"
+            f" FROM analysis_cache{where_sql}",
+            args,
+        )
+        totals = await cur.fetchone()
+        await cur.close()
+
+        cur = await self._conn.execute(
+            "SELECT preset, model,"
+            " COUNT(*) AS rows,"
+            " COALESCE(SUM(LENGTH(result)), 0) AS result_bytes,"
+            " COALESCE(SUM(cost_usd), 0) AS saved_cost_usd"
+            f" FROM analysis_cache{where_sql}"
+            " GROUP BY preset, model ORDER BY rows DESC LIMIT ?",
+            [*args, int(breakdown_limit)],
+        )
+        by_group = [
+            {
+                "preset": r["preset"],
+                "model": r["model"],
+                "rows": int(r["rows"] or 0),
+                "result_bytes": int(r["result_bytes"] or 0),
+                "saved_cost_usd": float(r["saved_cost_usd"] or 0.0),
+            }
+            for r in await cur.fetchall()
+        ]
+        await cur.close()
+        return {
+            "rows": int(totals["rows"] or 0),
+            "result_bytes": int(totals["result_bytes"] or 0),
+            "saved_cost_usd": float(totals["saved_cost_usd"] or 0.0),
+            "oldest": totals["oldest"],
+            "newest": totals["newest"],
+            "by_group": by_group,
+        }
 
     async def cache_stats(self) -> dict[str, Any]:
         """Summary of analysis_cache: totals + per-(preset, model) breakdown."""
@@ -2186,10 +2592,15 @@ def _apply_one_override(settings, key: str, value: str) -> None:
     Defensive: unknown / malformed values are silently ignored — the
     config-default stays in effect.
     """
-    # Languages — strings; empty string for content_language means
-    # "follow locale.language", for audio_language means "autodetect".
+    # Languages — strings. Empty string for `report_language` means
+    # "follow locale.language"; empty for `content_language` means
+    # "let the LLM auto-detect from the source"; empty for
+    # `audio_language` means "autodetect Whisper input".
     if key == "locale.language" and value:
         settings.locale.language = value
+        return
+    if key == "locale.report_language":
+        settings.locale.report_language = value
         return
     if key == "locale.content_language":
         settings.locale.content_language = value

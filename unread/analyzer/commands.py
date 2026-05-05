@@ -106,7 +106,7 @@ async def _self_check(
     result: AnalysisResult,
     messages,
     repo: Repo,
-    content_language: str = "en",
+    report_language: str = "en",
 ) -> tuple[str, str | None]:
     """Cheap-model audit pass over an analysis report.
 
@@ -115,9 +115,9 @@ async def _self_check(
     claims. Output is a short markdown bullet list, or "All claims
     supported." for a clean run. Caller appends as `## Verification`
     (heading translated via i18n using the UI `language`, NOT
-    `content_language`).
+    `report_language`).
 
-    `content_language` selects the verification system prompt + the
+    `report_language` selects the verification system prompt + the
     formatter's label language. It should match the language of the
     analysis report being audited so the auditor and the report speak
     the same language.
@@ -133,9 +133,9 @@ async def _self_check(
 
     settings = get_settings()
     used_model = settings.openai.filter_model_default
-    sys_prompt = _VERIFY_SYSTEM.get(content_language, _VERIFY_SYSTEM["en"])
-    head, mid, tail = _VERIFY_USER_TEMPLATE.get(content_language, _VERIFY_USER_TEMPLATE["en"])
-    formatted_msgs = format_messages(messages, language=content_language)
+    sys_prompt = _VERIFY_SYSTEM.get(report_language, _VERIFY_SYSTEM["en"])
+    head, mid, tail = _VERIFY_USER_TEMPLATE.get(report_language, _VERIFY_USER_TEMPLATE["en"])
+    formatted_msgs = format_messages(messages, language=report_language)
     user_text = f"{head}{formatted_msgs}{mid}{result.final_result}{tail}"
     try:
         oai = make_client()
@@ -350,9 +350,12 @@ async def cmd_analyze(
     # keep working; rich-rendering on the terminal is now unconditional
     # (handled inside `_print_and_write`). Set `no_save=True` from the
     # CLI surface (`--no-save`) to skip writing the report file while
-    # still rendering it to the terminal.
+    # still rendering it to the terminal. Set `no_console=True` from the
+    # CLI surface (`--no-console`) to skip the terminal render while
+    # still saving the report file.
     console_out: bool = False,
     no_save: bool = False,
+    no_console: bool = False,
     save_default: bool = False,
     mark_read: bool | None = None,
     no_cache: bool = False,
@@ -376,7 +379,8 @@ async def cmd_analyze(
     with_comments: bool = False,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     youtube_source: str = "auto",
     disable_truncation_retry: bool = False,
 ) -> None:
@@ -410,17 +414,25 @@ async def cmd_analyze(
             raise typer.BadParameter(f"--last-msgs is mutually exclusive with {', '.join(_conflicting)}.")
     settings_for_lang = get_settings()
     effective_language = (language or settings_for_lang.locale.language or "en").lower()
-    effective_content_language = (
-        content_language or settings_for_lang.locale.content_language or effective_language
+    effective_report_language = (
+        report_language or settings_for_lang.locale.report_language or effective_language
     ).lower()
+    # Source-content language hint (Whisper-style). Empty = LLM auto-detects.
+    # CLI flag wins over saved settings; saved value wins over default empty.
+    effective_source_language = (
+        (source_language if source_language is not None else settings_for_lang.locale.content_language)
+        .strip()
+        .lower()
+    )
 
     # Default preset — overridden later for single-msg mode.
     effective_preset = preset or "summary"
-    # Preset directory is selected by `content_language` (it determines
-    # which prompts the LLM gets); UI / report-heading language is
-    # tracked separately as `effective_language`.
+    # Preset directory is selected by the **report language** (it
+    # determines which prompts the LLM gets); UI / report-heading
+    # language is tracked separately as `effective_language`. The source
+    # hint is purely an LLM-prompt addendum — does NOT pick a preset tree.
     resolved_preset = _load_preset_for_commands(
-        effective_preset, prompt_file, language=effective_content_language
+        effective_preset, prompt_file, language=effective_report_language
     )
     enrich_opts = build_enrich_opts(
         cli_enrich=enrich,
@@ -488,7 +500,8 @@ async def cmd_analyze(
             yes=yes,
             folder=folder,
             language=effective_language,
-            content_language=effective_content_language,
+            report_language=effective_report_language,
+            source_language=effective_source_language,
             disable_truncation_retry=disable_truncation_retry,
         )
         return
@@ -512,7 +525,8 @@ async def cmd_analyze(
             post_to=post_to,
             with_comments=with_comments,
             language=effective_language,
-            content_language=effective_content_language,
+            report_language=effective_report_language,
+            source_language=effective_source_language,
         )
         return
     # Direct path: treat mark_read=None as False (CLI tri-state default).
@@ -579,6 +593,7 @@ async def cmd_analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
+            no_console=no_console,
             no_cache=no_cache,
             max_cost=max_cost,
             dry_run=dry_run,
@@ -586,7 +601,8 @@ async def cmd_analyze(
             post_to=post_to,
             post_saved=post_saved,
             language=effective_language,
-            content_language=effective_content_language,
+            report_language=effective_report_language,
+            source_language=effective_source_language,
             yes=yes,
         )
         return
@@ -649,6 +665,7 @@ async def cmd_analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
+            no_console=no_console,
             no_cache=no_cache,
             max_cost=max_cost,
             dry_run=dry_run,
@@ -657,7 +674,8 @@ async def cmd_analyze(
             post_to=post_to,
             post_saved=post_saved,
             language=effective_language,
-            content_language=effective_content_language,
+            report_language=effective_report_language,
+            source_language=effective_source_language,
             youtube_source=youtube_source,  # type: ignore[arg-type]
             yes=yes,
         )
@@ -722,6 +740,7 @@ async def cmd_analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
+            no_console=no_console,
             no_cache=no_cache,
             max_cost=max_cost,
             dry_run=dry_run,
@@ -729,7 +748,8 @@ async def cmd_analyze(
             post_to=post_to,
             post_saved=post_saved,
             language=effective_language,
-            content_language=effective_content_language,
+            report_language=effective_report_language,
+            source_language=effective_source_language,
             yes=yes,
         )
         return
@@ -787,8 +807,14 @@ async def cmd_analyze(
                 self_check = True
             if language is None and saved.get("language"):
                 effective_language = str(saved["language"]).lower()
-            if content_language is None and saved.get("content_language"):
-                effective_content_language = str(saved["content_language"]).lower()
+            # Read both new and legacy keys. v1.x renamed `content_language`
+            # → `report_language`; old runs persisted under the old name.
+            if report_language is None:
+                _saved_report = saved.get("report_language") or saved.get("content_language")
+                if _saved_report:
+                    effective_report_language = str(_saved_report).lower()
+            if source_language is None and saved.get("source_language"):
+                effective_source_language = str(saved["source_language"]).strip().lower()
             if mark_read is None and saved.get("mark_read") is not None:
                 mark_read = bool(saved["mark_read"])
                 mark_read_bool = mark_read
@@ -837,7 +863,7 @@ async def cmd_analyze(
             # than forcing a 3-topics/key-messages layout onto one message.
             single_preset_name = preset or "single_msg"
             single_preset = _load_preset_for_commands(
-                single_preset_name, prompt_file, language=effective_content_language
+                single_preset_name, prompt_file, language=effective_report_language
             )
             single_enrich = build_enrich_opts(
                 cli_enrich=enrich,
@@ -860,12 +886,14 @@ async def cmd_analyze(
                 filter_model=filter_model,
                 output=output,
                 console_out=console_out,
+                no_console=no_console,
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
                 min_msg_chars=min_msg_chars,
                 enrich_opts=single_enrich,
                 language=effective_language,
-                content_language=effective_content_language,
+                report_language=effective_report_language,
+                source_language=effective_source_language,
                 disable_truncation_retry=disable_truncation_retry,
             )
             return
@@ -894,6 +922,7 @@ async def cmd_analyze(
                 filter_model=filter_model,
                 output=output,
                 console_out=console_out,
+                no_console=no_console,
                 mark_read=mark_read_bool,
                 no_cache=no_cache,
                 include_transcripts=include_transcripts,
@@ -902,7 +931,8 @@ async def cmd_analyze(
                 dry_run=dry_run,
                 yes=yes,
                 language=effective_language,
-                content_language=effective_content_language,
+                report_language=effective_report_language,
+                source_language=effective_source_language,
                 disable_truncation_retry=disable_truncation_retry,
             )
             return
@@ -999,6 +1029,7 @@ async def cmd_analyze(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
+            no_console=no_console,
             mark_read=mark_read_bool,
             no_cache=no_cache,
             max_cost=max_cost,
@@ -1017,7 +1048,8 @@ async def cmd_analyze(
             topic_titles=topic_titles,
             topic_markers=topic_markers,
             language=effective_language,
-            content_language=effective_content_language,
+            report_language=effective_report_language,
+            source_language=effective_source_language,
             disable_truncation_retry=disable_truncation_retry,
         )
 
@@ -1038,12 +1070,14 @@ async def _run_single_msg(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
     enrich_opts: EnrichOpts | None = None,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
     disable_truncation_retry: bool = False,
 ) -> None:
     """Analyze exactly one message.
@@ -1157,9 +1191,16 @@ async def _run_single_msg(
         chat_internal_id=chat_internal_id,
         client=client,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     )
-    _print_and_write(result, output=output, title=title, no_save=console_out)
+    _print_and_write(
+        result,
+        output=output,
+        title=title,
+        console_out=not no_console,
+        no_save=console_out,
+    )
 
 
 async def _run_single(
@@ -1181,6 +1222,7 @@ async def _run_single(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     mark_read: bool,
     no_cache: bool,
     include_transcripts: bool,
@@ -1200,7 +1242,8 @@ async def _run_single(
     redact: bool | None = None,
     yes: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
     disable_truncation_retry: bool = False,
 ) -> None:
     """Analyze one chat or one thread via the shared pipeline."""
@@ -1239,13 +1282,14 @@ async def _run_single(
         mark_read=mark_read,
         with_comments=with_comments,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     )
 
     # --dry-run: print the cost estimate and exit before any LLM call.
     # Useful before a `--enrich-all --full-history` run on a busy chat.
     if dry_run:
-        loaded_preset = _load_preset_for_commands(preset, prompt_file, language=content_language)
+        loaded_preset = _load_preset_for_commands(preset, prompt_file, language=report_language)
         n = len(prepared.messages)
         if loaded_preset is None:
             console.print(f"[bold]{_tf('dry_run_unloadable', n=n, preset=preset)}[/]")
@@ -1285,7 +1329,7 @@ async def _run_single(
     # The estimator covers analysis (map + reduce); enrichment spend is
     # not folded in — that's noted in the help text.
     if prepared.messages:
-        loaded_preset = _load_preset_for_commands(preset, prompt_file, language=content_language)
+        loaded_preset = _load_preset_for_commands(preset, prompt_file, language=report_language)
         if loaded_preset is not None:
             from unread.analyzer.pipeline import estimate_cost as _estimate_cost
 
@@ -1394,7 +1438,8 @@ async def _run_single(
         messages=prepared.messages,
         chat_groups=chat_groups,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     )
 
     if self_check and result.final_result and prepared.messages:
@@ -1402,9 +1447,10 @@ async def _run_single(
             result=result,
             messages=prepared.messages,
             repo=repo,
-            # LLM-facing → content_language. The heading below is user-facing
+            # LLM-facing → report_language. The heading below is user-facing
             # → language.
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
         )
         heading = _t("verification_heading", language)
         if verification:
@@ -1452,7 +1498,8 @@ async def _run_single(
                     "with_comments": bool(with_comments),
                     "thread": int(thread_id) if thread_id else None,
                     "language": language,
-                    "content_language": content_language,
+                    "report_language": report_language,
+                    "source_language": source_language,
                 },
             )
         except Exception as e:
@@ -1463,6 +1510,7 @@ async def _run_single(
         output=output,
         title=title,
         thread_title=thread_title,
+        console_out=not no_console,
         no_save=console_out,
     )
 
@@ -1505,6 +1553,7 @@ async def _run_forum_per_topic(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     mark_read: bool,
     no_cache: bool,
     include_transcripts: bool,
@@ -1513,7 +1562,8 @@ async def _run_forum_per_topic(
     dry_run: bool = False,
     yes: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
     disable_truncation_retry: bool = False,
 ) -> None:
     """One analysis per topic; reports land in reports/{chat-slug}/{topic-slug}/analyze/.
@@ -1566,7 +1616,8 @@ async def _run_forum_per_topic(
         mark_read=mark_read,
         yes=yes,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     ):
         try:
             # --dry-run for forum-per-topic: print per-topic count + skip
@@ -1600,7 +1651,8 @@ async def _run_forum_per_topic(
                 client=client,
                 messages=prepared.messages,
                 language=language,
-                content_language=content_language,
+                report_language=report_language,
+                source_language=source_language,
             )
             per_file: Path | None = None
             if base_dir is not None:
@@ -1611,6 +1663,7 @@ async def _run_forum_per_topic(
                 output=per_file,
                 title=prepared.chat_title,
                 thread_title=prepared.thread_title,
+                console_out=not no_console,
                 no_save=console_out,
             )
             if prepared.mark_read_fn and result.msg_count > 0:
@@ -1704,6 +1757,7 @@ async def _run_no_ref(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     mark_read: bool | None,
     no_cache: bool,
     include_transcripts: bool,
@@ -1712,7 +1766,8 @@ async def _run_no_ref(
     folder: str | None = None,
     yes: bool = False,
     language: str = "en",
-    content_language: str = "en",
+    report_language: str = "en",
+    source_language: str = "",
     disable_truncation_retry: bool = False,
 ) -> None:
     """No <ref>: list dialogs with unread messages, confirm, analyze each.
@@ -1763,6 +1818,7 @@ async def _run_no_ref(
             filter_model=filter_model,
             output=output,
             console_out=console_out,
+            no_console=no_console,
             no_cache=no_cache,
             include_transcripts=include_transcripts,
             min_msg_chars=min_msg_chars,
@@ -1772,7 +1828,8 @@ async def _run_no_ref(
             yes=yes,
             stamp=stamp,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             disable_truncation_retry=disable_truncation_retry,
         )
         return
@@ -1791,7 +1848,8 @@ async def _run_no_ref(
         folder=folder,
         yes=yes,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     ):
         try:
             opts = AnalysisOptions(
@@ -1816,7 +1874,8 @@ async def _run_no_ref(
                 client=client,
                 messages=prepared.messages,
                 language=language,
-                content_language=content_language,
+                report_language=report_language,
+                source_language=source_language,
             )
             per_file = None
             if out_dir:
@@ -1827,6 +1886,7 @@ async def _run_no_ref(
                 result,
                 output=per_file,
                 title=prepared.chat_title,
+                console_out=not no_console,
                 no_save=console_out,
             )
             if prepared.mark_read_fn and result.msg_count > 0:
@@ -1870,6 +1930,7 @@ async def _run_multichat_batch(
     filter_model: str | None,
     output: Path | None,
     console_out: bool,
+    no_console: bool = False,
     no_cache: bool,
     include_transcripts: bool,
     min_msg_chars: int | None,
@@ -1879,7 +1940,8 @@ async def _run_multichat_batch(
     yes: bool,
     stamp: str,
     language: str,
-    content_language: str,
+    report_language: str,
+    source_language: str = "",
     disable_truncation_retry: bool = False,
 ) -> None:
     """Cross-chat batch flow: gather messages across all selected chats
@@ -1907,7 +1969,8 @@ async def _run_multichat_batch(
         folder=folder,
         yes=yes,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     ):
         if not prepared.messages:
             continue
@@ -1956,7 +2019,8 @@ async def _run_multichat_batch(
         messages=all_messages,
         chat_groups=chat_groups,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
     )
 
     if console_out:
@@ -1969,6 +2033,7 @@ async def _run_multichat_batch(
         result,
         output=out_path,
         title=f"{len(chat_groups)} chats — multichat",
+        console_out=not no_console,
         no_save=console_out,
     )
 
@@ -2057,6 +2122,29 @@ def _format_breakdown_line(result: AnalysisResult) -> str:
     return line
 
 
+def _format_transcript_provenance(result: AnalysisResult) -> str:
+    """Render the `Transcript:` value (e.g. "ru (auto-captions)") for YouTube runs.
+
+    Returns "" for non-YouTube runs (where neither field is set). Falls
+    back gracefully when only one of the two fields is populated — old
+    cached rows lack `transcript_lang_kind` and would otherwise show a
+    bare lang code, which is still useful.
+    """
+    lang = result.transcript_lang
+    kind = result.transcript_lang_kind
+    if not lang and not kind:
+        return ""
+    kind_key = {
+        "manual": "report_meta_transcript_kind_manual",
+        "auto": "report_meta_transcript_kind_auto",
+        "audio": "report_meta_transcript_kind_audio",
+    }.get(kind)
+    kind_label = _t(kind_key) if kind_key else ""
+    if lang and kind_label:
+        return f"{lang} ({kind_label})"
+    return lang or kind_label
+
+
 def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
     """Build the fixed-format metadata block prepended to every saved report.
 
@@ -2106,6 +2194,9 @@ def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
         lines.append(f"{_t('report_meta_enrichment')} {', '.join(result.enrich_kinds)}")
     if result.enrich_summary:
         lines.append(f"{_t('report_meta_enrichment_detail')} {result.enrich_summary}")
+    transcript_value = _format_transcript_provenance(result)
+    if transcript_value:
+        lines.append(f"{_t('report_meta_transcript')} {transcript_value}")
     # Visibility for the user that PII was scrubbed before sending: shows
     # what kinds (and how many of each) so an operator can sanity-check
     # the redactor caught what they expected.
@@ -2203,6 +2294,9 @@ def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
         row(_t("report_meta_enrichment"), ", ".join(result.enrich_kinds))
     if result.enrich_summary:
         row(_t("report_meta_enrichment_detail"), result.enrich_summary)
+    transcript_value = _format_transcript_provenance(result)
+    if transcript_value:
+        row(_t("report_meta_transcript"), transcript_value)
     if result.redact_counts:
         bits = ", ".join(f"{k}: {v}" for k, v in sorted(result.redact_counts.items()))
         row(_t("report_meta_redact"), bits)
@@ -2446,7 +2540,8 @@ async def run_all_unread_analyze(
     folder: str | None = None,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     disable_truncation_retry: bool = False,
 ) -> None:
     """Public: run the batch-across-all-unread-chats flow (was the old no-ref default).
@@ -2457,7 +2552,10 @@ async def run_all_unread_analyze(
     the user isn't asked twice after already approving the plan."""
     settings = get_settings()
     lang = (language or settings.locale.language or "en").lower()
-    clang = (content_language or settings.locale.content_language or lang).lower()
+    rlang = (report_language or settings.locale.report_language or lang).lower()
+    slang = (
+        (source_language if source_language is not None else settings.locale.content_language).strip().lower()
+    )
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         await _run_no_ref(
             client=client,
@@ -2476,7 +2574,8 @@ async def run_all_unread_analyze(
             yes=yes,
             folder=folder,
             language=lang,
-            content_language=clang,
+            report_language=rlang,
+            source_language=slang,
             disable_truncation_retry=disable_truncation_retry,
         )
 

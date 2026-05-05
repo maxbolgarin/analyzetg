@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 import typer
+import typer.rich_utils as _typer_rich
 from rich.console import Console
 from typer.core import TyperGroup
 
@@ -21,6 +22,20 @@ from unread.db.repo import apply_db_overrides_sync, open_repo
 from unread.i18n import t as _t
 from unread.i18n import tf as _tf
 from unread.util.logging import setup_logging
+
+# Typer's defaults render option names as `bold cyan` in error / help output
+# and the "Try '… --help' for help." suggestion line as `dim` wrapped in
+# `[blue]…[/]`. Both can be unreadable on terminals whose palette maps cyan
+# or blue to a very dark, near-background colour. Override at import time —
+# Typer reads these constants when it builds the Rich console for each
+# error / help render. `RICH_HELP` is a markup template with a hard-coded
+# `[blue]` wrapper around the command path; rewrite it to a readable colour.
+_typer_rich.STYLE_OPTION = "bold yellow"
+_typer_rich.STYLE_NEGATIVE_OPTION = "bold magenta"
+_typer_rich.STYLE_SWITCH = "bold green"
+_typer_rich.STYLE_NEGATIVE_SWITCH = "bold red"
+_typer_rich.STYLE_ERRORS_SUGGESTION = ""
+_typer_rich.RICH_HELP = "Try [bold]'{command_path} {help_option}'[/] for help."
 
 
 def _version_callback(value: bool) -> None:
@@ -41,13 +56,13 @@ class _PreferSubcommandsGroup(TyperGroup):
 
     The root callback declares `ref: str | None = typer.Argument(None)`.
     Standard Click consumes the first non-option token into `ref` BEFORE
-    checking for subcommand matches — so `unread cleanup` ends up
-    invoking analyze with ref="cleanup" instead of dispatching to the
-    cleanup subcommand. We peel a leading subcommand token out of args
+    checking for subcommand matches — so `unread settings` ends up
+    invoking analyze with ref="settings" instead of dispatching to the
+    settings subcommand. We peel a leading subcommand token out of args
     so the positional sees nothing, then inject the token back into
     `ctx.protected_args` so Group's normal routing fires.
 
-    `unread -- cleanup` (or `unread tg cleanup`) explicitly forces
+    `unread -- settings` (or `unread tg settings`) explicitly forces
     the ref interpretation when a chat is literally titled like a
     subcommand.
     """
@@ -98,7 +113,11 @@ class _UnreadHelpMixin:
     """
 
     def format_help(self, ctx, formatter):  # type: ignore[override,no-untyped-def]
-        if ctx.info_name in ("unread", "tg", "telegram") or ctx.parent is None:
+        # Root only renders the global overview; sub-groups (including
+        # the `tg` namespace) render their own subcommand listing so
+        # `unread tg --help` shows login / describe / sync / … rather
+        # than re-printing the whole catalogue.
+        if ctx.info_name == "unread" or ctx.parent is None:
             _print_help_overview()
         else:
             _print_help_for_group(self, ctx)
@@ -175,19 +194,80 @@ app = _UnreadTyper(
 
 chats_app = _UnreadTyper(help=_t("cmd_chats"), no_args_is_help=True, cls=_UnreadGroup)
 cache_app = _UnreadTyper(help=_t("cmd_cache"), no_args_is_help=True, cls=_UnreadGroup)
+# `cache` is a façade over three independently-shaped caches; the user
+# surface is uniform per-entity (`<entity> [ls|purge|stats|show|export]`)
+# even though the underlying tables (`analysis_cache`, `website_pages` /
+# `youtube_videos` / `local_files`, and `messages`) have very different
+# schemas. Bare `cache <entity>` opens the entity's `ls` view via each
+# subgroup's `invoke_without_command=True` callback.
+cache_ai_app = _UnreadTyper(
+    help="LLM analysis cache (one row per cached LLM call).",
+    no_args_is_help=True,
+    cls=_UnreadGroup,
+)
+cache_sources_app = _UnreadTyper(
+    help="Per-input source caches: extracted pages, YouTube transcripts, local-file text.",
+    no_args_is_help=True,
+    cls=_UnreadGroup,
+)
+cache_tg_app = _UnreadTyper(
+    help="Telegram message cache: text, transcripts, and chat / topic metadata.",
+    no_args_is_help=True,
+    cls=_UnreadGroup,
+)
+cache_app.add_typer(cache_ai_app, name="ai")
+cache_app.add_typer(cache_sources_app, name="sources")
+cache_app.add_typer(cache_tg_app, name="tg")
 backup_app = _UnreadTyper(help=_t("cmd_backup"), no_args_is_help=True, cls=_UnreadGroup)
-# Magic ref token: `unread tg`, `unread ask tg`, and `unread dump tg`
-# all route to the corresponding interactive Telegram chat picker
-# (analyze / ask / dump wizard). Treating "tg" as a ref instead of a
-# subcommand keeps the command surface flat — every entry point takes
-# `<ref>` and behaves identically when `<ref> == "tg"`. Setup-side
-# Telegram commands live at the top level (`unread login` / `logout`
-# / `describe` / `folders`).
+# `tg` is the Telegram-source namespace. Bare `unread tg` (no
+# subcommand) opens the interactive analyze picker — same behavior as
+# the pre-namespace magic ref. `unread tg login`, `unread tg describe`,
+# `unread tg sync`, … hang Telegram-only setup / inspection verbs off
+# the same prefix so future sources (e.g. `unread wa describe`) can
+# follow the same shape. The constant is kept for the few internal
+# call sites (cmd_ask / cmd_dump) that still treat "tg" as a magic ref
+# inside their own ref string.
 TG_INTERACTIVE_REF = "tg"
+tg_app = _UnreadTyper(
+    help=_t("cmd_tg_group"),
+    # _UnreadGroup gives us the per-command help formatter; no positional
+    # arg on the callback so we don't need _PreferSubcommandsGroup here.
+    cls=_UnreadGroup,
+)
 
-app.add_typer(chats_app, name="chats", rich_help_panel=PANEL_TELEGRAM)
+app.add_typer(tg_app, name="tg", rich_help_panel=PANEL_TELEGRAM)
 app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 app.add_typer(backup_app, name="backup", rich_help_panel=PANEL_MAINT)
+# `chats` lives under `tg` (Telegram subscriptions). The previous
+# top-level registration is gone — tests / scripts now use `tg chats`.
+tg_app.add_typer(chats_app, name="chats")
+
+
+@tg_app.callback(invoke_without_command=True)
+def _tg_root(ctx: typer.Context) -> None:
+    """Telegram source. Bare `unread tg` opens the analyze chat picker.
+
+    `unread tg <subcommand>` (login / logout / describe / sync / …) runs
+    the named verb. With no subcommand, dispatches straight to the
+    interactive analyze wizard — same flow the previous magic-ref form
+    (`unread tg`) took, just rooted at the real subgroup so help groups
+    every Telegram verb under one prefix.
+
+    Callers who want analyze with explicit flags should use
+    `unread <ref> [flags]` instead — wiring the full root flag set onto
+    this callback would duplicate ~30 typer options for a path the
+    wizard immediately overwrites with its own picker answers.
+    """
+    if ctx.invoked_subcommand is not None:
+        # A subcommand (login / describe / sync / …) was matched; let it run.
+        return
+    # Bare `unread tg` → analyze wizard. Same gating as the analyze root path.
+    if not _ensure_ready_for_analyze(None):
+        return
+    from unread.interactive import run_interactive_analyze
+
+    _run(run_interactive_analyze())
+
 
 console = Console()
 
@@ -281,8 +361,8 @@ _RESERVED_TOP_LEVEL: set[str] = set()
 def _maybe_warn_subcommand_collision(ref: str | None) -> None:
     """Surface a one-line hint when `ref` shadows a real subcommand.
 
-    The user typed something like `unread cleanup` intending a chat
-    titled "cleanup" — Click already routed to the subcommand instead.
+    The user typed something like `unread settings` intending a chat
+    titled "settings" — Click already routed to the subcommand instead.
     They land here only when `ref` slipped through the parser (which
     means they used a non-colliding form). The escape hatch for a chat
     that genuinely is named after a subcommand is the interactive
@@ -372,7 +452,7 @@ def _print_first_run_banner(missing: str = "both") -> None:
         path (YouTube / website / file) without any chat provider key.
       - ``"telegram"`` — only Telegram credentials are missing.
       - ``"telegram_session_only"`` — the user has a Telegram session
-        file but it's not authorized; points at ``unread login --force``.
+        file but it's not authorized; points at ``unread tg login --force``.
       - ``"both"`` — neither side is set up. Default.
 
     The banner always points at ``unread init`` first (the interactive
@@ -384,22 +464,37 @@ def _print_first_run_banner(missing: str = "both") -> None:
 
     ensure_unread_home()
     env_path = default_env_path()
+    # Link rows, in display order. Scoped below to whichever side is
+    # actually missing so the banner doesn't dump irrelevant URLs on the
+    # user (e.g. listing every AI provider when only Telegram is missing).
+    tg_link = "  Telegram   https://my.telegram.org → API development tools"
+    ai_links = (
+        "  OpenAI     https://platform.openai.com/api-keys\n"
+        "  Anthropic  https://console.anthropic.com/settings/keys\n"
+        "  Google     https://aistudio.google.com/app/apikey\n"
+        "  OpenRouter https://openrouter.ai/keys"
+    )
+    openai_link = "  OpenAI     https://platform.openai.com/api-keys"
     if missing == "openai":
         title = _t("cred_banner_title_openai")
         env_lines = "  OPENAI_API_KEY=sk-…"
         providers_note = _t("cred_banner_alternative_providers")
+        links_block = openai_link
     elif missing == "ai":
         title = _t("cred_banner_title_ai")
         env_lines = "  # any of: OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENROUTER_API_KEY"
         providers_note = _t("cred_banner_providers_note")
+        links_block = ai_links
     elif missing == "telegram":
         title = _t("cred_banner_title_telegram")
         env_lines = "  TELEGRAM_API_ID=…\n  TELEGRAM_API_HASH=…"
         providers_note = ""
+        links_block = tg_link
     else:
         title = _t("cred_banner_title_full")
         env_lines = "  OPENAI_API_KEY=sk-…\n  TELEGRAM_API_ID=…\n  TELEGRAM_API_HASH=…"
         providers_note = ""
+        links_block = f"{tg_link}\n{ai_links}"
     extra = f"\n\n{providers_note}" if providers_note else ""
     console.print(
         f"[bold yellow]{title}[/]\n"
@@ -411,11 +506,7 @@ def _print_first_run_banner(missing: str = "both") -> None:
         f"{extra}\n"
         f"\n"
         f"[bold]{_t('cred_banner_links_header')}[/]\n"
-        f"  Telegram   https://my.telegram.org → API development tools\n"
-        f"  OpenAI     https://platform.openai.com/api-keys\n"
-        f"  Anthropic  https://console.anthropic.com/settings/keys\n"
-        f"  Google     https://aistudio.google.com/app/apikey\n"
-        f"  OpenRouter https://openrouter.ai/keys"
+        f"{links_block}"
     )
 
 
@@ -497,11 +588,21 @@ def _dispatch_analyze(**kwargs) -> None:
     # conflicts with `--console`/`--no-save`.
     no_save = kwargs.get("no_save", False)
     console_out = kwargs.get("console_out", False)
+    no_console = kwargs.get("no_console", False)
     if save_flag and (no_save or console_out):
         import typer as _typer
 
         raise _typer.BadParameter(
             "--save conflicts with --no-save / --console; pass at most one of these flags."
+        )
+    # `--no-console --no-save` (or its deprecated alias `--console --no-console`)
+    # would suppress every form of output, leaving an LLM run with nothing to
+    # show for the spend. Reject it instead of silently producing nothing.
+    if no_console and (no_save or console_out):
+        import typer as _typer
+
+        raise _typer.BadParameter(
+            "--no-console combined with --no-save would suppress all output; pick at most one."
         )
     # `--plain-citations` flips a console-only rendering knob. It does
     # not change the LLM input, the cache key, or the saved file — so we
@@ -873,7 +974,7 @@ def _print_config_status() -> None:
         console.print(row)
     console.print(
         "  [grey70]Add or change AI keys / providers:[/] [cyan]unread init[/]  "
-        "[grey70]·[/]  [grey70]Re-link Telegram:[/] [cyan]unread login --force[/]"
+        "[grey70]·[/]  [grey70]Re-link Telegram:[/] [cyan]unread tg login --force[/]"
     )
 
 
@@ -954,6 +1055,37 @@ def _enumerate_commands(typer_app) -> list[tuple[str, str, str, bool]]:  # type:
     return rows
 
 
+def _enumerate_tg_subcommands() -> list[tuple[str, str]]:
+    """Return (name, one-line help) pairs for visible `tg` subcommands.
+
+    Hidden subcommands (legacy aliases like `dialogs`, `topics`,
+    `channel-info`, `download-media`, `backfill`) and nested groups
+    (e.g. `tg chats` — listed once under its own row) follow the same
+    rule: skip hidden, surface visible commands and groups as-is.
+    """
+    rows: list[tuple[str, str]] = []
+    for ci in tg_app.registered_commands:
+        if ci.hidden:
+            continue
+        cli_name = ci.name or (ci.callback.__name__ if ci.callback else "")
+        if not ci.name:
+            cli_name = cli_name.replace("_", "-")
+        # Strip any trailing "_cmd" added to function names so we don't
+        # need a manual `name=` on every command.
+        if cli_name.endswith("-cmd"):
+            cli_name = cli_name[: -len("-cmd")]
+        help_str = ci.help or (ci.callback.__doc__ or "").strip().split("\n")[0]
+        rows.append((cli_name, help_str))
+    for gi in tg_app.registered_groups:
+        if gi.hidden or not gi.typer_instance:
+            continue
+        name = gi.name or ""
+        help_str = gi.help or (gi.typer_instance.info.help or "")
+        rows.append((name, help_str))
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
 def _format_command_table(rows: list[tuple[str, str]], indent: str = "    ") -> str:
     """Two-column table of (name, description) with aligned descriptions."""
     if not rows:
@@ -1020,6 +1152,14 @@ def _print_help_overview() -> None:
     by_panel: dict[str, list[tuple[str, str]]] = {}
     for name, panel, help_str, hidden in rows:
         if hidden or not name:
+            continue
+        # The `tg` subgroup gets flattened in the overview so individual
+        # verbs (`tg login`, `tg describe`, …) appear directly under the
+        # Telegram panel. The bare `tg` row would just duplicate the
+        # panel header; users who want it call `unread tg --help`.
+        if name == "tg":
+            for sub_name, sub_help in _enumerate_tg_subcommands():
+                by_panel.setdefault(PANEL_TELEGRAM, []).append((f"tg {sub_name}", sub_help))
             continue
         effective_panel = init_panel if name == "init" else (panel or PANEL_MAIN)
         by_panel.setdefault(effective_panel, []).append((name, help_str))
@@ -1271,19 +1411,39 @@ def _print_help_for_group(grp: click.Group, ctx: click.Context) -> None:
         console.print(f"[bold]Description[/]\n  {summary}\n")
 
     # Subcommands of this group (no panels — the nested groups are
-    # small enough to list flat).
-    sub_rows: list[tuple[str, str]] = []
+    # small enough to list flat). For each child that's itself a
+    # `click.Group` (e.g. `cache ai`, `cache sources`, `cache tg`),
+    # also surface its own leaf names on a follow-up indented line.
+    # Without this, `unread cache` showed three entity descriptions and
+    # the user had to drill into each `cache <entity> --help` to discover
+    # `ls / purge / stats / show / export` — defeats the point of a
+    # one-shot overview.
+    sub_rows: list[tuple[str, str, list[str]]] = []
     for sub_name in grp.list_commands(ctx):
         sub = grp.get_command(ctx, sub_name)
         if sub is None or getattr(sub, "hidden", False):
             continue
-        sub_rows.append((sub_name, _help_summary(sub)))
+        leaves: list[str] = []
+        if isinstance(sub, click.Group):
+            sub_ctx = click.Context(sub, info_name=sub_name, parent=ctx)
+            for leaf_name in sub.list_commands(sub_ctx):
+                leaf = sub.get_command(sub_ctx, leaf_name)
+                if leaf is None or getattr(leaf, "hidden", False):
+                    continue
+                leaves.append(leaf_name)
+            leaves.sort()
+        sub_rows.append((sub_name, _help_summary(sub), leaves))
     if sub_rows:
         console.print("[bold]Subcommands[/]")
         sub_rows.sort(key=lambda r: r[0])
-        for sname, sdesc in sub_rows:
-            width = max(len(s) for s, _ in sub_rows)
+        width = max(len(sname) for sname, _, _ in sub_rows)
+        for sname, sdesc, leaves in sub_rows:
             console.print(f"  [cyan]{sname:<{width}}[/]  [grey70]{sdesc}[/]")
+            if leaves:
+                # Two-space indent past the subcommand-name column so the
+                # leaf row visually nests under its parent.
+                indent = " " * (2 + width + 2)
+                console.print(f"{indent}[grey50]↳[/] [cyan]{' / '.join(leaves)}[/]")
         console.print("")
 
     # Group-level options (usually empty for sub-typers).
@@ -1306,31 +1466,31 @@ def _print_help_for_group(grp: click.Group, ctx: click.Context) -> None:
 
 
 def _ensure_ready_for_analyze(ref: str | None) -> bool:
-    """Bootstrap `~/.unread/` and Telegram session before any analyze run.
+    """Bootstrap `~/.unread/` and verify the active provider key.
 
     Called for both `unread <ref>` and `unread tg <ref>`. Analyze always
     needs the *active chat provider's* key (OpenAI / OpenRouter /
     Anthropic / Google / Local-server-credential) — gate on that and
     surface a focused banner pointing at `unread init` when missing.
 
-    For Telegram refs (chat / wizard / Telegram URL), if no session
-    exists we kick off `cmd_init()` to walk the user through Telegram
-    setup. Missing Telegram credentials surface via `build_client`'s
-    own friendly banner (in `tg/client.py`) so we don't double-message.
+    Telegram-side gating (missing api_id / api_hash, missing or expired
+    session) is delegated to ``tg_client``'s built-in retry loop in
+    ``unread.tg.client`` — it offers ``cmd_init(scope="telegram_only")``
+    on a single prompt and exits cleanly on decline. We deliberately do
+    NOT trigger an eager full-scope ``cmd_init()`` here: it would re-ask
+    the AI provider question even when the only thing missing is
+    Telegram, and a "no" answer to its TG step would leave the user
+    facing the same prompt again from ``tg_client``.
 
     Returns True if the caller should proceed with analyze, False if
     the caller should stop (a banner has already been printed).
     """
-    from unread.tg.commands import cmd_init
-
     _seed_home_templates()
     if not _active_provider_credentials_present():
         # Raises typer.Exit(1) — analyze is dead in the water without
         # the active provider's key, so we surface the friendly banner
         # + non-zero exit instead of silently returning to the caller.
         _exit_missing_provider_credentials()
-    if _looks_like_telegram_ref(ref) and not _session_exists():
-        _run(cmd_init())
     return True
 
 
@@ -1402,7 +1562,7 @@ describe_app = _UnreadTyper(
     # this problem because their callbacks have no positional args.
     cls=_UnreadRootGroup,
 )
-app.add_typer(describe_app, name="describe", rich_help_panel=PANEL_TELEGRAM)
+tg_app.add_typer(describe_app, name="describe")
 
 
 @describe_app.callback(invoke_without_command=True)
@@ -1463,7 +1623,7 @@ def describe_folders() -> None:
 # Kept callable so existing scripts don't break.
 
 
-@app.command(hidden=True)
+@tg_app.command(hidden=True)
 def dialogs(
     search: str | None = typer.Option(None, "--search", help="Substring filter on chat title or @username."),
     kind: str | None = typer.Option(
@@ -1473,13 +1633,13 @@ def dialogs(
     ),
     limit: int = typer.Option(50, "--limit", help="Max rows to return."),
 ) -> None:
-    """Deprecated: use `describe` instead."""
+    """Deprecated: use `tg describe` instead."""
     from unread.tg.commands import cmd_dialogs
 
     _run(cmd_dialogs(search=search, kind=kind, limit=limit))
 
 
-@app.command(hidden=True)
+@tg_app.command(hidden=True)
 def topics(
     chat_ref: str | None = typer.Argument(None),
     chat: int | None = typer.Option(
@@ -1488,7 +1648,7 @@ def topics(
         help="Numeric chat id (alternative to passing the chat ref positionally).",
     ),
 ) -> None:
-    """Deprecated: use `describe <ref>` instead."""
+    """Deprecated: use `tg describe <ref>` instead."""
     from unread.tg.commands import cmd_topics
 
     if chat_ref is None and chat is None:
@@ -1497,7 +1657,7 @@ def topics(
     _run(cmd_topics(chat_ref if chat_ref is not None else str(chat)))
 
 
-@app.command(hidden=True)
+@tg_app.command(hidden=True)
 def resolve(anything: str = typer.Argument(...)) -> None:
     """Diagnostic: parse a reference and show the resolution path."""
     from unread.tg.commands import cmd_resolve
@@ -1505,9 +1665,9 @@ def resolve(anything: str = typer.Argument(...)) -> None:
     _run(cmd_resolve(anything))
 
 
-@app.command("channel-info", hidden=True)
+@tg_app.command("channel-info", hidden=True)
 def channel_info(ref: str = typer.Argument(...)) -> None:
-    """Deprecated: use `describe <channel-ref>` instead."""
+    """Deprecated: use `tg describe <channel-ref>` instead."""
     from unread.tg.commands import cmd_channel_info
 
     _run(cmd_channel_info(ref))
@@ -1534,18 +1694,18 @@ def chats_add(
     preset: str | None = typer.Option(
         None,
         "--preset",
-        help="Default preset for `unread chats run` on this sub (summary, action_items, …). Wizard asks if not set.",
+        help="Default preset for `unread tg chats run` on this sub (summary, action_items, …). Wizard asks if not set.",
     ),
     period: str | None = typer.Option(
         None,
         "--period",
-        help="Default period for `unread chats run` on this sub: unread | last24h | last96h | last7 | last30 | last90 | year_start | full. Wizard asks if not set.",
+        help="Default period for `unread tg chats run` on this sub: unread | last24h | last96h | last7 | last30 | last90 | year_start | full. Wizard asks if not set.",
     ),
     enrich: str | None = typer.Option(
         None,
         "--enrich",
         help=(
-            "Default enrichments for `unread chats run` on this sub. CSV of "
+            "Default enrichments for `unread tg chats run` on this sub. CSV of "
             "voice,videonote,video,image,doc,link. Empty string disables all. "
             "Unset = use config defaults at run time."
         ),
@@ -1553,12 +1713,12 @@ def chats_add(
     no_mark_read: bool = typer.Option(
         False,
         "--no-mark-read",
-        help="Don't advance Telegram's read marker after `unread chats run` analyzes this sub.",
+        help="Don't advance Telegram's read marker after `unread tg chats run` analyzes this sub.",
     ),
     post_to: str | None = typer.Option(
         None,
         "--post-to",
-        help="Telegram chat ref to post the report to (`me` for Saved Messages). Used by `unread chats run`.",
+        help="Telegram chat ref to post the report to (`me` for Saved Messages). Used by `unread tg chats run`.",
     ),
 ) -> None:
     """Add a subscription (chat / topic / channel with comments).
@@ -1569,8 +1729,8 @@ def chats_add(
     topic. CLI flags pre-fill those answers when given.
 
     The wizard also captures per-subscription defaults consumed by
-    `unread chats run` — preset, period, enrich kinds, mark-read, post-to — so a
-    later `unread chats run` walks every enabled sub and analyzes each one with
+    `unread tg chats run` — preset, period, enrich kinds, mark-read, post-to — so a
+    later `unread tg chats run` walks every enabled sub and analyzes each one with
     its own settings. CLI flags `--preset`, `--period`, `--enrich`,
     `--no-mark-read`, `--post-to` skip the matching wizard step.
     """
@@ -1655,17 +1815,22 @@ async def _list_folders() -> None:
 # ================================================================ 5.3 Sync
 
 
-@app.command(rich_help_panel=PANEL_TELEGRAM, help=_t("cmd_sync"))
+@tg_app.command(help=_t("cmd_sync"))
 def sync(
     chat: int | None = typer.Option(
         None,
         "--chat",
-        help="Numeric chat id to sync. Default: every enabled subscription.",
+        help="Numeric chat id to sync. Mutually exclusive with --all.",
     ),
     thread: int | None = typer.Option(
         None,
         "--thread",
         help="Forum-topic id (only meaningful when paired with `--chat` for a forum).",
+    ),
+    all_subs: bool = typer.Option(
+        False,
+        "--all",
+        help="Sync every enabled subscription (also the default when no --chat is given).",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -1674,6 +1839,8 @@ def sync(
     ),
 ) -> None:
     """Incrementally fetch new messages for all (or one) subscriptions."""
+    if all_subs and (chat is not None or thread is not None):
+        raise typer.BadParameter("--all is mutually exclusive with --chat / --thread.")
     from unread.tg.commands import cmd_sync
 
     _run(cmd_sync(chat=chat, thread=thread, dry_run=dry_run))
@@ -1750,8 +1917,8 @@ def chats_run(
 ) -> None:
     """Walk every enabled subscription, sync + analyze with stored settings.
 
-    `unread chats add` captures per-subscription preset / period / enrich
-    kinds / mark-read / post-to. `unread chats run` walks each enabled
+    `unread tg chats add` captures per-subscription preset / period / enrich
+    kinds / mark-read / post-to. `unread tg chats run` walks each enabled
     subscription (skipping comments-side subs — they ride along with
     their parent channel via auto `--with-comments`) and dispatches
     `cmd_analyze` with that sub's stored settings. Override flags
@@ -1784,7 +1951,7 @@ def chats_run(
     )
 
 
-@app.command(hidden=True)
+@tg_app.command(hidden=True)
 def backfill(
     chat: int = typer.Option(..., "--chat", help="Numeric chat id to backfill (required)."),
     from_msg: str = typer.Option(
@@ -1812,7 +1979,7 @@ def _looks_like_path_prefix(incomplete: str) -> bool:
 
     We complete paths only when the user has clearly committed to a path
     shape — leading `./`, `../`, `/`, `~`, or an embedded slash that
-    isn't part of a URL scheme. Bare words like `cleanup` stay free for
+    isn't part of a URL scheme. Bare words like `settings` stay free for
     subcommand-name completion; URLs (`https://…`, `t.me/…`) are also
     excluded so we don't suggest fake matches under a remote-looking
     prefix.
@@ -1867,7 +2034,7 @@ def _complete_root_ref(ctx, args, incomplete):  # type: ignore[no-untyped-def]
 
       - file/directory entries when `incomplete` looks pathy (so
         `unread ./re<Tab>` expands to `./reports/`),
-      - subcommand names otherwise (so `unread cle<Tab>` → `cleanup`).
+      - subcommand names otherwise (so `unread se<Tab>` → `settings`).
 
     Typer's `autocompletion=` callback signature: ``(ctx, args, incomplete)
     → list[tuple[str, str] | str]``. Returning a mix of bare strings
@@ -1994,6 +2161,11 @@ def _root(
         "--no-save",
         help="Skip writing the report file. The result still renders in the terminal.",
     ),
+    no_console: bool = typer.Option(
+        False,
+        "--no-console",
+        help="Skip rendering the report to the terminal. The report file is still saved. Cannot be combined with --no-save.",
+    ),
     plain_citations: bool = typer.Option(
         False,
         "--plain-citations",
@@ -2106,12 +2278,17 @@ def _root(
     language: str | None = typer.Option(
         None,
         "--language",
-        help="Output / report / UI language (en, ru, de, …). Defaults to [locale] language in config.",
+        help="UI language (en, ru, de, …). Drives wizard / banner / saved-report headings. Defaults to [locale] language.",
     ),
-    content_language: str | None = typer.Option(
+    report_language: str | None = typer.Option(
+        None,
+        "--report-language",
+        help="Language the LLM writes the analysis in (en, ru, de, …). Picks the presets/<lang>/ tree. Defaults to [locale] report_language, falling back to --language.",
+    ),
+    source_language: str | None = typer.Option(
         None,
         "--content-language",
-        help="Chat content language hint for cost estimation only. Defaults to --language.",
+        help="Source-content language hint (en, ru, zh, …). Whisper-style override — empty = LLM auto-detects. Defaults to [locale] content_language.",
     ),
     youtube_source: str = typer.Option(
         "auto",
@@ -2136,35 +2313,26 @@ def _root(
     the forum as one chat (needs `--last-days` / `--full-history`),
     `--all-per-topic` runs one analysis per topic.
 
-    For Telegram-only setup, use `unread login` (or `unread login --force`
+    For Telegram-only setup, use `unread login` (or `unread tg login --force`
     to re-link). The interactive chat picker is `unread tg` — `tg` is a
     magic ref token, not a command.
     """
     setup_logging(verbose=verbose)
     if ctx.invoked_subcommand is not None:
-        # A subcommand was matched (describe, ask, sync, …); let it run.
+        # A subcommand was matched (`tg`, `ask`, `dump`, `init`, …); let it run.
+        # `unread tg` (with no further verb) routes here too — the `tg`
+        # subgroup's own callback opens the analyze wizard.
         return
-    # `tg` is now a magic ref (not a subcommand): it routes the analyze
-    # flow into the interactive Telegram chat picker. Carrying it through
-    # `_ensure_ready_for_analyze` + `_dispatch_analyze(ref=None, ...)`
-    # mirrors the historical `unread tg` semantics — the picker opens
-    # a tg_client which transparently triggers the auto-init prompt
-    # when the session needs renewing. Track the intent separately so
-    # the stdin-auto-detect / quickstart-fallthrough branches below
-    # don't hijack a user who explicitly asked for the picker.
-    wants_tg_picker = ref == TG_INTERACTIVE_REF
-    if wants_tg_picker:
-        ref = None
     # Stdin auto-detect: `cat foo.txt | unread` (no ref, non-TTY stdin)
     # routes the piped bytes through the file analyzer. The explicit
     # form is `unread -`; both flow through `cmd_analyze_file` with a
     # sentinel that tells it to read stdin instead of opening a path.
-    if not wants_tg_picker and (ref == "-" or (ref is None and _stdin_has_data())):
+    if ref == "-" or (ref is None and _stdin_has_data()):
         ref = _STDIN_REF_SENTINEL
     # Bare `unread <ref>` no longer falls through to Telegram fuzzy
     # chat-title match — that's a surprising path for users who meant
     # "analyze this string of text". The escape hatch is `unread tg`
-    # (the magic ref above) which opens the chat picker.
+    # (the subgroup, opens the picker) which can find chats by title.
     if (
         ref is not None
         and ref != _STDIN_REF_SENTINEL
@@ -2173,7 +2341,7 @@ def _root(
         and not _is_explicit_telegram_ref(ref)
     ):
         _exit_unrecognized_ref(ref)
-    if ref is None and not wants_tg_picker:
+    if ref is None:
         # First-run nudge: if the install isn't usable yet (no AI key)
         # AND the user has never run the wizard (no install.toml
         # pointer), offer to run setup now instead of dropping them on
@@ -2195,10 +2363,9 @@ def _root(
         # surprising new users with a credential prompt or wizard.
         _print_quickstart()
         return
-    # `unread <ref>` and `unread tg [<ref>]` both need ~/.unread/ ready
-    # plus (for Telegram refs / wizard) an authorized session. Skipped
-    # for YouTube / non-Telegram URL refs since those analyzers don't
-    # need a Telegram session at all.
+    # `unread <ref>` needs ~/.unread/ ready plus (for Telegram refs)
+    # an authorized session. Skipped for YouTube / non-Telegram URL
+    # refs since those analyzers don't need a Telegram session at all.
     if not _ensure_ready_for_analyze(ref):
         return
     _maybe_warn_subcommand_collision(ref)
@@ -2222,6 +2389,7 @@ def _root(
         console_out=console_out,
         save=save,
         no_save=no_save,
+        no_console=no_console,
         plain_citations=plain_citations,
         mark_read=mark_read,
         no_cache=no_cache,
@@ -2244,7 +2412,8 @@ def _root(
         repeat_last=repeat_last,
         with_comments=with_comments,
         language=language,
-        content_language=content_language,
+        report_language=report_language,
+        source_language=source_language,
         youtube_source=youtube_source,
         disable_truncation_retry=no_truncation_retry,
     )
@@ -2253,7 +2422,7 @@ def _root(
 # ============================================================== 5.4b Download media
 
 
-@app.command("download-media", hidden=True)
+@tg_app.command("download-media", hidden=True)
 def download_media(
     ref: str = typer.Argument(
         ...,
@@ -2345,23 +2514,49 @@ def stats(
     _run(cmd_stats(since=since, by=by))
 
 
-@cache_app.command("purge")
-def cache_purge(
-    older_than: str = typer.Option("90d", "--older-than", help="Nd / Nw"),
+@cache_ai_app.command("purge")
+def cache_ai_purge(
+    older_than: str | None = typer.Option(
+        None,
+        "--older-than",
+        help="Nd / Nw (default: 90d). Mutually exclusive with --all.",
+    ),
     preset: str | None = typer.Option(
         None,
         "--preset",
-        help="Restrict to one preset (e.g. summary, brief). Default: all presets.",
+        help="Restrict to one preset (e.g. summary, brief). Mutually exclusive with --all.",
     ),
     model: str | None = typer.Option(
         None,
         "--model",
-        help="Restrict to one model (e.g. gpt-4o-mini). Default: all models.",
+        help="Restrict to one model (e.g. gpt-4o-mini). Mutually exclusive with --all.",
+    ),
+    all_entries: bool = typer.Option(
+        False,
+        "--all",
+        help="Purge every cached entry regardless of age, preset, or model. Mutually exclusive with --older-than / --preset / --model.",
     ),
     vacuum: bool = typer.Option(False, "--vacuum", help="Run VACUUM after purge to reclaim disk."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
     """Delete cached analysis results by age and filters."""
-    _run(_cache_purge(older_than, preset, model, vacuum))
+    if all_entries and (preset is not None or model is not None):
+        raise typer.BadParameter("--all is mutually exclusive with --preset / --model.")
+    if all_entries and older_than is not None:
+        raise typer.BadParameter(
+            "--all purges every cached row regardless of age — drop --older-than or drop --all."
+        )
+    effective_older_than = older_than if older_than is not None else "90d"
+    _run(
+        _cache_purge(
+            effective_older_than,
+            preset,
+            model,
+            vacuum,
+            yes,
+            all_entries=all_entries,
+        )
+    )
 
 
 async def _cache_purge(
@@ -2369,17 +2564,80 @@ async def _cache_purge(
     preset: str | None,
     model: str | None,
     vacuum: bool,
+    yes: bool,
+    *,
+    all_entries: bool = False,
 ) -> None:
     settings = get_settings()
-    days = _parse_duration_days(older_than)
-    if days <= 0:
-        console.print(f"[yellow]{_t('cli_skipped_label')}[/] {_t('cli_cache_purge_min_days')}")
-        return
+    if all_entries:
+        days: int | None = None
+    else:
+        days = _parse_duration_days(older_than)
+        if days <= 0:
+            console.print(f"[yellow]{_t('cli_skipped_label')}[/] {_t('cli_cache_purge_min_days')}")
+            return
     async with open_repo(settings.storage.data_path) as repo:
-        removed = await repo.cache_purge(older_than_days=days, preset=preset, model=model)
-        console.print(
-            f"[green]{_t('cli_purged_label')}[/] {_tf('cli_cache_purged_msg', n=removed, days=days)}"
+        preview = await repo.cache_purge_preview(
+            older_than_days=days,
+            preset=preset,
+            model=model,
+            breakdown_limit=10,
         )
+        if preview["rows"] == 0:
+            console.print(f"[yellow]{_t('cli_cache_nothing_to_purge')}[/]")
+            return
+
+        # Scope description: "every cached row" for --all, otherwise the
+        # filter chain ("older than 90d, preset=summary, model=gpt-…").
+        scope_bits: list[str] = []
+        if all_entries:
+            scope_bits.append(_t("cli_cache_scope_all"))
+        else:
+            scope_bits.append(_tf("cli_cache_older_than", days=days).rstrip("."))
+            if preset:
+                scope_bits.append(f"preset={preset}")
+            if model:
+                scope_bits.append(f"model={model}")
+        scope = ", ".join(scope_bits)
+
+        oldest = str(preview["oldest"])[:10] if preview["oldest"] else "—"
+        newest = str(preview["newest"])[:10] if preview["newest"] else "—"
+        console.print(
+            f"[bold]{_t('cli_cache_purge_preview_title')}[/] ({scope}):\n"
+            f"  rows to delete:        [red]{preview['rows']:,}[/]\n"
+            f"  result text on disk:   {_fmt_bytes(preview['result_bytes'])}\n"
+            f"  saved API spend (cum): ${preview['saved_cost_usd']:.4f}\n"
+            f"  age range:             {oldest} → {newest}"
+        )
+
+        if preview["by_group"]:
+            console.print(f"\n[bold]{_t('cli_cache_breakdown_title')}[/]")
+            for g in preview["by_group"]:
+                label = f"{g['preset']} @ {g['model']}"
+                console.print(
+                    f"  • {label} — [red]{g['rows']:,}[/] rows "
+                    f"[grey70]({_fmt_bytes(g['result_bytes'])}, "
+                    f"${g['saved_cost_usd']:.4f} saved)[/]"
+                )
+            shown = sum(g["rows"] for g in preview["by_group"])
+            remaining = max(0, preview["rows"] - shown)
+            if remaining > 0:
+                console.print(f"  [grey70]{_tf('cli_cache_breakdown_more', n=remaining)}[/]")
+
+        if not yes:
+            from unread.util.prompt import confirm as _confirm
+
+            if not _confirm(_t("cli_cache_purge_proceed_q"), default=False):
+                console.print(f"[yellow]{_t('cli_aborted')}[/]")
+                return
+
+        removed = await repo.cache_purge(older_than_days=days, preset=preset, model=model)
+        if all_entries:
+            console.print(f"[green]{_t('cli_purged_label')}[/] {_tf('cli_cache_purged_all_msg', n=removed)}")
+        else:
+            console.print(
+                f"[green]{_t('cli_purged_label')}[/] {_tf('cli_cache_purged_msg', n=removed, days=days)}"
+            )
         if vacuum:
             reclaimed = await repo.vacuum()
             console.print(
@@ -2388,8 +2646,569 @@ async def _cache_purge(
             )
 
 
-@cache_app.command("stats")
-def cache_stats_cmd(
+_SOURCE_KIND_HELP = (
+    "Source kind to operate on: website (extracted page text), youtube "
+    "(metadata + transcript), or file (extracted local-file text). Pass the "
+    "value as `website`, `youtube`, or `file`. When omitted, all kinds apply."
+)
+
+
+@cache_sources_app.command("ls")
+def cache_sources_ls(
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help=_SOURCE_KIND_HELP,
+    ),
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        help="Max rows to show per kind. Default: 50.",
+    ),
+) -> None:
+    """List cached source rows (websites / YouTube videos / local files).
+
+    These are the per-input caches that let `unread <url>` skip the
+    re-fetch / re-extract step on a second run. Distinct from
+    `analysis_cache` (the per-LLM-call result cache cleaned by
+    `cache purge`) and from Telegram message-text retention
+    (`cache tg`). Use `cache sources-purge` to delete entries.
+    """
+    _run(_cache_sources_ls(kind, limit))
+
+
+@cache_sources_app.command("purge")
+def cache_sources_purge_cmd(
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help="Delete only the row whose canonical URL / file path matches exactly.",
+    ),
+    domain: str | None = typer.Option(
+        None,
+        "--domain",
+        help="Delete every website-cache row from this domain (e.g. `zh.wikipedia.org`). "
+        "No effect on youtube / file kinds.",
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help=_SOURCE_KIND_HELP,
+    ),
+    older_than: str | None = typer.Option(
+        None,
+        "--older-than",
+        help="Age threshold (Nd / Nw, e.g. 30d, 4w). Mutually exclusive with --all.",
+    ),
+    all_entries: bool = typer.Option(
+        False,
+        "--all",
+        help="Wipe every cached source row of the selected kind(s). "
+        "Mutually exclusive with --url / --domain / --older-than.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Delete cached source rows. Filter by --url, --domain, --kind, --older-than, or --all."""
+    if all_entries and (url or domain or older_than):
+        raise typer.BadParameter(
+            "--all is mutually exclusive with --url / --domain / --older-than. "
+            "Pick the explicit filters OR --all, not both."
+        )
+    if not (all_entries or url or domain or older_than):
+        raise typer.BadParameter(
+            "No filter set. Pass at least one of --url / --domain / --older-than / --all."
+        )
+    _run(
+        _cache_sources_purge(
+            url=url, domain=domain, kind=kind, older_than=older_than, yes=yes, all_entries=all_entries
+        )
+    )
+
+
+async def _cache_sources_ls(kind: str | None, limit: int) -> None:
+    settings = get_settings()
+    from rich.table import Table
+
+    from unread.db.repo import Repo as _Repo
+
+    kinds = (kind,) if kind else _Repo.source_cache_kinds()
+    if kind and kind not in _Repo.source_cache_kinds():
+        valid = ", ".join(_Repo.source_cache_kinds())
+        raise typer.BadParameter(f"Unknown --kind {kind!r}. Valid: {valid}.")
+
+    async with open_repo(settings.storage.data_path) as repo:
+        any_rows = False
+        for k in kinds:
+            rows = await repo.list_source_cache(k, limit=limit)
+            counts = await repo.count_source_cache(k)
+            total = int(counts.get("rows") or 0)
+            console.print(
+                f"\n[bold]{k}[/] — {total:,} cached row(s)"
+                + (f" (showing {len(rows)})" if total > len(rows) else "")
+            )
+            if not rows:
+                console.print("  [grey70](none)[/]")
+                continue
+            any_rows = True
+            t = Table(show_header=True, header_style="bold")
+            t.add_column("fetched")
+            t.add_column("id", style="grey70")
+            if k == "website":
+                t.add_column("domain")
+            t.add_column("label")
+            for r in rows:
+                fetched = (str(r.get("fetched_at") or ""))[:19]
+                row_cells = [fetched, str(r.get("id") or "")]
+                if k == "website":
+                    row_cells.append(str(r.get("domain") or ""))
+                row_cells.append(str(r.get("label") or ""))
+                t.add_row(*row_cells)
+            console.print(t)
+        if not any_rows and not kind:
+            console.print("\n[grey70]No cached sources. Run `unread <url-or-file>` to populate.[/]")
+
+
+async def _cache_sources_purge(
+    *,
+    url: str | None,
+    domain: str | None,
+    kind: str | None,
+    older_than: str | None,
+    yes: bool,
+    all_entries: bool,
+) -> None:
+    settings = get_settings()
+    from unread.db.repo import Repo as _Repo
+
+    kinds = (kind,) if kind else _Repo.source_cache_kinds()
+    if kind and kind not in _Repo.source_cache_kinds():
+        valid = ", ".join(_Repo.source_cache_kinds())
+        raise typer.BadParameter(f"Unknown --kind {kind!r}. Valid: {valid}.")
+
+    days: int | None = None
+    if older_than is not None:
+        days = _parse_duration_days(older_than)
+        if days <= 0:
+            console.print(f"[yellow]{_t('cli_skipped_label')}[/] {_t('cli_cache_purge_min_days')}")
+            return
+
+    async with open_repo(settings.storage.data_path) as repo:
+        # Preview every selected kind before touching anything so the
+        # confirmation prompt summarizes the full blast radius.
+        previews: list[tuple[str, dict]] = []
+        for k in kinds:
+            preview = await repo.count_source_cache(k, url=url, domain=domain, older_than_days=days)
+            if preview.get("rows", 0) > 0:
+                previews.append((k, preview))
+        if not previews:
+            console.print("[yellow]Nothing to purge with the given filters.[/]")
+            return
+
+        scope_bits: list[str] = []
+        if all_entries:
+            scope_bits.append("all entries")
+        if url:
+            scope_bits.append(f"url={url}")
+        if domain:
+            scope_bits.append(f"domain={domain}")
+        if days is not None:
+            scope_bits.append(f"older than {days}d")
+        if kind:
+            scope_bits.append(f"kind={kind}")
+        scope = ", ".join(scope_bits) or "(no filter)"
+
+        console.print(f"[bold]Source-cache purge preview[/] ({scope}):")
+        total_rows = 0
+        for k, p in previews:
+            rows = int(p.get("rows") or 0)
+            total_rows += rows
+            oldest = (str(p.get("oldest") or ""))[:10] or "—"
+            newest = (str(p.get("newest") or ""))[:10] or "—"
+            console.print(f"  • {k}: [red]{rows:,}[/] row(s)  [grey70](age range: {oldest} → {newest})[/]")
+        console.print(f"  total: [red]{total_rows:,}[/] row(s)")
+
+        if not yes:
+            from unread.util.prompt import confirm as _confirm
+
+            if not _confirm("Purge the rows above?", default=False):
+                console.print(f"[yellow]{_t('cli_aborted')}[/]")
+                return
+
+        deleted_total = 0
+        for k, _ in previews:
+            n = await repo.purge_source_cache(
+                k, url=url, domain=domain, older_than_days=days, all_entries=all_entries
+            )
+            deleted_total += n
+            console.print(f"[green]Purged[/] {n:,} {k} row(s).")
+        console.print(f"[green]Done.[/] Removed {deleted_total:,} cached source row(s).")
+
+
+@cache_sources_app.command("stats")
+def cache_sources_stats_cmd() -> None:
+    """Aggregate counts per source kind: rows + age range."""
+    _run(_cache_sources_stats())
+
+
+async def _cache_sources_stats() -> None:
+    from rich.table import Table
+
+    from unread.db.repo import Repo as _Repo
+
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        t = Table(show_header=True, header_style="bold")
+        t.add_column("kind")
+        t.add_column("rows", justify="right")
+        t.add_column("oldest")
+        t.add_column("newest")
+        any_rows = False
+        for k in _Repo.source_cache_kinds():
+            c = await repo.count_source_cache(k)
+            rows = int(c.get("rows") or 0)
+            oldest = (str(c.get("oldest") or ""))[:10] or "—"
+            newest = (str(c.get("newest") or ""))[:10] or "—"
+            t.add_row(k, f"{rows:,}", oldest, newest)
+            any_rows = any_rows or rows > 0
+        console.print(t)
+        if not any_rows:
+            console.print("[grey70]No cached sources. Run `unread <url-or-file>` to populate.[/]")
+
+
+@cache_sources_app.command("show")
+def cache_sources_show_cmd(
+    source_id: str = typer.Argument(
+        ..., help="page_id (websites) / video_id (YouTube) / file_id (local files)."
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help=_SOURCE_KIND_HELP + " When omitted, all kinds are searched and the first match wins.",
+    ),
+) -> None:
+    """Print a stored source row's metadata + paragraph preview.
+
+    The full extracted text isn't dumped (use `export` for that) — this
+    is a compact diagnostic view: where the row came from, when it was
+    fetched, what the extractor produced.
+    """
+    _run(_cache_sources_show(source_id, kind))
+
+
+async def _cache_sources_show(source_id: str, kind: str | None) -> None:
+    import json as _json
+
+    from unread.db.repo import Repo as _Repo
+
+    settings = get_settings()
+    if kind and kind not in _Repo.source_cache_kinds():
+        valid = ", ".join(_Repo.source_cache_kinds())
+        raise typer.BadParameter(f"Unknown --kind {kind!r}. Valid: {valid}.")
+    kinds = (kind,) if kind else _Repo.source_cache_kinds()
+
+    async with open_repo(settings.storage.data_path) as repo:
+        row: dict | None = None
+        matched_kind: str | None = None
+        for k in kinds:
+            row = await repo.get_source_cache(k, source_id)
+            if row is not None:
+                matched_kind = k
+                break
+        if row is None:
+            console.print(f"[red]No cached source found for id `{source_id}`[/]")
+            raise typer.Exit(1)
+
+        # Pretty-print the row's interesting columns; paragraphs is
+        # always huge, so summarize length + show first/last paragraph
+        # as a sanity check that the extraction looks right.
+        console.print(f"[bold]{matched_kind}[/]  id=[grey70]{source_id}[/]")
+        for col in (
+            "url",
+            "abs_path",
+            "name",
+            "title",
+            "site_name",
+            "channel_title",
+            "author",
+            "published",
+            "upload_date",
+            "language",
+            "word_count",
+            "duration_sec",
+            "view_count",
+            "fetched_at",
+            "transcribed_at",
+            "extractor",
+            "transcript_source",
+            "content_hash",
+        ):
+            val = row.get(col)
+            if val is None or val == "":
+                continue
+            console.print(f"  {col:18} {val}")
+
+        # Paragraphs preview (websites + files) or transcript snippet (youtube).
+        body_field = "paragraphs_json" if matched_kind in {"website", "file"} else "transcript"
+        body = row.get(body_field)
+        if body:
+            if matched_kind in {"website", "file"}:
+                try:
+                    paragraphs = list(_json.loads(body))
+                except Exception:
+                    paragraphs = []
+                console.print(f"  paragraphs         {len(paragraphs):,}")
+                if paragraphs:
+                    console.print(
+                        f"\n  [grey70]first[/]  {paragraphs[0][:200]}{'…' if len(paragraphs[0]) > 200 else ''}"
+                    )
+                    if len(paragraphs) > 1:
+                        last = paragraphs[-1]
+                        console.print(f"  [grey70]last[/]   {last[:200]}{'…' if len(last) > 200 else ''}")
+            else:
+                snippet = str(body)[:400]
+                tail = "…" if len(body) > 400 else ""
+                console.print(f"\n  [grey70]transcript[/] ({len(body):,} chars):")
+                console.print(f"  {snippet}{tail}")
+
+
+@cache_sources_app.command("export")
+def cache_sources_export_cmd(
+    output: Path = typer.Option(
+        ..., "--output", "-o", help="Output path. JSONL is the only supported format."
+    ),
+    kind: str | None = typer.Option(None, "--kind", help=_SOURCE_KIND_HELP),
+    include_paragraphs: bool = typer.Option(
+        False,
+        "--include-paragraphs",
+        help="Include the extracted body / transcript in the dump. Off by default — the dump is intended as a metadata-only inventory.",
+    ),
+) -> None:
+    """Dump cached source rows to JSONL for backup / inspection.
+
+    One JSON object per line, fields per kind. Body / transcript text is
+    omitted unless `--include-paragraphs` is passed (so the file stays a
+    grep-friendly inventory by default).
+    """
+    _run(_cache_sources_export(output, kind, include_paragraphs))
+
+
+async def _cache_sources_export(output: Path, kind: str | None, include_paragraphs: bool) -> None:
+    import json as _json
+
+    from unread.db.repo import Repo as _Repo
+
+    settings = get_settings()
+    if kind and kind not in _Repo.source_cache_kinds():
+        valid = ", ".join(_Repo.source_cache_kinds())
+        raise typer.BadParameter(f"Unknown --kind {kind!r}. Valid: {valid}.")
+    kinds = (kind,) if kind else _Repo.source_cache_kinds()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    async with open_repo(settings.storage.data_path) as repo:
+        with output.open("w", encoding="utf-8") as f:
+            for k in kinds:
+                # Pull rows in chunks so giant caches don't blow memory.
+                # `list_source_cache` already returns newest-first; we
+                # raise the limit very high since we're streaming to disk.
+                rows = await repo.list_source_cache(k, limit=100_000)
+                for r in rows:
+                    full = await repo.get_source_cache(k, str(r["id"]))
+                    if full is None:
+                        continue
+                    if not include_paragraphs:
+                        full = {
+                            kk: vv
+                            for kk, vv in full.items()
+                            if kk not in {"paragraphs_json", "transcript", "transcript_timed_json"}
+                        }
+                    full["_kind"] = k
+                    f.write(_json.dumps(full, ensure_ascii=False, default=str) + "\n")
+                    written += 1
+    console.print(f"[green]Wrote[/] {written:,} cached-source row(s) to {output}.")
+
+
+# ----------------------------- TG cache (`messages` table) -----------------------------
+
+
+@cache_tg_app.command("ls")
+def cache_tg_ls_cmd(
+    limit: int = typer.Option(50, "--limit", help="Max chats to show."),
+) -> None:
+    """List synced Telegram chats with message counts (newest activity first).
+
+    Shows what's currently in the local `messages` cache: per-chat
+    message totals, how many still carry text vs. just metadata, how
+    many have a transcript attached, and the oldest / newest message
+    date. Use `cache tg show <chat_id>` for one chat's detail.
+    """
+    _run(_cache_tg_ls(limit))
+
+
+async def _cache_tg_ls(limit: int) -> None:
+    from rich.table import Table
+
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        overview = await repo.tg_overview()
+        if overview["messages"] == 0:
+            console.print("[yellow]No Telegram messages cached.[/] Run `unread sync` to populate.")
+            return
+        rows = await repo.tg_chats_summary(limit=limit)
+        oldest = str(overview["oldest"] or "")[:10] or "—"
+        newest = str(overview["newest"] or "")[:10] or "—"
+        console.print(
+            f"[bold]messages[/] — {overview['messages']:,} row(s) across "
+            f"{overview['chats']:,} chat(s) — age range {oldest} → {newest}"
+        )
+        t = Table(show_header=True, header_style="bold")
+        t.add_column("chat_id", style="grey70")
+        t.add_column("title")
+        t.add_column("messages", justify="right")
+        t.add_column("text", justify="right")
+        t.add_column("transcripts", justify="right")
+        t.add_column("oldest")
+        t.add_column("newest")
+        for r in rows:
+            o = (str(r["oldest"] or ""))[:10] or "—"
+            n = (str(r["newest"] or ""))[:10] or "—"
+            t.add_row(
+                str(r["chat_id"]),
+                str(r["title"] or ""),
+                f"{r['messages']:,}",
+                f"{r['with_text']:,}",
+                f"{r['with_transcript']:,}",
+                o,
+                n,
+            )
+        console.print(t)
+        if overview["chats"] > len(rows):
+            console.print(
+                f"[grey70](showing top {len(rows)} of {overview['chats']:,} chats; use --limit to expand)[/]"
+            )
+
+
+@cache_tg_app.command("stats")
+def cache_tg_stats_cmd() -> None:
+    """One-shot summary of the local Telegram cache.
+
+    Aggregate row counts (total / with-text / with-transcript), the
+    chat count, and the oldest / newest message dates. Companion to
+    `cache tg ls` (which does per-chat detail).
+    """
+    _run(_cache_tg_stats())
+
+
+async def _cache_tg_stats() -> None:
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        overview = await repo.tg_overview()
+        if overview["messages"] == 0:
+            console.print("[yellow]No Telegram messages cached.[/] Run `unread sync` to populate.")
+            return
+        oldest = str(overview["oldest"] or "")[:10] or "—"
+        newest = str(overview["newest"] or "")[:10] or "—"
+        console.print(
+            f"[bold]messages[/]      [red]{overview['messages']:,}[/] row(s)\n"
+            f"[bold]chats[/]         {overview['chats']:,}\n"
+            f"[bold]with text[/]     {overview['with_text']:,}\n"
+            f"[bold]transcripts[/]   {overview['with_transcript']:,}\n"
+            f"[bold]oldest[/]        {oldest}\n"
+            f"[bold]newest[/]        {newest}"
+        )
+
+
+@cache_tg_app.command("show")
+def cache_tg_show_cmd(
+    chat_id: int = typer.Argument(..., help="Numeric chat id (use `tg describe` to look up)."),
+) -> None:
+    """Print one chat's cached-message stats: counts, age range, first / last."""
+    _run(_cache_tg_show(chat_id))
+
+
+async def _cache_tg_show(chat_id: int) -> None:
+    settings = get_settings()
+    async with open_repo(settings.storage.data_path) as repo:
+        chat = await repo.get_chat(chat_id)
+        title = (chat or {}).get("title") or ""
+        stats = await repo.chat_stats(chat_id)
+        if stats.get("count", 0) == 0:
+            console.print(f"[yellow]No cached messages for chat {chat_id}[/]")
+            return
+        console.print(f"[bold]chat_id[/]      {chat_id}" + (f"  [grey70]({title})[/]" if title else ""))
+        for k in ("count", "first_msg_id", "last_msg_id", "first_date", "last_date"):
+            v = stats.get(k)
+            if v is None:
+                continue
+            console.print(f"[bold]{k:12}[/] {v}")
+
+
+@cache_tg_app.command("export")
+def cache_tg_export_cmd(
+    output: Path = typer.Option(..., "--output", "-o", help="Output path (JSONL)."),
+    chat_id: int | None = typer.Option(None, "--chat", help="Restrict to a single chat id."),
+    older_than: str | None = typer.Option(
+        None,
+        "--older-than",
+        help="Only export messages older than Nd / Nw (handy for archiving before `cache tg purge`).",
+    ),
+) -> None:
+    """Dump cached Telegram messages to JSONL.
+
+    One JSON object per line, columns from the `messages` table. For
+    user-facing report exports use `unread dump <ref>` instead — this
+    command targets backup / migration / inspection of the raw cache
+    rows themselves.
+    """
+    _run(_cache_tg_export(output, chat_id, older_than))
+
+
+async def _cache_tg_export(output: Path, chat_id: int | None, older_than: str | None) -> None:
+    import json as _json
+    from datetime import UTC, datetime, timedelta
+
+    settings = get_settings()
+    until_dt: datetime | None = None
+    if older_than:
+        days = _parse_duration_days(older_than)
+        if days <= 0:
+            console.print(f"[yellow]{_t('cli_skipped_label')}[/] {_t('cli_cache_purge_min_days')}")
+            return
+        until_dt = datetime.now(UTC) - timedelta(days=days)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    async with open_repo(settings.storage.data_path) as repo:
+        # iter_messages requires a chat_id; for cross-chat export, walk
+        # chats from the cache summary and stream each one's rows.
+        chats: list[int] = []
+        if chat_id is not None:
+            chats = [chat_id]
+        else:
+            chats = [r["chat_id"] for r in await repo.tg_chats_summary(limit=100_000)]
+
+        with output.open("w", encoding="utf-8") as f:
+            for cid in chats:
+                async for msg in repo.iter_messages(cid, until=until_dt):
+                    payload = {
+                        "chat_id": msg.chat_id,
+                        "msg_id": msg.msg_id,
+                        "thread_id": msg.thread_id,
+                        "date": msg.date.isoformat() if msg.date else None,
+                        "sender_id": msg.sender_id,
+                        "sender_name": msg.sender_name,
+                        "text": msg.text,
+                        "transcript": getattr(msg, "transcript", None),
+                        "media_type": getattr(msg, "media_type", None),
+                        "fwd_from": getattr(msg, "fwd_from", None),
+                    }
+                    f.write(_json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+                    written += 1
+    console.print(f"[green]Wrote[/] {written:,} message(s) to {output}.")
+
+
+@cache_ai_app.command("stats")
+def cache_ai_stats_cmd(
     since: str | None = typer.Option(
         None,
         "--since",
@@ -2467,8 +3286,8 @@ async def _cache_stats(since: str | None) -> None:
     console.print(f"[grey70]{_t('cli_cache_eff_hint')}[/]")
 
 
-@cache_app.command("ls")
-def cache_ls_cmd(
+@cache_ai_app.command("ls")
+def cache_ai_ls_cmd(
     preset: str | None = typer.Option(None, "--preset", help="Filter by preset name."),
     model: str | None = typer.Option(None, "--model", help="Filter by model name."),
     older_than: str | None = typer.Option(None, "--older-than", help="Nd / Nw"),
@@ -2514,8 +3333,8 @@ async def _cache_ls(
     console.print(t)
 
 
-@cache_app.command("show")
-def cache_show_cmd(
+@cache_ai_app.command("show")
+def cache_ai_show_cmd(
     batch_hash: str = typer.Argument(..., help="Full hash or unique prefix."),
 ) -> None:
     """Print a stored analysis result."""
@@ -2550,8 +3369,8 @@ async def _cache_show(batch_hash: str) -> None:
     console.print(row["result"])
 
 
-@cache_app.command("export")
-def cache_export_cmd(
+@cache_ai_app.command("export")
+def cache_ai_export_cmd(
     output: Path = typer.Option(
         ..., "--output", "-o", help="File path. Extension picks format if --format omitted."
     ),
@@ -2633,17 +3452,22 @@ def _parse_duration_days(s: str) -> int:
     return int(s)
 
 
-@app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_cleanup"))
-def cleanup(
-    retention: str = typer.Option(
-        "90d",
+@cache_tg_app.command("purge")
+def cache_tg_purge(
+    retention: str | None = typer.Option(
+        None,
         "--retention",
-        help="Age threshold (Nd / Nw, e.g. 30d, 12w). Messages older than this get their text blanked.",
+        help="Age threshold (Nd / Nw, e.g. 30d, 12w). Telegram messages older than this get their text blanked. Default: 90d. Mutually exclusive with --all.",
     ),
     chat: int | None = typer.Option(
         None,
         "--chat",
-        help="Numeric chat id to scope the cleanup to. Default: every synced chat.",
+        help="Numeric chat id to scope the cleanup to. Mutually exclusive with --all.",
+    ),
+    all_chats: bool = typer.Option(
+        False,
+        "--all",
+        help="Redact every synced message in every chat regardless of age. Mutually exclusive with --retention / --chat.",
     ),
     keep_transcripts: bool = typer.Option(
         True,
@@ -2653,30 +3477,69 @@ def cleanup(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:
-    """Null-out old message texts; keep transcripts/analysis cache."""
-    _run(_cleanup(retention, chat, keep_transcripts, yes))
+    """Blank out old Telegram message texts; transcripts and analysis cache stay.
+
+    The Telegram-message cache (`messages` table) holds the message
+    bodies your sync flow pulled in. This command nulls out the `text`
+    column for messages older than `--retention`, keeping the row +
+    msg_id + sender + reactions intact (so `analysis_cache` rows that
+    cite those msg_ids still resolve to a valid row, just without the
+    original text). Voice / video / image / doc enrichments survive
+    unless you pass `--no-keep-transcripts`.
+
+    Renamed from `unread cleanup` — sits under `cache` now alongside
+    `cache purge` (analysis cache), `cache sources` (per-source caches),
+    and the rest.
+    """
+    if all_chats and chat is not None:
+        raise typer.BadParameter("--all and --chat are mutually exclusive.")
+    if all_chats and retention is not None:
+        raise typer.BadParameter(
+            "--all redacts every message regardless of age — drop --retention or drop --all."
+        )
+    effective_retention = retention if retention is not None else "90d"
+    _run(_cleanup(effective_retention, chat, keep_transcripts, yes, all_messages=all_chats))
 
 
-async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes: bool) -> None:
+async def _cleanup(
+    retention: str,
+    chat: int | None,
+    keep_transcripts: bool,
+    yes: bool,
+    *,
+    all_messages: bool = False,
+) -> None:
     settings = get_settings()
-    days = _parse_duration_days(retention)
+    days = 0 if all_messages else _parse_duration_days(retention)
     async with open_repo(settings.storage.data_path) as repo:
         preview = await repo.count_redactable_messages(
             retention_days=days,
             chat_id=chat,
             keep_transcripts=keep_transcripts,
+            all_messages=all_messages,
         )
         if preview["to_redact"] == 0:
             if preview["messages"] == 0:
-                console.print(
-                    f"[yellow]{_t('cli_cleanup_nothing')}[/] {_tf('cli_cleanup_older_than', days=days)}"
-                )
+                if all_messages:
+                    console.print(
+                        f"[yellow]{_t('cli_cleanup_nothing')}[/] {_t('cli_cleanup_no_messages_at_all')}"
+                    )
+                else:
+                    console.print(
+                        f"[yellow]{_t('cli_cleanup_nothing')}[/] {_tf('cli_cleanup_older_than', days=days)}"
+                    )
             else:
                 tail = _t("cli_cleanup_transcripts_kept") if keep_transcripts else ""
-                console.print(
-                    f"[yellow]{_t('cli_cleanup_already_clean_label')}[/] — "
-                    f"{_tf('cli_cleanup_already_clean_msg', n=preview['messages'], days=days, tail=tail)}"
-                )
+                if all_messages:
+                    console.print(
+                        f"[yellow]{_t('cli_cleanup_already_clean_label')}[/] — "
+                        f"{_tf('cli_cleanup_already_clean_msg_all', n=preview['messages'], tail=tail)}"
+                    )
+                else:
+                    console.print(
+                        f"[yellow]{_t('cli_cleanup_already_clean_label')}[/] — "
+                        f"{_tf('cli_cleanup_already_clean_msg', n=preview['messages'], days=days, tail=tail)}"
+                    )
             return
 
         scope = (
@@ -2696,10 +3559,42 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
             with_text=preview["with_text"],
             transcripts=transcript_line,
         )
-        console.print(
-            f"[bold]{_t('cli_cleanup_preview_title')}[/] ({scope}, "
-            f"{_tf('cli_cleanup_older_than', days=days).rstrip('.')}):\n{body}"
+        age_clause = (
+            _t("cli_cleanup_age_all")
+            if all_messages
+            else _tf("cli_cleanup_older_than", days=days).rstrip(".")
         )
+        console.print(f"[bold]{_t('cli_cleanup_preview_title')}[/] ({scope}, {age_clause}):\n{body}")
+
+        # Per-chat breakdown of what's about to disappear. The total preview
+        # above is a count-only summary; the breakdown turns "20k rows" into
+        # "and here are the chats those rows live in," which is what the user
+        # actually needs to decide whether to proceed. Skip when the run is
+        # already scoped to one chat (the breakdown would be a single line
+        # repeating what `scope` already says).
+        if chat is None:
+            breakdown = await repo.redactable_breakdown(
+                retention_days=days,
+                chat_id=chat,
+                keep_transcripts=keep_transcripts,
+                all_messages=all_messages,
+                limit=10,
+            )
+            if breakdown:
+                console.print(f"\n[bold]{_t('cli_cleanup_breakdown_title')}[/]")
+                for row in breakdown:
+                    label = row["title"] or _tf("cli_cleanup_breakdown_no_title", chat_id=row["chat_id"])
+                    span = ""
+                    if row["oldest"] and row["newest"]:
+                        oldest = str(row["oldest"])[:10]
+                        newest = str(row["newest"])[:10]
+                        span = f" [grey70]({oldest} → {newest})[/]"
+                    console.print(f"  • {label} — [red]{row['rows']:,}[/] rows{span}")
+                shown = sum(r["rows"] for r in breakdown)
+                remaining = max(0, preview["to_redact"] - shown)
+                if remaining > 0:
+                    console.print(f"  [grey70]{_tf('cli_cleanup_breakdown_more', n=remaining)}[/]")
+
         if not yes:
             from unread.util.prompt import confirm as _confirm
 
@@ -2711,12 +3606,18 @@ async def _cleanup(retention: str, chat: int | None, keep_transcripts: bool, yes
             retention_days=days,
             chat_id=chat,
             keep_transcripts=keep_transcripts,
+            all_messages=all_messages,
         )
         tail = _t("cli_redacted_transcripts_kept") if keep_transcripts else ""
-        console.print(
-            f"[green]{_t('cli_redacted_label')}[/] "
-            f"{_tf('cli_redacted_msg', n=redacted, days=days, tail=tail)}"
-        )
+        if all_messages:
+            console.print(
+                f"[green]{_t('cli_redacted_label')}[/] {_tf('cli_redacted_msg_all', n=redacted, tail=tail)}"
+            )
+        else:
+            console.print(
+                f"[green]{_t('cli_redacted_label')}[/] "
+                f"{_tf('cli_redacted_msg', n=redacted, days=days, tail=tail)}"
+            )
 
 
 @app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_ask"))
@@ -2902,18 +3803,26 @@ def ask(
         None,
         "--language",
         help=(
-            "Language for the answer + UI labels (en, ru, …). Defaults to "
-            "[locale] language in config (en). The model also tends to follow "
-            "the question's language when it differs."
+            "UI language (en, ru, …). Drives wizard labels and status messages. "
+            "Defaults to [locale] language in config."
         ),
     ),
-    content_language: str | None = typer.Option(
+    report_language: str | None = typer.Option(
+        None,
+        "--report-language",
+        help=(
+            "Language the LLM writes the answer in (en, ru, …). Drives the "
+            "system prompt + labels sent to the model. Defaults to "
+            "[locale] report_language, falling back to --language."
+        ),
+    ),
+    source_language: str | None = typer.Option(
         None,
         "--content-language",
         help=(
-            "Chat content language — drives the system prompt + label "
-            "language sent to the LLM. Defaults to --language. Override when "
-            "your chat is in a different language than your interface."
+            "Source-content language hint (en, ru, zh, …). Whisper-style "
+            "override — empty = LLM auto-detects from the cited messages. "
+            "Defaults to [locale] content_language."
         ),
     ),
     mark_read: bool | None = typer.Option(
@@ -2998,7 +3907,8 @@ def ask(
                     max_cost=max_cost,
                     yes=yes,
                     language=language,
-                    content_language=content_language,
+                    report_language=report_language,
+                    source_language=source_language,
                     no_followup=no_followup,
                     semantic=semantic,
                     build_index=build_index,
@@ -3023,7 +3933,8 @@ def ask(
                     max_cost=max_cost,
                     yes=yes,
                     language=language,
-                    content_language=content_language,
+                    report_language=report_language,
+                    source_language=source_language,
                     no_followup=no_followup,
                     semantic=semantic,
                     build_index=build_index,
@@ -3048,7 +3959,8 @@ def ask(
                     max_cost=max_cost,
                     yes=yes,
                     language=language,
-                    content_language=content_language,
+                    report_language=report_language,
+                    source_language=source_language,
                     no_followup=no_followup,
                     semantic=semantic,
                     build_index=build_index,
@@ -3092,7 +4004,8 @@ def ask(
             no_enrich=no_enrich,
             yes=yes,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             mark_read=mark_read,
         )
     )
@@ -3252,6 +4165,205 @@ async def _reports_prune(
     )
 
 
+@reports_app.command("ls")
+def reports_ls(
+    root: Path | None = typer.Option(
+        None,
+        "--root",
+        help="Reports root directory (default: ~/.unread/reports).",
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Filter by top-level subfolder (e.g. youtube, website, files, chats).",
+    ),
+    limit: int = typer.Option(50, "--limit", help="Max rows to show. Default: 50."),
+    all_rows: bool = typer.Option(False, "--all", help="Show every row (overrides --limit)."),
+    oldest: bool = typer.Option(False, "--oldest", help="Sort oldest-first (default: newest-first)."),
+) -> None:
+    """List saved reports under the reports root.
+
+    Walks `<root>` recursively, skipping `<root>/.trash/` and dotfiles.
+    Newest-first by mtime. Each row gets a stable 8-char `id` (sha1 of
+    its path-relative-to-root) — pass it directly to
+    `unread reports show <id>` instead of typing the full slug. The
+    relative path and any unique substring also work.
+    """
+    from unread.core.paths import reports_dir
+
+    resolved_root = root if root is not None else reports_dir()
+    _reports_ls(resolved_root, kind, limit, all_rows, oldest)
+
+
+def _report_id(rel_path: Path) -> str:
+    """Stable 8-char handle for a report, derived from its path-relative-to-root.
+
+    Deterministic across runs and machines (same path → same id), so
+    `ls` output and `show <id>` lookups stay in sync without persisting
+    an index.
+    """
+    import hashlib
+
+    return hashlib.sha1(str(rel_path).encode("utf-8")).hexdigest()[:8]
+
+
+def _reports_ls(root: Path, kind: str | None, limit: int, all_rows: bool, oldest: bool) -> None:
+    from rich.table import Table
+
+    console.print(f"[bold]Reports root[/] [grey70]{root}[/]")
+    if not root.exists():
+        console.print("[yellow]Folder does not exist yet — run `unread <ref>` to produce a report.[/]")
+        return
+
+    base = root / kind if kind else root
+    if kind and not base.is_dir():
+        console.print(f"[yellow]No reports under `{kind}/` (looked at {base}).[/]")
+        return
+
+    files = _collect_report_files(root, base)
+    if not files:
+        console.print("[grey70](no reports yet)[/]")
+        return
+
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=not oldest)
+    total = len(files)
+    shown_files = files if all_rows or limit <= 0 else files[:limit]
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("id", style="cyan", no_wrap=True)
+    table.add_column("modified", no_wrap=True)
+    table.add_column("size", justify="right")
+    table.add_column("path")
+    for p in shown_files:
+        st = p.stat()
+        rel = p.relative_to(root)
+        mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+        table.add_row(_report_id(rel), mtime, _fmt_bytes(st.st_size), str(rel))
+    console.print(table)
+
+    shown = len(shown_files)
+    tail = " — pass `--all` to show every row" if shown < total else ""
+    console.print(f"[grey70]Showing {shown:,} of {total:,} report(s){tail}[/]")
+
+
+@reports_app.command("show")
+def reports_show(
+    path: str = typer.Argument(
+        ...,
+        help=(
+            "8-char id from `reports ls`, absolute path, path relative to "
+            "the reports root, or a unique filename substring."
+        ),
+    ),
+    root: Path | None = typer.Option(
+        None,
+        "--root",
+        help="Reports root directory (default: ~/.unread/reports).",
+    ),
+    raw: bool = typer.Option(False, "--raw", help="Print raw file contents instead of rendering markdown."),
+) -> None:
+    """Render a saved report to the terminal.
+
+    The argument resolves in this order: 8-char id (as printed by
+    `reports ls`) → absolute path → root-relative path → unique
+    substring of any report's relative path. Ambiguous substrings (or
+    the rare id collision) list the candidates and exit 2.
+    """
+    from unread.core.paths import reports_dir
+
+    resolved_root = root if root is not None else reports_dir()
+    _reports_show(path, resolved_root, raw)
+
+
+def _reports_show(needle: str, root: Path, raw: bool) -> None:
+    target = _resolve_report_path(needle, root)
+    try:
+        body = target.read_text(encoding="utf-8")
+    except OSError as e:
+        console.print(f"[red]Failed to read[/] {target}: {e}")
+        raise typer.Exit(1) from e
+
+    if raw or target.suffix.lower() != ".md":
+        console.print(body, markup=False, highlight=False)
+        return
+
+    from rich.markdown import Markdown
+    from rich.rule import Rule
+
+    try:
+        rel = target.relative_to(root)
+        rid = f"[cyan]{_report_id(rel)}[/]  "
+    except ValueError:
+        rel = target  # absolute path outside the root — show as-is
+        rid = ""
+    console.print(Rule(str(rel), style="cyan"))
+    console.print(Markdown(body))
+    console.print(Rule(style="cyan"))
+    console.print(f"{rid}[grey70]Path:[/] {target}")
+
+
+_REPORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _resolve_report_path(needle: str, root: Path) -> Path:
+    direct = Path(needle).expanduser()
+    if direct.is_absolute() and direct.is_file():
+        return direct
+    rel_candidate = root / needle
+    if rel_candidate.is_file():
+        return rel_candidate
+
+    if not root.exists():
+        console.print(f"[red]Reports root does not exist:[/] {root}")
+        raise typer.Exit(1)
+
+    files = _collect_report_files(root, root)
+
+    # Exact id match first — the cheapest, friendliest handle from `ls`.
+    # An id collision (two paths hashing to the same 8 chars) is treated
+    # as ambiguous so we never silently pick the wrong report.
+    if _REPORT_ID_RE.match(needle):
+        id_matches = [p for p in files if _report_id(p.relative_to(root)) == needle]
+        if len(id_matches) == 1:
+            return id_matches[0]
+        if len(id_matches) > 1:
+            _print_ambiguous(needle, id_matches, root, kind="id collision")
+            raise typer.Exit(2)
+        # No id hit — fall through to substring (could match a hex-y slug).
+
+    matches = [p for p in files if needle in str(p.relative_to(root))]
+    if not matches:
+        console.print(f"[red]No report matches[/] {needle!r} under {root}.")
+        raise typer.Exit(1)
+    if len(matches) > 1:
+        _print_ambiguous(needle, matches, root, kind="substring")
+        raise typer.Exit(2)
+    return matches[0]
+
+
+def _print_ambiguous(needle: str, matches: list[Path], root: Path, *, kind: str) -> None:
+    console.print(f"[yellow]Ambiguous {kind}:[/] {needle!r} matches {len(matches)} reports:")
+    for p in matches[:20]:
+        rel = p.relative_to(root)
+        console.print(f"  [cyan]{_report_id(rel)}[/]  {rel}")
+    if len(matches) > 20:
+        console.print(f"  [grey70]… and {len(matches) - 20} more[/]")
+    console.print("[grey70]Pass the full id or relative path to disambiguate.[/]")
+
+
+def _collect_report_files(root: Path, base: Path) -> list[Path]:
+    """List visible report files under `base`, skipping `<root>/.trash/` and dotfiles."""
+    trash_root = root / ".trash"
+    out: list[Path] = []
+    for p in base.rglob("*"):
+        if not p.is_file():
+            continue
+        if trash_root in p.parents or p.name.startswith("."):
+            continue
+        out.append(p)
+    return out
+
+
 @app.command(
     rich_help_panel=PANEL_MAINT,
     help=_t("cmd_watch"),
@@ -3262,7 +4374,7 @@ def watch(
     interval: str = typer.Option(
         "1h",
         "--interval",
-        help="How often to fire the inner command. Accepts Nm / Nh / Nd / Nw.",
+        help="How often to fire the inner command. Accepts Ns / Nm / Nh / Nd / Nw.",
     ),
     max_runs: int | None = typer.Option(
         None,
@@ -3272,10 +4384,19 @@ def watch(
 ) -> None:
     """Run an inner `unread` command on a fixed cadence.
 
-    `unread watch --interval 1h analyze --folder Work --post-saved` walks the
-    wall clock: runs the inner command, sleeps for the interval, repeats.
-    Foreground only — run it under `tmux` / `nohup` if you need
-    persistence. Ctrl-C exits cleanly between iterations.
+    Walks the wall clock: runs the inner command, sleeps for the interval,
+    repeats. Anything after `watch`'s own flags is forwarded verbatim as
+    `unread <inner...>`, so any subcommand or root-level analyze ref works.
+
+    Examples:
+      unread watch --interval 1h tg chats run
+      unread watch --interval 30m @news --preset action_items
+      unread watch --interval 6h --max-runs 4 https://example.com/blog
+      unread watch --interval 15m -- ask tg "anything urgent today?" --global
+
+    Foreground only — wrap in `tmux` / `nohup`, or hand off to real
+    cron / launchd / systemd, if you need persistence. Ctrl-C exits
+    cleanly between iterations.
 
     The inner command runs in a fresh subprocess each time (so an internal
     crash doesn't poison subsequent runs); exit codes are surfaced but
@@ -3283,8 +4404,11 @@ def watch(
     """
     inner = ctx.args
     if not inner:
-        console.print(f"[red]{_t('cli_watch_need_inner')}[/]")
-        raise typer.Exit(2)
+        # No inner command → render this command's help. Mirrors the
+        # `no_args_is_help=True` convention used by every sub-group;
+        # printing usage is more useful than a one-line error.
+        _print_help_for_command(ctx.command, ctx)
+        raise typer.Exit(0)
     _run(_watch_loop(interval, max_runs, inner))
 
 
@@ -3736,15 +4860,24 @@ def dump(
         None,
         "--language",
         help=(
-            "Language for formatter labels in the dumped file (en, ru, …). "
-            "Defaults to [locale] language in config (en)."
+            "UI language for the dumped file's headings (en, ru, …). Defaults to [locale] language in config."
         ),
     ),
-    content_language: str | None = typer.Option(
+    report_language: str | None = typer.Option(
+        None,
+        "--report-language",
+        help=(
+            "Report / LLM-output language (en, ru, …). When dumping with image/link "
+            "enrichment, this is the language the descriptions come back in. Defaults "
+            "to [locale] report_language, falling back to --language."
+        ),
+    ),
+    source_language: str | None = typer.Option(
         None,
         "--content-language",
         help=(
-            "Chat content language — when set, image/link enricher prompts use this. Defaults to --language."
+            "Source-content language hint (en, ru, zh, …). Whisper-style override — "
+            "empty = LLM auto-detects. Defaults to [locale] content_language."
         ),
     ),
     mode: str | None = typer.Option(
@@ -3816,7 +4949,8 @@ def dump(
             with_comments=with_comments,
             yes=yes,
             language=language,
-            content_language=content_language,
+            report_language=report_language,
+            source_language=source_language,
             mode=mode,
             youtube_source=youtube_source,
             max_images=max_images,
@@ -3942,9 +5076,8 @@ def init_cmd(
     _run(cmd_init(scope="full"))
 
 
-@app.command(
+@tg_app.command(
     name="login",
-    rich_help_panel=PANEL_TELEGRAM,
     help="Telegram log-in (and re-link with `--force`). Skips the AI-provider step.",
 )
 def login_cmd(
@@ -3970,9 +5103,8 @@ def login_cmd(
     _run(cmd_init(scope="telegram_only"))
 
 
-@app.command(
+@tg_app.command(
     name="logout",
-    rich_help_panel=PANEL_TELEGRAM,
     help="Clear the local Telegram session without touching credentials.",
 )
 def logout_cmd() -> None:
@@ -3980,10 +5112,10 @@ def logout_cmd() -> None:
 
     Wipes the on-disk session file (or the encrypted `session_string`
     in the secrets table for the passphrase backend) so the next
-    `unread login` starts a fresh login. Telegram api_id / api_hash
+    `unread tg login` starts a fresh login. Telegram api_id / api_hash
     stay in place — use `unread security clear` for those.
 
-    Equivalent to `unread login --force` minus the immediate re-login
+    Equivalent to `unread tg login --force` minus the immediate re-login
     prompt: useful when you want to deauthorize this device and not
     re-link right away.
     """
@@ -3997,116 +5129,10 @@ def logout_cmd() -> None:
         console.print("[green]Local Telegram session cleared.[/]")
     else:
         console.print("[grey70]No active session to clear.[/]")
-    console.print("[grey70]Run `unread login` to log in again.[/]")
+    console.print("[grey70]Run `unread tg login` to log in again.[/]")
 
 
 # =============================================================== migrate command
-
-
-@app.command(
-    rich_help_panel=PANEL_MAINT,
-    help="Move legacy ./storage and ./reports from the current directory into ~/.unread/.",
-)
-def migrate(
-    move: bool = typer.Option(
-        False,
-        "--move",
-        help="Move files instead of copying. Removes the cwd-relative copies after success.",
-    ),
-    dry_run: bool = typer.Option(
-        False,
-        "--dry-run",
-        help="Print what would happen, take no action.",
-    ),
-    overwrite: bool = typer.Option(
-        False,
-        "--overwrite",
-        help="Replace files in ~/.unread/ if they already exist.",
-    ),
-) -> None:
-    """Migrate a legacy cwd-relative install into ~/.unread/.
-
-    Useful after upgrading from an older `unread` that lived in a cloned
-    repo directory. Detects `./.env`, `./config.toml`, `./storage/`, and
-    `./reports/` in the working directory and (by default) copies them
-    into `~/.unread/`. `--move` removes the cwd-relative copy on success.
-    """
-    import shutil
-
-    from unread.core.paths import (
-        default_config_path,
-        default_env_path,
-        ensure_unread_home,
-        reports_dir,
-        storage_dir,
-    )
-
-    ensure_unread_home()
-    cwd = Path.cwd()
-
-    # Each entry: (label, source path, destination path)
-    plan: list[tuple[str, Path, Path]] = [
-        (".env", cwd / ".env", default_env_path()),
-        ("config.toml", cwd / "config.toml", default_config_path()),
-        ("storage/", cwd / "storage", storage_dir()),
-        ("reports/", cwd / "reports", reports_dir()),
-    ]
-
-    actions: list[tuple[str, Path, Path, str]] = []  # (label, src, dest, action)
-    for label, src, dest in plan:
-        if not src.exists():
-            actions.append((label, src, dest, "skip (source missing)"))
-            continue
-        if src.resolve() == dest.resolve():
-            actions.append((label, src, dest, "skip (already at destination)"))
-            continue
-        if dest.exists() and not overwrite:
-            actions.append((label, src, dest, "skip (destination exists; use --overwrite)"))
-            continue
-        actions.append((label, src, dest, "MOVE" if move else "COPY"))
-
-    console.print(f"[bold]Migration plan ([grey70]home={ensure_unread_home()}[/]):[/]")
-    for label, src, dest, action in actions:
-        marker = "[yellow]→[/]" if action in ("MOVE", "COPY") else "[grey70]·[/]"
-        console.print(f"  {marker} {label:<14} {src}  →  {dest}  [{action}]")
-
-    if dry_run:
-        console.print("[grey70]--dry-run: no changes made.[/]")
-        return
-
-    moved_or_copied = 0
-    for label, src, dest, action in actions:
-        if action not in ("MOVE", "COPY"):
-            continue
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                if dest.is_dir():
-                    shutil.rmtree(dest)
-                else:
-                    dest.unlink()
-            if src.is_dir():
-                if action == "MOVE":
-                    shutil.move(str(src), str(dest))
-                else:
-                    shutil.copytree(src, dest)
-            elif action == "MOVE":
-                shutil.move(str(src), str(dest))
-            else:
-                shutil.copy2(src, dest)
-            moved_or_copied += 1
-            past = "moved" if action == "MOVE" else "copied"
-            console.print(f"  [green]✓[/] {label} {past}")
-        except Exception as e:
-            console.print(f"  [red]×[/] {label}: {e}")
-
-    if moved_or_copied == 0:
-        console.print("[grey70]Nothing to migrate.[/]")
-    else:
-        console.print(
-            f"\n[green]Migration complete:[/] {moved_or_copied} item(s) "
-            f"{'moved' if move else 'copied'} into {ensure_unread_home()}."
-        )
 
 
 # =============================================================== help command
@@ -4174,7 +5200,6 @@ _RESERVED_TOP_LEVEL.update(
         "telegram",
         "init",
         "help",
-        "migrate",
         "describe",
         "sync",
         "chats",
@@ -4182,7 +5207,6 @@ _RESERVED_TOP_LEVEL.update(
         "stats",
         "ask",
         "dump",
-        "cleanup",
         "settings",
         "reports",
         "watch",

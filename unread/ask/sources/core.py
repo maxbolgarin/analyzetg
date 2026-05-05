@@ -50,17 +50,25 @@ def _build_doc_messages(
     source_text: str,
     source_label: str,
     question: str,
-    answer_language: str,
-    content_language: str,
+    report_language: str,
+    source_language: str,
 ) -> list[dict]:
     """One-shot system+user pair. `source_text` is either the full extracted
-    text (whole-doc path) or the joined top-K chunks (retrieval path)."""
+    text (whole-doc path) or the joined top-K chunks (retrieval path).
+
+    `report_language` is the language the LLM writes the answer in.
+    `source_language` is the Whisper-style hint about the input text;
+    when empty, no source-language line is added — the LLM auto-detects.
+    """
     system = (
         "Answer the user's question using ONLY the provided source text. "
         "If the answer is not in the source, say so. Cite by referring to "
-        f"the source label '{source_label}' inline. The source content is "
-        f"in {content_language}; respond in {answer_language}."
+        f"the source label '{source_label}' inline. Respond in {report_language}."
     )
+    if source_language:
+        system += (
+            f" The source content is in {source_language}; treat citations and quotations as that language."
+        )
     user = f"Source ({source_label}):\n\n{source_text}\n\n---\n\nQuestion: {question}"
     return [
         {"role": "system", "content": system},
@@ -149,7 +157,8 @@ async def cmd_ask_document(
     max_cost: float | None = None,
     yes: bool = False,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
+    source_language: str | None = None,
     no_followup: bool = False,
     semantic: bool = False,  # reserved for embedding-retrieval rewire (future task)
     build_index: bool = False,  # reserved for embedding-index build (future task)
@@ -167,10 +176,13 @@ async def cmd_ask_document(
     """
     settings = get_settings()
     cutoff = settings.ask.doc_full_text_cutoff_tokens
-    used_answer_language = (language or settings.locale.language or "en").lower()
-    used_content_language = (
-        content_language or settings.locale.content_language or used_answer_language
-    ).lower()
+    _ui_language = (language or settings.locale.language or "en").lower()
+    used_report_language = (report_language or settings.locale.report_language or _ui_language).lower()
+    # Whisper-style source-content hint. Empty (the default) means the
+    # LLM gets no explicit language line and infers from the source text.
+    used_source_language = (
+        (source_language if source_language is not None else settings.locale.content_language).strip().lower()
+    )
     used_model = model or resolve_chat_model(settings)
 
     tokens = count_tokens(extracted_text)
@@ -194,8 +206,8 @@ async def cmd_ask_document(
         source_text=source_text,
         source_label=source_label,
         question=question,
-        answer_language=used_answer_language,
-        content_language=used_content_language,
+        report_language=used_report_language,
+        source_language=used_source_language,
     )
 
     # Cost guard — mirrors the chat-archive ask path so `--max-cost` works

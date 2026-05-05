@@ -43,7 +43,7 @@ async def enrich_messages(
     repo: Repo,
     opts: EnrichOpts,
     language: str | None = None,
-    content_language: str | None = None,
+    report_language: str | None = None,
 ) -> EnrichStats:
     """Run per-kind enrichers across `msgs`, respecting opts + caps.
 
@@ -67,17 +67,18 @@ async def enrich_messages(
         )
 
     settings = get_settings()
-    # Image / link enricher prompts go to the LLM → use content_language
-    # (the chat content language) so descriptions come back in that
-    # language. Mirrors `pipeline._resolve_content_lang`: explicit param
-    # → settings.locale.content_language → settings.locale.language → "en".
+    # Image / link enricher prompts go to the LLM → use the **report
+    # language** so descriptions come back in the same language the
+    # final analysis is written in. Mirrors
+    # `pipeline._resolve_report_lang`: explicit param →
+    # `settings.locale.report_language` → `settings.locale.language` → "en".
     # The `language` param is accepted for symmetry with the calling
     # signature but intentionally NOT in the fallback — the caller is
-    # responsible for picking the right content_language; falling back
-    # to the UI language here would mix layers.
+    # responsible for picking the right report language; falling back to
+    # the UI language here would mix layers.
     _ = language  # kept on the signature for caller symmetry
     enrich_language = (
-        content_language or settings.locale.content_language or settings.locale.language or "en"
+        report_language or settings.locale.report_language or settings.locale.language or "en"
     ).lower()
     sem = asyncio.Semaphore(max(1, opts.concurrency))
     caps = _caps(opts)

@@ -19,11 +19,13 @@ record which path actually ran.
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
@@ -35,6 +37,7 @@ from unread.media.download import (
     NoAudioStream,
     transcode_for_openai,
 )
+from unread.util.flood import _user_visible_retry_status
 from unread.util.logging import get_logger
 from unread.util.pricing import audio_cost
 from unread.youtube.metadata import YoutubeMetadata, _import_ytdlp
@@ -71,6 +74,9 @@ class TranscriptResult:
     # `(start_sec, line_text)`. None for the audio path (Whisper text mode
     # has no segment markers; offsets get spread uniformly downstream).
     timed_cues: list[tuple[int, str]] | None = None
+    # True when the captions track was YouTube's auto-generated one (vs a
+    # manually uploaded one); None for the audio path.
+    is_auto: bool | None = None
 
 
 # yt-dlp emits VTT cue blocks like:
@@ -143,69 +149,211 @@ def _parse_vtt(text: str) -> str:
     return "\n".join(t for _, t in _parse_vtt_timed(text))
 
 
-def _pick_subtitle_lang(
+def _subtitle_candidates(
     metadata: YoutubeMetadata,
     preferred: list[str],
-) -> tuple[str, bool] | None:
-    """Choose the best subtitle language code + whether it's auto-generated.
+) -> list[tuple[str, bool]]:
+    """Ordered list of `(lang_code, is_auto)` candidates to try.
 
-    Returns `None` if no subtitles in any form exist.
+    Order:
+      1. For each preferred language: manual track first, then auto.
+      2. Any remaining manual tracks (alphabetical, deterministic).
+      3. Any remaining auto tracks (alphabetical, deterministic).
+
+    Preserving the "preferred-language wins over manual-vs-auto"
+    invariant: an auto Russian track in an install configured for
+    Russian source content beats English manual subs that happen to
+    be present.
+    The list lets callers fall back when one entry 429s or returns
+    empty — previously a single 429 on the user's preferred lang
+    sent the whole flow to Whisper.
     """
     manual = metadata.subtitles or {}
     auto = metadata.automatic_captions or {}
+    out: list[tuple[str, bool]] = []
+    seen: set[tuple[str, bool]] = set()
+
+    def _add(lang: str, is_auto: bool) -> None:
+        key = (lang, is_auto)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(key)
+
     for lang in preferred:
         if lang in manual:
-            return lang, False
-    for lang in preferred:
+            _add(lang, False)
         if lang in auto:
-            return lang, True
-    if manual:
-        return next(iter(manual)), False
-    if auto:
-        return next(iter(auto)), True
-    return None
+            _add(lang, True)
+    for lang in sorted(manual):
+        _add(lang, False)
+    for lang in sorted(auto):
+        _add(lang, True)
+    return out
+
+
+# Patterns in `yt_dlp.utils.DownloadError` messages that mark a
+# transient HTTP failure worth retrying. 429 = rate limit, 5xx =
+# server-side hiccup. "Read timed out" / connection-reset hits pop up
+# during long audio downloads when YouTube briefly closes the socket.
+_RETRY_HTTP_PATTERNS = re.compile(
+    r"\bHTTP Error (?:429|5\d\d)\b"
+    r"|\bToo Many Requests\b"
+    r"|\bService Unavailable\b"
+    r"|\bBad Gateway\b"
+    r"|\bGateway Timeout\b"
+    r"|\bRead timed out\b"
+    r"|\bConnection (?:reset|aborted)\b",
+    re.IGNORECASE,
+)
+_HTTP_429_PATTERN = re.compile(r"\bHTTP Error 429\b|\bToo Many Requests\b", re.IGNORECASE)
+
+
+def _yt_dlp_run(
+    yt_dlp: Any,
+    opts: dict[str, Any],
+    url: str,
+    *,
+    what: str,
+    max_attempts: int = 4,
+    retry_429: bool = True,
+) -> None:
+    """Run `ydl.download([url])` with our own retry-on-rate-limit loop.
+
+    yt-dlp's built-in `retries` option helps with main-stream
+    fragments but doesn't always cover the subtitle-fetch sub-step
+    where YouTube currently 429s most often. We catch DownloadError,
+    inspect the message for a known-retriable HTTP status / timeout,
+    and back off exponentially. Non-retriable errors re-raise
+    immediately so a deleted/private/region-locked video still
+    surfaces fast.
+
+    `retry_429=False` makes 429 raise immediately (5xx/timeouts still
+    retry). Use for caption fetches: yt-dlp already retries internally,
+    and a 429 that reaches us almost always means YouTube's
+    auto-translation is unavailable rather than real rate-limiting —
+    the next candidate language (or Whisper fallback) will succeed
+    faster than 4× exponential backoff.
+
+    Sync (called from `asyncio.to_thread`); `time.sleep` is fine.
+    """
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+            return
+        except yt_dlp.utils.DownloadError as e:
+            msg = str(e)
+            if not _RETRY_HTTP_PATTERNS.search(msg):
+                raise
+            if not retry_429 and _HTTP_429_PATTERN.search(msg):
+                raise
+            last_err = e
+            if attempt == max_attempts - 1:
+                break
+            delay = min(2.0**attempt, 30.0) + random.uniform(0, 1.5)
+            log.warning(
+                "youtube.yt_dlp.retry",
+                what=what,
+                attempt=attempt + 1,
+                delay=round(delay, 2),
+                err=msg[:200],
+            )
+            _user_visible_retry_status(
+                f"YouTube rate limit on {what} — retrying in {delay:.0f}s "
+                f"(attempt {attempt + 1}/{max_attempts})…"
+            )
+            time.sleep(delay)
+    assert last_err is not None
+    raise last_err
+
+
+def _yt_dlp_base_opts() -> dict[str, Any]:
+    """Common yt-dlp options that bake in modest internal retries.
+
+    Ours is the outer retry loop; yt-dlp's `retries` covers the
+    fragment-level transient stuff (slow chunks, partial reads).
+    """
+    return {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 2,
+    }
 
 
 async def _fetch_captions(
     metadata: YoutubeMetadata,
     *,
     preferred_langs: list[str],
-) -> tuple[list[tuple[int, str]], str] | None:
-    """Download + parse subtitles. Returns `(timed_cues, lang_code)` or None.
+) -> tuple[list[tuple[int, str]], str, bool] | None:
+    """Try each candidate subtitle track in order; return first non-empty parse.
 
-    Uses a separate yt-dlp invocation per language pick (small) inside
-    `asyncio.to_thread` since yt-dlp's API is sync.
+    Per-candidate failures (429, empty file, parse-empty) fall
+    through to the next entry instead of aborting the whole captions
+    path. Only when every candidate is exhausted does the caller
+    fall back to Whisper.
     """
-    pick = _pick_subtitle_lang(metadata, preferred_langs)
-    if pick is None:
+    candidates = _subtitle_candidates(metadata, preferred_langs)
+    if not candidates:
+        log.info("youtube.captions.none", video_id=metadata.video_id)
         return None
-    lang, is_auto = pick
+
+    attempted: list[str] = []
+    for lang, is_auto in candidates:
+        attempted.append(f"{lang}{'(auto)' if is_auto else ''}")
+        result = await _try_single_caption_track(metadata, lang=lang, is_auto=is_auto)
+        if result is not None:
+            return result
+
+    log.warning(
+        "youtube.captions.all_failed",
+        video_id=metadata.video_id,
+        attempted=",".join(attempted),
+    )
+    return None
+
+
+async def _try_single_caption_track(
+    metadata: YoutubeMetadata,
+    *,
+    lang: str,
+    is_auto: bool,
+) -> tuple[list[tuple[int, str]], str, bool] | None:
+    """Download + parse one subtitle track. None on any failure."""
 
     def _download() -> str | None:
         yt_dlp = _import_ytdlp()
         with tempfile.TemporaryDirectory() as td:
             opts = {
-                "quiet": True,
-                "no_warnings": True,
+                **_yt_dlp_base_opts(),
                 "skip_download": True,
                 "writesubtitles": not is_auto,
                 "writeautomaticsub": is_auto,
                 "subtitleslangs": [lang],
                 "subtitlesformat": "vtt",
                 "outtmpl": str(Path(td) / "%(id)s.%(ext)s"),
-                "noplaylist": True,
             }
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([metadata.url])
+                _yt_dlp_run(
+                    yt_dlp,
+                    opts,
+                    metadata.url,
+                    what=f"captions[{lang}{'/auto' if is_auto else ''}]",
+                    retry_429=False,
+                )
             except yt_dlp.utils.DownloadError as e:
-                # Captions are best-effort — fall through so the audio
-                # path can still try. Logged as warn (not exception) so
-                # transient YouTube hiccups don't spam diagnostics.
+                # Captions are best-effort — log and let the next
+                # candidate try. Warn (not exception) so a transient
+                # YouTube hiccup doesn't spam diagnostics.
                 log.warning(
                     "youtube.captions.download_failed",
                     video_id=metadata.video_id,
                     lang=lang,
+                    is_auto=is_auto,
                     err=str(e)[:200],
                 )
                 return None
@@ -216,10 +364,21 @@ async def _fetch_captions(
 
     raw = await asyncio.to_thread(_download)
     if not raw:
-        log.warning("youtube.captions.empty", video_id=metadata.video_id, lang=lang)
+        log.warning(
+            "youtube.captions.empty",
+            video_id=metadata.video_id,
+            lang=lang,
+            is_auto=is_auto,
+        )
         return None
     cues = _parse_vtt_timed(raw)
     if not cues:
+        log.warning(
+            "youtube.captions.parse_empty",
+            video_id=metadata.video_id,
+            lang=lang,
+            is_auto=is_auto,
+        )
         return None
     total_chars = sum(len(c[1]) for c in cues)
     log.info(
@@ -230,19 +389,22 @@ async def _fetch_captions(
         cues=len(cues),
         chars=total_chars,
     )
-    return cues, lang
+    return cues, lang, is_auto
 
 
 async def _download_audio(metadata: YoutubeMetadata, dest_dir: Path) -> Path:
     """Download bestaudio as mp3 into `dest_dir/<video_id>.mp3`. Sync via to_thread."""
     out_template = str(dest_dir / "%(id)s.%(ext)s")
+    log.info(
+        "youtube.audio.download.start",
+        video_id=metadata.video_id,
+        duration_sec=metadata.duration_sec,
+    )
 
     def _run() -> Path:
         yt_dlp = _import_ytdlp()
         opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
+            **_yt_dlp_base_opts(),
             "format": "bestaudio/best",
             "outtmpl": out_template,
             "postprocessors": [
@@ -254,21 +416,27 @@ async def _download_audio(metadata: YoutubeMetadata, dest_dir: Path) -> Path:
             ],
         }
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([metadata.url])
+            _yt_dlp_run(yt_dlp, opts, metadata.url, what="audio download")
         except yt_dlp.utils.DownloadError as e:
             # Re-raise as our typed error so the command layer can show a
             # friendly banner instead of yt-dlp's internal traceback.
             # Common triggers: deleted / private / region-locked / age-
-            # restricted video, transient network drop, yt-dlp lagging
-            # behind a YouTube format change.
+            # restricted video, persistent rate-limit (after retries),
+            # yt-dlp lagging behind a YouTube format change.
             raise YoutubeFetchError(str(e)) from e
         for f in dest_dir.iterdir():
             if f.suffix == ".mp3":
                 return f
         raise YoutubeFetchError(f"yt-dlp produced no mp3 in {dest_dir}")
 
-    return await asyncio.to_thread(_run)
+    path = await asyncio.to_thread(_run)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    log.info(
+        "youtube.audio.download.ok",
+        video_id=metadata.video_id,
+        size_mb=round(size_mb, 2),
+    )
+    return path
 
 
 async def _transcribe_audio(
@@ -294,6 +462,10 @@ async def _transcribe_audio(
     with tempfile.TemporaryDirectory() as td_str:
         td = Path(td_str)
         downloaded = await _download_audio(metadata, td)
+        log.info(
+            "youtube.audio.transcode.start",
+            video_id=metadata.video_id,
+        )
         try:
             parts = await transcode_for_openai(downloaded, "video", td)
         except FfmpegMissing as e:
@@ -304,13 +476,32 @@ async def _transcribe_audio(
             from unread.i18n import t as _t
 
             raise RuntimeError(_t("youtube_no_audio_track").format(video_id=metadata.video_id)) from e
+        log.info(
+            "youtube.audio.transcode.ok",
+            video_id=metadata.video_id,
+            segments=len(parts),
+        )
 
         oai = AsyncOpenAI(
             api_key=settings.openai.api_key,
             timeout=settings.openai.request_timeout_sec,
         )
+        log.info(
+            "youtube.audio.transcribe.start",
+            video_id=metadata.video_id,
+            segments=len(parts),
+            model=audio_model,
+        )
         texts: list[str] = []
-        for part in parts:
+        for idx, part in enumerate(parts, start=1):
+            part_size_mb = round(part.stat().st_size / (1024 * 1024), 2)
+            log.info(
+                "youtube.audio.transcribe.chunk",
+                video_id=metadata.video_id,
+                chunk=idx,
+                total=len(parts),
+                size_mb=part_size_mb,
+            )
             piece = await _transcribe_file(oai, part, audio_model, cfg_lang)
             texts.append(piece.strip())
     transcript = "\n".join(t for t in texts if t)
@@ -327,6 +518,12 @@ async def _transcribe_audio(
         },
     )
     log.info(
+        "youtube.audio.transcribe.ok",
+        video_id=metadata.video_id,
+        chars=len(transcript),
+        cost=round(cost, 4),
+    )
+    log.info(
         "openai.audio",
         phase="enrich_youtube",
         model=audio_model,
@@ -338,10 +535,24 @@ async def _transcribe_audio(
 
 
 def _preferred_caption_langs(settings: Settings) -> list[str]:
-    """Caption language preference. Configured content_language wins, then en+ru."""
+    """Caption language preference.
+
+    Order:
+      1. ``locale.content_language`` — Whisper-style source hint. When
+         set, the user is telling us what language the input is in, so
+         that's the highest-priority caption track to fetch.
+      2. ``locale.report_language`` — output language. A reasonable
+         second guess if the captions are user-supplied translations.
+      3. ``locale.language`` — UI language fallback.
+      4. ``en``, ``ru`` — final default fallbacks so the picker still
+         finds something if none of the above is set.
+    """
     locale = getattr(settings, "locale", None)
-    cfg = (getattr(locale, "content_language", "") or getattr(locale, "language", "") or "").lower()
-    out = [cfg] if cfg else []
+    out: list[str] = []
+    for attr in ("content_language", "report_language", "language"):
+        val = (getattr(locale, attr, "") or "").lower()
+        if val and val not in out:
+            out.append(val)
     for fallback in ("en", "ru"):
         if fallback not in out:
             out.append(fallback)
@@ -366,7 +577,7 @@ async def get_transcript(
     if source in ("captions", "auto"):
         captions = await _fetch_captions(metadata, preferred_langs=preferred)
         if captions is not None:
-            cues, lang = captions
+            cues, lang, is_auto = captions
             text = "\n".join(c[1] for c in cues)
             return TranscriptResult(
                 text=text,
@@ -375,6 +586,7 @@ async def get_transcript(
                 duration_sec=metadata.duration_sec,
                 cost_usd=0.0,
                 timed_cues=cues,
+                is_auto=is_auto,
             )
         if source == "captions":
             raise NoTranscriptAvailable(

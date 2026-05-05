@@ -237,15 +237,19 @@ class WebsiteCfg(_StrictCfg):
     fetch_timeout_sec: int = 30
     max_html_bytes: int = 5_000_000  # 5 MB hard cap on raw HTML
     max_paragraphs: int = 400  # post-split cap on synthetic messages
-    # Browser-shaped UA: many CDNs (Cloudflare, Fastly) and CMSes return a
-    # minimal interstitial when the UA looks bot-like. The bot-shaped string
-    # used by the link enricher is fine for one-shot summaries but trips
-    # full-article fetches more often than not.
-    user_agent: str = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/127.0.0.0 Safari/537.36"
-    )
+    # Identifying-but-Mozilla-compatible UA. Why both halves matter:
+    # * Wikimedia (and a growing list of sites that follow its policy)
+    #   403s any UA that pretends to be a real browser but doesn't match
+    #   the TLS fingerprint of one — httpx's TLS handshake is not Chrome's,
+    #   so a "Mozilla/5.0 ... Chrome/127" UA is treated as a lying bot and
+    #   blocked with a "respect our robot policy" body.
+    # * Cloudflare / Fastly / Akamai interstitials, on the other hand, gate
+    #   on a leading "Mozilla/5.0" token; a bare "unread/0.1" UA trips
+    #   their managed-challenge page on a non-trivial slice of sites.
+    # The "Mozilla/5.0 (compatible; ...)" form is the long-standing bot
+    # convention that satisfies both: honest about who we are, plus the
+    # Mozilla token for compat-sniffing middleboxes.
+    user_agent: str = "Mozilla/5.0 (compatible; unread/0.1; +https://github.com/maxbolgarin/unread)"
 
 
 class RetentionCfg(_StrictCfg):
@@ -279,23 +283,42 @@ class LoggingCfg(_StrictCfg):
 
 
 class LocaleCfg(_StrictCfg):
-    """Output / UI / preset language.
+    """Three independent language axes.
 
-    `language` controls everything user-visible: wizard, formatter labels
-    in saved reports, citation/sources heading, ask labels, image+link
-    enricher prompts, and which preset directory the loader reads
-    (`presets/<language>/...`). The LLM produces analysis output in this
-    language because the loaded presets are natively in it.
+    * ``language`` — **UI language**. Wizard, settings menu, error
+      banners, the ``unread doctor`` output, the saved-report metadata
+      block — every string the human reads. Drives ``i18n.t()``.
+      Defaults to ``"en"``.
+    * ``report_language`` — **report language**. What language the LLM
+      writes the analysis / answer in. Picks which ``presets/<lang>/``
+      tree the loader reads, the system prompt's base rules, the
+      formatter labels going *into* the prompt, the saved report's
+      section headings (TL;DR, Sources, etc.), the ask system prompt,
+      and the image / link enricher prompts. Empty string means
+      "follow ``language``" — a common, sensible default.
+    * ``content_language`` — **source-content language hint**. Whisper-
+      style: when set, the system prompt gets one extra line telling
+      the LLM "the source content is in <X>". Empty (the default) means
+      "let the LLM auto-detect from the source text". Use this only as
+      an explicit override; the LLM is good at detecting the source
+      language on its own.
 
-    `content_language` is the *chat content* language hint — only affects
-    cost estimation (`AVG_TOKENS_PER_MSG`) and an optional one-line model
-    hint about the chat language. Empty string means "follow `language`".
-
-    Both default to "en" so a fresh install has an English experience;
-    Russian users opt in via `language = "ru"` (or `--language ru`).
+    Common combinations:
+    * ``language=ru`` — Russian UI, Russian reports (``report_language``
+      empty falls back), no source hint. The LLM picks up the source
+      language from the content itself.
+    * ``language=en, report_language=ru`` — English UI but Russian
+      analyses (the asymmetric "I read English menus, but my chats are
+      in Russian and I want native Russian summaries" case).
+    * ``language=ru, report_language=ru, content_language=zh`` —
+      Russian UI + Russian report headings + an explicit hint that the
+      *source* is Chinese. Useful when you're reading a Chinese article
+      and want a Russian summary, and you don't want the LLM second-
+      guessing what language the input is.
     """
 
     language: str = "en"
+    report_language: str = ""
     content_language: str = ""
 
 

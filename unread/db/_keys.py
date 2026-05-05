@@ -48,8 +48,9 @@ SECRET_KEYS: frozenset[str] = frozenset(
 # see the docstring in :data:`unread.db.repo._OVERRIDE_KEYS` for the
 # full checklist.
 OVERRIDE_KEYS: tuple[str, ...] = (
-    # Languages
+    # Languages — three independent axes; see :class:`unread.config.LocaleCfg`.
     "locale.language",
+    "locale.report_language",
     "locale.content_language",
     "openai.audio_language",
     # Models

@@ -970,7 +970,7 @@ def cmd_recover() -> None:
     per-record salt as fallback), and write the plaintext back to the
     same store. After this, ``security set {plain|keystore|pass}``
     works normally again. The Telegram session string is decrypted
-    too but a re-auth via ``unread login --force`` is still needed
+    too but a re-auth via ``unread tg login --force`` is still needed
     because the on-disk SQLiteSession was deleted at upgrade time.
     """
     from unread.db._keys import SECRET_KEYS as _ALL_SLOTS
@@ -1084,7 +1084,7 @@ def cmd_recover() -> None:
     console.print(
         "[yellow]Telegram session must be re-authenticated:[/] "
         "the on-disk SQLiteSession was removed during the original encrypt step. "
-        "Run [cyan]unread login --force[/] to log in again."
+        "Run [cyan]unread tg login --force[/] to log in again."
     )
 
 

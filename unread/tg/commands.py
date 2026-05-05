@@ -133,10 +133,11 @@ async def cmd_init(*, scope: str = "full") -> None:
     if settings.telegram.api_id and settings.telegram.api_hash:
         await _run_telethon_auth_step(settings, confirm_login=(scope == "full"))
 
-    # Step 5: optional credential-store hardening — offer to move
-    # already-saved keys into the OS keychain. Skipped silently when
-    # the host doesn't have a usable keychain (e.g. headless Linux),
-    # already-migrated installs, or installs with no secrets yet.
+    # Step 5: credential-store hardening — automatically move
+    # already-saved keys into the OS keychain (the default storage).
+    # Skipped silently when the host doesn't have a usable keychain
+    # (e.g. headless Linux), already-migrated installs, or installs
+    # with no secrets yet. Users opt out via `unread security set plain`.
     _run_keychain_step()
 
 
@@ -445,20 +446,22 @@ async def _run_telegram_creds_step() -> bool:
 
 
 def _run_keychain_step() -> None:
-    """Offer to move saved credentials from data.sqlite into the OS keychain.
+    """Move saved credentials from data.sqlite into the OS keychain.
 
-    Default-yes on macOS / Windows (where the native store is reliable
-    and unlocked when the user logs in), default-no on Linux (Secret
-    Service requires a session bus and is missing on headless boxes).
-    Silent no-op when:
-      - we're not on a real TTY (tests, scripted invocations) — the
-        offer requires interactive consent and silently migrating is
-        worse UX than not offering;
+    Keystore is the default storage. This step runs automatically at
+    the end of every fresh init when the host has a working OS keychain
+    — no prompt, no opt-in. Users who want plaintext-on-disk instead
+    can revert with `unread security set plain`. Silent no-op when:
+      - we're not on a real TTY (tests, scripted invocations) — silently
+        migrating non-interactively is surprising; the user can run
+        `unread security set keystore` once they're at a real shell;
       - the active backend is anything OTHER than ``db`` — migrating
         from ``keychain`` is a no-op, and migrating from ``passphrase``
         would copy ciphertext into the keychain as if it were
         plaintext (the bug this guard prevents);
-      - the keychain backend is unavailable on this host;
+      - the keychain backend is unavailable on this host (headless
+        Linux without Secret Service, etc.) — secrets stay in the
+        plaintext DB as the only viable fallback;
       - no slots are populated yet.
     """
     from unread.secrets_backend import (
@@ -490,30 +493,14 @@ def _run_keychain_step() -> None:
     if not any((rows.get(k) or "") for k in rows):
         return
 
-    from unread.util.prompt import confirm
-
-    console.print("\n[bold]Secure storage (optional).[/]")
-    console.print(
-        f"  [grey70]Your saved API keys can be moved into the {keychain_describe()} "
-        "(encrypted at rest, unlocked when you log in). The on-disk DB row gets blanked.[/]"
-    )
-    # We've already passed `keychain_available()`, which means the OS
-    # store responded to a probe call. Recommend it across every
-    # platform that gets this far — including Linux desktops with a
-    # running Secret Service. Headless Linux / containers don't reach
-    # this prompt at all (the gate above returns early).
-    if not confirm(
-        "Move credentials into the system keychain now?",
-        default=True,
-    ):
-        console.print(
-            "[grey70]Skipped — credentials stay in the data DB. "
-            "Run `unread security set keystore` later to change your mind.[/]"
-        )
-        return
-
     from unread.secrets_backend import BACKEND_KEYCHAIN
     from unread.security.commands import cmd_migrate
+
+    console.print("\n[bold]Securing credentials in the system keychain…[/]")
+    console.print(
+        f"  [grey70]Default storage is {keychain_describe()} (encrypted at rest, "
+        "unlocked when you log in). Run `unread security set plain` to opt out.[/]"
+    )
 
     try:
         cmd_migrate(BACKEND_KEYCHAIN)
@@ -646,7 +633,8 @@ async def cmd_doctor() -> None:
         _line(
             warn,
             "legacy install detected",
-            f"found {cwd}/storage or {cwd}/.env — run `unread migrate` to move into {home}",
+            f"found {cwd}/storage or {cwd}/.env — copy or move them into {home} "
+            "(or set `UNREAD_HOME={cwd}` to keep using the cwd-relative install).",
         )
 
     # Install-pointer drift — `~/.unread/install.toml` says the data
@@ -1589,7 +1577,7 @@ async def cmd_chats_add(
 
             # Pre-load the set of already-subscribed chat ids so the
             # picker can flag them with a `★`. Helps the user see at a
-            # glance which dialogs are already in `unread chats list`.
+            # glance which dialogs are already in `unread tg chats list`.
             existing_subs = await repo.list_subscriptions(enabled_only=False)
             subscribed_ids = {int(s.chat_id) for s in existing_subs}
 
@@ -1618,14 +1606,14 @@ async def cmd_chats_add(
                 # Brief explainer so the choice is informed: comments
                 # live in a separate Telegram chat (the linked discussion
                 # group). Saying yes here creates a SECOND subscription
-                # for that group. `unread chats run` then folds the comments
+                # for that group. `unread tg chats run` then folds the comments
                 # into the same report as the channel — one analysis per
                 # channel, not two — see `--with-comments` semantics.
                 console.print(
                     "[grey70]→ Channels store posts; user comments live in a "
                     "linked discussion group (a separate Telegram chat). "
                     "Saying yes adds a sibling subscription for that group; "
-                    "`unread chats run` will merge channel posts + comments "
+                    "`unread tg chats run` will merge channel posts + comments "
                     "into ONE report (not two).[/]"
                 )
                 with_comments = _confirm(
@@ -1637,8 +1625,8 @@ async def cmd_chats_add(
                     "Forum: subscribe to every topic (recommended)?",
                     default=True,
                 )
-            # `unread chats run` settings: preset, period, enrich, mark_read.
-            # These get persisted on the subscription so `unread chats run`
+            # `unread tg chats run` settings: preset, period, enrich, mark_read.
+            # These get persisted on the subscription so `unread tg chats run`
             # can walk every enabled sub and analyze each one with
             # its own settings without re-prompting. Each step skips
             # itself when the matching CLI flag was set.
@@ -1646,7 +1634,7 @@ async def cmd_chats_add(
             # Reuse the analyze wizard's pickers wholesale — same
             # labels, same keybindings (arrow-toggle, Enter, ESC),
             # same defaults — so users don't have to relearn anything
-            # between `unread analyze` and `unread chats add`.
+            # between `unread analyze` and `unread tg chats add`.
             from unread.interactive import BACK as _BACK
             from unread.interactive import (
                 _pick_enrich,
@@ -1690,7 +1678,7 @@ async def cmd_chats_add(
                     _bail()
                     return
                 no_mark_read = not bool(mr_result)
-            # post_to: where to deliver the report after `unread chats run`
+            # post_to: where to deliver the report after `unread tg chats run`
             # analyzes this sub. Three sensible defaults:
             #   - "No"          → save to reports/<chat>/ only
             #   - "Saved Msgs"  → send to your own Telegram Saved Messages
