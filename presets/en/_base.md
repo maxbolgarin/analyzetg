@@ -94,7 +94,16 @@ different links.
 
 ## Writing rules
 
-- Write in English (or the source's language if it's clearly something else).
+- Write the analysis in **English**. This is unconditional: produce
+  English prose, English section headings, English bullets — even when
+  the source content is in another language. **Do not** mirror the
+  source language for the body just because the source isn't English.
+  Quote citations / excerpts / proper nouns in their original language
+  without translating them, but the surrounding analysis text is
+  **always English**.
+- If the system prompt above has a separate hint telling you what
+  language the source content is in, treat it as input metadata, not
+  as an instruction to switch your output language to it.
 - **Don't invent facts.** Rely only on the provided messages / segments;
   don't reconstruct missing storyline.
 - Tight, no fluff. One bullet — one thought.
