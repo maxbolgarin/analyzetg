@@ -1,5 +1,8 @@
-"""`estimate_cost` reads `settings.locale.content_language` to vary
-`AVG_TOKENS_PER_MSG` between RU (60) and EN (40)."""
+"""`estimate_cost` reads the resolved **report language** (from
+`settings.locale.report_language`, falling back to `language`) to vary
+`AVG_TOKENS_PER_MSG` between RU (60) and EN (40). The new
+`locale.content_language` (source-hint) field is unrelated to cost
+estimation — it only affects the system prompt the LLM sees."""
 
 from __future__ import annotations
 
@@ -18,15 +21,15 @@ def test_avg_tokens_per_msg_is_language_keyed():
     assert _avg_tokens_per_msg("xx") == 50
 
 
-def test_estimate_cost_changes_with_content_language():
+def test_estimate_cost_changes_with_report_language():
     """A Cyrillic-heavy chat estimates more tokens (and dollars) per message
     than an English chat under the same preset."""
     reset_settings()
     s = get_settings()
     preset = get_presets("en")["digest"]
-    s.locale.content_language = "en"
+    s.locale.report_language = "en"
     lo_en, hi_en = estimate_cost(n_messages=500, preset=preset, settings=s)
-    s.locale.content_language = "ru"
+    s.locale.report_language = "ru"
     lo_ru, hi_ru = estimate_cost(n_messages=500, preset=preset, settings=s)
     reset_settings()
     # Pricing may be missing → both None; if present, RU > EN reliably.

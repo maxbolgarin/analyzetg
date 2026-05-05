@@ -32,6 +32,15 @@ def test_top_level_help_smoke() -> None:
 
 def test_core_command_help_smoke() -> None:
     runner = CliRunner()
-    for args in (["analyze", "--help"], ["dump", "--help"], ["cache", "purge", "--help"]):
+    for args in (
+        ["analyze", "--help"],
+        ["dump", "--help"],
+        # `cache` was reorganized into three entity subgroups in v1.x —
+        # `cache purge` is now `cache ai purge`. Smoke a few of the new
+        # leaf commands so a regression in the group structure surfaces.
+        ["cache", "ai", "purge", "--help"],
+        ["cache", "sources", "purge", "--help"],
+        ["cache", "tg", "purge", "--help"],
+    ):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, result.output

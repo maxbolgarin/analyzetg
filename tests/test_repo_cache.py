@@ -177,6 +177,85 @@ async def test_cache_purge_zero_days_is_noop(repo: Repo) -> None:
     assert untouched["result"] == "r" and untouched["preset"] == "summary"
 
 
+async def test_cache_purge_preview_totals_and_breakdown(repo: Repo) -> None:
+    """`cache_purge_preview` mirrors `cache_purge`'s filter logic and
+    returns the totals + per-(preset, model) breakdown the CLI shows
+    before the destructive DELETE fires."""
+    rows = [
+        ("a1", "summary", "gpt-5.4", "hello world", 0.05),
+        ("a2", "summary", "gpt-5.4", "another summary", 0.03),
+        ("a3", "summary", "gpt-5.4-nano", "different model", 0.01),
+        ("a4", "digest", "gpt-5.4", "different preset", 0.02),
+    ]
+    for h, p, m, body, cost in rows:
+        await repo.cache_put(
+            h,
+            preset=p,
+            model=m,
+            prompt_version="v1",
+            result=body,
+            prompt_tokens=1,
+            cached_tokens=0,
+            completion_tokens=1,
+            cost_usd=cost,
+        )
+
+    # Unfiltered (no age, no preset, no model) → matches every row.
+    pre_all = await repo.cache_purge_preview()
+    assert pre_all["rows"] == 4
+    assert pre_all["saved_cost_usd"] == pytest.approx(0.11)
+    # Top group: summary @ gpt-5.4 (2 rows).
+    top = pre_all["by_group"][0]
+    assert top["preset"] == "summary" and top["model"] == "gpt-5.4"
+    assert top["rows"] == 2
+    # by_group is ordered desc by row count.
+    counts = [g["rows"] for g in pre_all["by_group"]]
+    assert counts == sorted(counts, reverse=True)
+
+
+async def test_cache_purge_preview_respects_filters(repo: Repo) -> None:
+    """preset + model filters narrow `rows` AND `by_group` so the user
+    only sees what the actual purge would delete — not the whole table."""
+    for i, (p, m) in enumerate([("summary", "gpt-5.4"), ("summary", "gpt-5.4"), ("digest", "gpt-5.4")]):
+        await repo.cache_put(
+            f"h{i}",
+            preset=p,
+            model=m,
+            prompt_version="v1",
+            result="r",
+            prompt_tokens=1,
+            cached_tokens=0,
+            completion_tokens=1,
+            cost_usd=0.01,
+        )
+
+    pre = await repo.cache_purge_preview(preset="summary")
+    assert pre["rows"] == 2
+    # Only summary@gpt-5.4 in the breakdown — digest excluded by filter.
+    assert {(g["preset"], g["model"]) for g in pre["by_group"]} == {("summary", "gpt-5.4")}
+
+
+async def test_cache_purge_preview_zero_days_short_circuits(repo: Repo) -> None:
+    """`older_than_days <= 0` short-circuits to empty totals (mirrors
+    `cache_purge`'s no-op guard) so the CLI doesn't render a preview
+    that promises to delete things and then deletes nothing."""
+    await repo.cache_put(
+        "h",
+        preset="p",
+        model="m",
+        prompt_version="v1",
+        result="r",
+        prompt_tokens=1,
+        cached_tokens=0,
+        completion_tokens=1,
+        cost_usd=0.01,
+    )
+    pre = await repo.cache_purge_preview(older_than_days=0)
+    assert pre["rows"] == 0
+    assert pre["by_group"] == []
+    assert pre["saved_cost_usd"] == 0.0
+
+
 async def test_cache_stats_totals_and_groups(repo: Repo) -> None:
     await repo.cache_put(
         "a",
@@ -392,3 +471,89 @@ async def test_redact_chat_filter(repo: Repo) -> None:
     # chat 2 untouched
     rows = [m async for m in repo.iter_messages(2)]
     assert rows[0].text == "in chat 2"
+
+
+async def test_redact_all_messages_ignores_retention(repo: Repo) -> None:
+    """`all_messages=True` blanks every text regardless of age — including
+    rows newer than the retention threshold which the date predicate would
+    otherwise skip."""
+    now = datetime.now(UTC)
+    fresh = now - timedelta(days=2)  # WAY younger than 90d default
+    old = now - timedelta(days=400)
+    await repo.upsert_messages(
+        [
+            Message(chat_id=1, msg_id=1, date=fresh, text="fresh"),
+            Message(chat_id=1, msg_id=2, date=old, text="old"),
+        ]
+    )
+
+    # Without all_messages: only the old row qualifies.
+    pre_old = await repo.count_redactable_messages(retention_days=90)
+    assert pre_old["to_redact"] == 1
+
+    # With all_messages: both rows qualify.
+    pre_all = await repo.count_redactable_messages(retention_days=90, all_messages=True)
+    assert pre_all["to_redact"] == 2
+
+    n = await repo.redact_old_messages(retention_days=90, all_messages=True)
+    assert n == 2
+    rows = [m async for m in repo.iter_messages(1)]
+    assert all(r.text is None for r in rows)
+
+
+async def test_redactable_breakdown_per_chat_summary(repo: Repo) -> None:
+    """`redactable_breakdown` returns per-chat counts ordered by impact, joined
+    with the chats table for human-readable titles. Used by `unread cache tg`
+    (formerly `unread cleanup`) to show *what* will be redacted before the
+    confirm prompt fires."""
+    await repo.upsert_chat(chat_id=10, kind="user", title="Alpha")
+    await repo.upsert_chat(chat_id=20, kind="channel", title="Beta")
+    # chat 30 deliberately has no chats-table row → title falls back to "".
+    long_ago = datetime.now(UTC) - timedelta(days=180)
+    msgs = (
+        [Message(chat_id=10, msg_id=i, date=long_ago, text=f"a{i}") for i in range(5)]
+        + [Message(chat_id=20, msg_id=i, date=long_ago, text=f"b{i}") for i in range(2)]
+        + [Message(chat_id=30, msg_id=1, date=long_ago, text="orphan")]
+    )
+    await repo.upsert_messages(msgs)
+
+    rows = await repo.redactable_breakdown(retention_days=90)
+    # Sorted desc by row count: Alpha (5) → Beta (2) → orphan (1).
+    assert [r["chat_id"] for r in rows] == [10, 20, 30]
+    assert [r["rows"] for r in rows] == [5, 2, 1]
+    assert rows[0]["title"] == "Alpha"
+    assert rows[2]["title"] == ""  # orphan chat has no row in chats table
+    # oldest/newest cover the message dates (we wrote them all at long_ago).
+    assert rows[0]["oldest"] is not None and rows[0]["newest"] is not None
+
+
+async def test_redactable_breakdown_respects_keep_transcripts(repo: Repo) -> None:
+    """When keep_transcripts=True, a row whose `text` is already NULL
+    (transcript-only) shouldn't appear in the breakdown — same predicate
+    the UPDATE uses."""
+    long_ago = datetime.now(UTC) - timedelta(days=180)
+    await repo.upsert_chat(chat_id=10, kind="user", title="X")
+    await repo.upsert_messages(
+        [
+            Message(chat_id=10, msg_id=1, date=long_ago, text="has text"),
+            Message(chat_id=10, msg_id=2, date=long_ago, text=None),
+        ]
+    )
+    await repo.set_message_transcript(chat_id=10, msg_id=2, transcript="v", model="w")
+
+    keep = await repo.redactable_breakdown(retention_days=90, keep_transcripts=True)
+    assert keep[0]["rows"] == 1  # only the row with text
+
+    nuke = await repo.redactable_breakdown(retention_days=90, keep_transcripts=False)
+    assert nuke[0]["rows"] == 2  # text-row + transcript-only row
+
+
+async def test_redactable_breakdown_zero_retention_returns_empty(repo: Repo) -> None:
+    """retention_days <= 0 short-circuits to [] (mirrors count + redact)."""
+    long_ago = datetime.now(UTC) - timedelta(days=180)
+    await repo.upsert_messages([Message(chat_id=10, msg_id=1, date=long_ago, text="x")])
+    rows = await repo.redactable_breakdown(retention_days=0)
+    assert rows == []
+    # …but all_messages=True overrides the short-circuit.
+    rows_all = await repo.redactable_breakdown(retention_days=0, all_messages=True)
+    assert rows_all and rows_all[0]["rows"] == 1

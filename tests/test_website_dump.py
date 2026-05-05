@@ -73,7 +73,8 @@ async def test_text_mode_writes_article_md(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
     article = out / "article.md"
@@ -104,7 +105,8 @@ async def test_text_mode_falls_back_when_markdown_empty(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
     body = (out / "article.md").read_text(encoding="utf-8")
@@ -154,7 +156,8 @@ async def test_full_mode_downloads_images_and_writes_section(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
 
@@ -198,7 +201,8 @@ async def test_full_mode_respects_max_images(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
 
@@ -225,7 +229,8 @@ async def test_full_mode_zero_images_no_section(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
 

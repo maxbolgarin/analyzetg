@@ -275,6 +275,43 @@ def test_wizard_keychain_step_noop_when_no_secrets(isolated_home: Path, fake_key
     assert read_active_backend_sync(db) == BACKEND_DB
 
 
+def test_wizard_keychain_step_auto_migrates_without_prompt(
+    isolated_home: Path, fake_keyring, monkeypatch
+) -> None:
+    """On a TTY with secrets present, the wizard auto-migrates to keystore.
+
+    Keystore is the default — no `confirm()` should fire, no user
+    consent required. The opt-out path is `unread security set plain`.
+    """
+    from unread.config import reset_settings
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        KEYCHAIN_SERVICE,
+        read_active_backend_sync,
+    )
+    from unread.tg.commands import _run_keychain_step
+
+    db = _seed_db_secrets(isolated_home, {"openai.api_key": "sk-default-keystore"})
+    reset_settings()
+
+    # Force the TTY guard True so the auto-migrate path runs in the test.
+    monkeypatch.setattr("unread.tg.commands._can_interact", lambda: True, raising=False)
+    # Belt-and-braces: also patch the import site `unread.util.prompt._can_interact`
+    # since `_run_keychain_step` imports it locally.
+    monkeypatch.setattr("unread.util.prompt._can_interact", lambda: True)
+
+    # Trip an assertion if any prompt is reached — auto-migrate must NOT confirm.
+    def _no_prompt(*a, **kw):
+        raise AssertionError("auto-migrate path must not call confirm()")
+
+    monkeypatch.setattr("unread.util.prompt.confirm", _no_prompt)
+
+    _run_keychain_step()
+
+    assert read_active_backend_sync(db) == BACKEND_KEYCHAIN
+    assert fake_keyring.get_password(KEYCHAIN_SERVICE, "openai.api_key") == "sk-default-keystore"
+
+
 # ---------- defensive paths ---------------------------------------------
 
 

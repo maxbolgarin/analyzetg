@@ -61,41 +61,40 @@ def test_help_overview_lists_every_panel() -> None:
 def test_help_overview_lists_visible_commands() -> None:
     """Every non-hidden registered command appears in the overview.
 
-    `tg` is intentionally absent — it became a magic ref token (see the
-    `<ref> can be` block), not a subcommand. The Telegram setup verbs
-    (`login`, `logout`, `describe`) live at the top level; `folders` moved
-    under `describe` as `unread describe folders`.
+    Telegram-only verbs are flattened under the Telegram panel as
+    `tg login`, `tg describe`, `tg sync`, `tg chats`, `tg logout`. The
+    bare `tg` row is intentionally absent — the panel header itself
+    plus the `<ref> can be` row already document the bare-`unread tg`
+    picker shortcut.
     """
     out = _invoke("help")
-    # Sample of commands we know are registered and visible.
+    # Cross-panel sample (Main + Maintenance) — these stay at top level.
+    # `cleanup` was renamed to `cache tg` in v1.x and is no longer top-level.
     for name in (
         "ask",
         "dump",
         "init",
-        "login",
-        "logout",
-        "describe",
-        "sync",
-        "chats",
         "stats",
-        "cleanup",
         "settings",
         "doctor",
         "backup",
-        "migrate",
         "cache",
         "reports",
     ):
         assert name in out, f"`{name}` missing from overview"
-    # `tg` should NOT appear as a Commands-table entry — it's a ref now.
-    # Scope the check to the Commands section so we don't false-positive on
-    # the legitimate `tg` row inside `<ref> can be` / `Common patterns`.
+    # Telegram-namespaced verbs are listed flat, prefixed with `tg`.
+    for name in ("tg login", "tg logout", "tg describe", "tg sync", "tg chats"):
+        assert name in out, f"`{name}` missing from overview"
+    # The bare `tg` row should NOT appear as a Commands-table entry —
+    # the Telegram panel header already covers it. Scope the check to
+    # the Commands section so we don't false-positive on the legitimate
+    # `tg` row inside `<ref> can be` / `Common patterns`.
     import re
 
     commands_idx = out.index("Commands")
     commands_section = out[commands_idx:]
-    assert not re.search(r"^\s*tg\s", commands_section, re.MULTILINE), (
-        "`tg` should be a ref, not a subcommand row"
+    assert not re.search(r"^\s*tg\s+[A-Z]", commands_section, re.MULTILINE), (
+        "bare `tg` row should be hidden — children are listed flat as `tg <verb>`"
     )
 
 
@@ -204,20 +203,19 @@ def test_help_flags_exposes_root_options() -> None:
         ["doctor"],
         ["settings"],
         ["init"],
-        ["sync"],
+        ["tg", "sync"],
         ["stats"],
-        ["cleanup"],
+        ["cache", "tg"],
         ["backup"],
         ["backup", "up"],
         ["backup", "restore"],
-        ["migrate"],
-        ["login"],
-        ["logout"],
-        ["describe"],
-        ["describe", "folders"],
-        ["chats", "add"],
-        ["chats", "manage"],
-        ["chats", "run"],
+        ["tg", "login"],
+        ["tg", "logout"],
+        ["tg", "describe"],
+        ["tg", "describe", "folders"],
+        ["tg", "chats", "add"],
+        ["tg", "chats", "manage"],
+        ["tg", "chats", "run"],
     ],
 )
 def test_help_command_matches_dash_help(command: list[str]) -> None:
@@ -258,18 +256,18 @@ def test_help_unknown_command_errors_cleanly() -> None:
 
 
 def test_help_chats_lists_subcommands() -> None:
-    """`unread help chats` lists the sub-typer's children."""
-    out = _invoke("help", "chats")
+    """`unread help tg chats` lists the sub-typer's children."""
+    out = _invoke("help", "tg", "chats")
     assert "Subcommands" in out
     for sub in ("add", "manage", "run"):
         assert sub in out, f"chats subcommand `{sub}` missing"
 
 
 def test_help_lists_telegram_setup_commands() -> None:
-    """The promoted top-level Telegram commands all show up in the overview."""
+    """The Telegram setup verbs all show up in the overview as `tg <verb>`."""
     out = _invoke("help")
-    for cmd in ("login", "logout", "describe"):
-        assert cmd in out, f"top-level `{cmd}` missing from overview"
+    for cmd in ("tg login", "tg logout", "tg describe"):
+        assert cmd in out, f"`{cmd}` missing from overview"
 
 
 def test_help_sync_and_chats_flag_telegram_dependency() -> None:
@@ -282,21 +280,20 @@ def test_help_sync_and_chats_flag_telegram_dependency() -> None:
     them as Telegram-only would mislead users.
     """
     overview = _invoke("help")
-    # Match the row that *starts* with the bare command name to avoid
-    # catching unrelated rows that happen to contain "chat" / "sync"
-    # (e.g. `describe`'s help text mentions "chats").
+    # Match the row that *starts* with the namespaced command path so we
+    # don't false-positive on unrelated rows that mention "chat" / "sync".
     import re
 
     sync_line = next(
-        (ln for ln in overview.splitlines() if re.match(r"^\s*sync\b", ln)),
+        (ln for ln in overview.splitlines() if re.match(r"^\s*tg sync\b", ln)),
         "",
     )
     chats_line = next(
-        (ln for ln in overview.splitlines() if re.match(r"^\s*chats\b", ln)),
+        (ln for ln in overview.splitlines() if re.match(r"^\s*tg chats\b", ln)),
         "",
     )
-    assert "Telegram" in sync_line, f"sync line missing Telegram cue: {sync_line!r}"
-    assert "Telegram" in chats_line, f"chats line missing Telegram cue: {chats_line!r}"
+    assert "Telegram" in sync_line, f"`tg sync` line missing Telegram cue: {sync_line!r}"
+    assert "Telegram" in chats_line, f"`tg chats` line missing Telegram cue: {chats_line!r}"
 
 
 def test_ask_and_dump_help_do_not_claim_telegram_only() -> None:

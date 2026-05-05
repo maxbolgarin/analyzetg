@@ -133,6 +133,22 @@ def test_dispatch_analyze_rejects_conflicting_save_flags():
         _dispatch_analyze(save=True, no_save=False, console_out=True)
 
 
+def test_dispatch_analyze_rejects_no_console_with_no_save():
+    """`--no-console --no-save` would suppress every form of output.
+    Reject the combination at dispatch instead of silently spending
+    LLM tokens on a run nobody can see."""
+    import typer
+
+    from unread.cli import _dispatch_analyze
+
+    with pytest.raises(typer.BadParameter, match="suppress all output"):
+        _dispatch_analyze(no_console=True, no_save=True)
+    # Same check via the deprecated --console alias (which also means
+    # "skip the file"): pairing it with --no-console is just as bad.
+    with pytest.raises(typer.BadParameter, match="suppress all output"):
+        _dispatch_analyze(no_console=True, console_out=True)
+
+
 # ---------------------------------------------------------------------
 # Runner: naive utcnow replaced with UTC-aware now.
 # ---------------------------------------------------------------------

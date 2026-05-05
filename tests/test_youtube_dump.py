@@ -68,7 +68,8 @@ async def test_transcript_mode_writes_metadata_and_transcript(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
     assert (out / "metadata.json").exists()
@@ -104,7 +105,8 @@ async def test_transcript_mode_no_cues_falls_back_to_plain_text(tmp_path) -> Non
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
     md = (out / "transcript.md").read_text(encoding="utf-8")
@@ -138,7 +140,8 @@ async def test_audio_mode_calls_download_audio(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
     assert (out / "audio.mp3").exists()
@@ -168,7 +171,8 @@ async def test_video_mode_calls_download_video(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
     assert (out / "video.mp4").exists()
@@ -200,7 +204,8 @@ async def test_audio_mode_preflight_requires_ffmpeg(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
 
@@ -230,7 +235,8 @@ async def test_video_mode_preflight_requires_ffmpeg(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
 
@@ -283,7 +289,8 @@ async def test_transcript_mode_uses_repo_cache(tmp_path) -> None:
             output=out,
             console_out=False,
             language="en",
-            content_language="en",
+            report_language="en",
+            source_language="",
             yes=True,
         )
 

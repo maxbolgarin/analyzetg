@@ -65,6 +65,7 @@ async def test_ask_inline_enrich_runs_before_retrieval():
     fake_client = MagicMock()
     fake_settings = MagicMock()
     fake_settings.locale.language = "en"
+    fake_settings.locale.report_language = ""
     fake_settings.locale.content_language = ""
     fake_settings.openai.chat_model_default = "gpt-5.4-mini"
     fake_settings.ask.rerank_enabled = False
@@ -139,6 +140,7 @@ async def test_ask_no_enrich_skips_enrichment():
     fake_client = MagicMock()
     fake_settings = MagicMock()
     fake_settings.locale.language = "en"
+    fake_settings.locale.report_language = ""
     fake_settings.locale.content_language = ""
     fake_settings.openai.chat_model_default = "gpt-5.4-mini"
     fake_settings.ask.rerank_enabled = False

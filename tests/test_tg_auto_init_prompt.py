@@ -233,7 +233,6 @@ async def test_offer_inline_tg_init_missing_creds_does_not_wipe_session() -> Non
     from unread.tg import client as client_mod
 
     with (
-        patch("unread.util.prompt.confirm", return_value=True),
         patch("unread.tg.commands.cmd_init", new=AsyncMock()),
         patch("unread.tg.client._wipe_local_session") as wipe,
         patch("unread.config.reset_settings"),
@@ -241,3 +240,25 @@ async def test_offer_inline_tg_init_missing_creds_does_not_wipe_session() -> Non
         await client_mod.offer_inline_tg_init("missing_creds")
 
     wipe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_offer_inline_tg_init_missing_creds_skips_confirm_and_runs_init() -> None:
+    """`missing_creds` skips the inline "Run unread login now and continue?"
+    confirm — `cmd_init`'s own "Set up Telegram login now?" step is the
+    single decline gate. Asking twice is the bug we explicitly fixed."""
+    from unread.tg import client as client_mod
+
+    cmd_init_called = AsyncMock()
+    confirm_called = MagicMock(return_value=True)
+    with (
+        patch("unread.util.prompt.confirm", new=confirm_called),
+        patch("unread.tg.commands.cmd_init", new=cmd_init_called),
+        patch("unread.tg.client._wipe_local_session"),
+        patch("unread.config.reset_settings"),
+    ):
+        ok = await client_mod.offer_inline_tg_init("missing_creds")
+
+    assert ok is True
+    confirm_called.assert_not_called()
+    cmd_init_called.assert_awaited_once_with(scope="telegram_only")

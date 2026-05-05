@@ -43,22 +43,29 @@ async def test_app_settings_clear_all(repo: Repo) -> None:
 
 async def test_app_settings_overrides_apply_via_open_repo(tmp_path: Path) -> None:
     """`open_repo` must apply DB-stored overrides to the live settings
-    singleton so any command opening a repo gets them automatically."""
+    singleton so any command opening a repo gets them automatically.
+
+    Covers all three locale axes: UI language, the renamed report
+    language (formerly the only `content_language`), and the new
+    Whisper-style content/source-language hint."""
     db = tmp_path / "t.sqlite"
     setup = await Repo.open(db)
     await setup.set_app_setting("locale.language", "ru")
-    await setup.set_app_setting("locale.content_language", "ru")
+    await setup.set_app_setting("locale.report_language", "ru")
+    await setup.set_app_setting("locale.content_language", "zh")
     await setup.close()
 
     reset_settings()
     pre = get_settings()
     assert pre.locale.language == "en"  # config default
+    assert pre.locale.report_language == ""
     assert pre.locale.content_language == ""
 
     async with open_repo(db):
         s = get_settings()
         assert s.locale.language == "ru"
-        assert s.locale.content_language == "ru"
+        assert s.locale.report_language == "ru"
+        assert s.locale.content_language == "zh"
     reset_settings()
 
 
