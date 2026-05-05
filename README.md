@@ -191,9 +191,9 @@ rotation is a one-line edit.
 re-runs Telethon auth without touching keys.
 
 > **Migrating from a cwd-relative install** (older versions wrote into
-> the working directory)? Run `unread migrate` from the old install dir
-> to copy `./.env`, `./config.toml`, `./storage/`, and `./reports/`
-> into `~/.unread/`. Pass `--move` to delete originals after.
+> the working directory)? Move `./.env`, `./config.toml`, `./storage/`,
+> and `./reports/` into `~/.unread/` manually — or set
+> `UNREAD_HOME=$(pwd)` to keep the cwd-relative layout.
 
 ---
 
@@ -374,12 +374,11 @@ doesn't replace it.
 | `unread help [<cmd>]` / `unread --help` | Show top-level help (no args) or walk into a subcommand: `unread help tg`, `unread help init`. |
 | `unread ask [<ref>] ["question"] [flags]` | Q&A over any ref (Telegram, YouTube, website, local file, stdin) — no Telegram round-trip for non-TG sources. No args opens a wizard. |
 | `unread dump [<ref>] [flags]` | Dump history / extracted text to md/jsonl/csv. Accepts Telegram refs, URLs, local files, and stdin. No OpenAI call by default. |
-| `unread migrate [--move] [--dry-run]` | Move legacy cwd-relative `./storage` and `./reports` into `~/.unread/`. |
 
 > **Subcommand-name collisions.** `unread <ref>` will route to a
-> subcommand if `<ref>` matches one (e.g. `unread cleanup` opens the
-> cleanup command, not a chat literally titled "cleanup"). Use
-> `unread tg "cleanup"` or `unread -- cleanup` for the rare case of
+> subcommand if `<ref>` matches one (e.g. `unread settings` opens the
+> settings command, not a chat literally titled "settings"). Use
+> `unread tg "settings"` or `unread -- settings` for the rare case of
 > a chat that shares a subcommand name.
 
 ### Telegram
@@ -398,8 +397,7 @@ doesn't replace it.
 | Command | Purpose |
 |---|---|
 | `unread stats [--by …]` | Token spend / cache hit rate — by chat, preset, model, day, kind. |
-| `unread cleanup --retention 90d` | Null out old message text (preserves metadata + transcripts). |
-| `unread cache stats / ls / show / purge / export` | Analysis-cache maintenance (`stats` also surfaces OpenAI prompt-cache hit rate). |
+| `unread cache <entity> [ls\|purge\|stats\|show\|export]` | Cache maintenance with three entity groups (`<entity>` ∈ `ai` \| `sources` \| `tg`). Bare `cache <entity>` = `ls`. See per-entity table below. |
 | `unread doctor` | Preflight check — Telegram session, OpenAI key, ffmpeg, DB integrity, pricing, FDE, cloud-sync warnings. |
 | `unread update [--check] [-y]` | Check PyPI for a newer release and (optionally) install it. |
 | `unread security {status,set,unlock,lock,rotate-passphrase,revoke-session}` | Inspect / switch the credential-storage backend. See the [Security](#security) section. |
@@ -1048,64 +1046,80 @@ ignore it.
 
 ## Language
 
-Two independent settings let you mix and match UI and chat content language:
+Three independent settings cover the three roles a "language" can play:
 
-- `[locale] language` — **UI / saved-report headings**. Wizard, the
-  `## Sources` heading appended by `--cite-context`, the `## Verification`
-  heading from `--self-check`, the saved report's metadata block, the
-  truncation banner. Defaults to `"en"`.
-- `[locale] content_language` — **prompts / LLM input**. Picks which
-  `presets/<lang>/` tree the loader reads, the image/link enricher
-  prompt language, the ask system prompt, the formatter labels going
-  into the LLM. Defaults to follow `language`.
+| Setting | Drives | Default |
+|---|---|---|
+| `[locale] language` | **UI language**. Wizard, settings menu, banners, status messages, the `## Sources` heading from `--cite-context`, the `## Verification` heading from `--self-check`, the saved report's metadata block, the truncation banner. Drives `i18n.t()`. | `"en"` |
+| `[locale] report_language` | **Report language**. Picks which `presets/<lang>/` tree the loader reads, the system prompt's base rules, the ask system prompt, the image / link enricher prompts, the formatter labels going *into* the LLM. The LLM writes the analysis in this language. | `""` → follow `language` |
+| `[locale] content_language` | **Source-content hint** (Whisper-style). When set, the system prompt gets one extra line telling the LLM "the source content is in `<X>`". When empty, no hint is sent — the LLM auto-detects from the source text. Use only as an explicit override. | `""` → AI auto-detects |
 
-The split exists because the natural use case is asymmetric: an English
-speaker analyzing a Russian Telegram chat wants their wizard / saved
-report metadata in English, but the LLM should still see Russian
-prompts and produce Russian output (so the analysis is idiomatic).
+The split exists because the three roles are genuinely different:
+
+- An English speaker analyzing a Russian Telegram chat wants their
+  wizard / saved-report metadata in English (`language=en`) but the LLM
+  should produce Russian summaries (`report_language=ru`). No source
+  hint needed — the chat is in Russian and the LLM detects that.
+- A Russian speaker reading a Chinese Wikipedia article wants Russian
+  reports (`language=ru`, `report_language=ru`) but the LLM doesn't
+  always nail "this article is in Chinese" purely from the prose
+  (especially when the report headings are Russian). Set
+  `content_language=zh` and the model trusts the hint.
 
 ```toml
 # config.toml
 [locale]
-language = "en"             # UI + report headings. Wizard, ## Sources, etc.
-content_language = "ru"     # Prompts the LLM gets + the language it answers in.
-                            # Empty = follow `language`.
+language = "en"             # UI: wizard, banners, settings menu.
+report_language = "ru"      # LLM writes analyses in Russian.
+content_language = ""       # Empty = let the AI auto-detect the source.
+                            # Set to "zh"/"ru"/… as a Whisper-style override.
 ```
 
-Per-run override:
+Per-run overrides:
 
 ```bash
-# English UI, Russian prompts → English headings, Russian analysis body
-unread @somechat --language en --content-language ru
-unread ask "что обсуждали?" --language en --content-language ru
+# English UI, Russian report; let the LLM detect what the chat is in.
+unread @somechat --language en --report-language ru
+
+# Russian UI + Russian report, but the source is Chinese (override the
+# LLM's source-language detection).
+unread https://zh.wikipedia.org/wiki/物理学 --report-language ru --content-language zh
+
+# Ask follows the same shape.
+unread ask "что обсуждали?" --language en --report-language ru
 ```
 
 Whisper transcription has its own knob (`[openai] audio_language`) —
-empty means autodetect, decoupled from both UI and content language.
+empty means autodetect; decoupled from all three locale axes.
 
 ### Persisting preferences with `unread settings`
 
 Edit your locale prefs without touching `config.toml`:
 
 ```bash
-unread settings                              # interactive editor
-unread settings show                         # current effective values + DB overrides
+unread settings                                  # interactive editor (three rows under Languages)
+unread settings show                             # current effective values + DB overrides
 unread settings set locale.language en
-unread settings set locale.content_language ru
-unread settings unset locale.content_language  # drop a single override
-unread settings reset                         # drop all DB overrides
+unread settings set locale.report_language ru
+unread settings set locale.content_language zh   # Whisper-style override; empty = auto-detect
+unread settings unset locale.content_language    # drop a single override
+unread settings reset                            # drop all DB overrides
 ```
 
 Saved to `storage/data.sqlite` in the `app_settings` table. Applied on
-every `unread` invocation; explicit `--language` / `--content-language`
-flags still win.
+every `unread` invocation; explicit `--language` / `--report-language` /
+`--content-language` flags still win.
 
 ### Migration note
 
-When you upgrade from a pre-locale build, your existing config has no
-`[locale]` block and defaults to English. To restore Russian as before:
-either run `unread settings set locale.language ru` (one-time), or add
-`[locale] language = "ru"` to your `config.toml`.
+`[locale] content_language` was renamed to `[locale] report_language` in
+v1.x — the old name now means a Whisper-style source-language hint
+(empty = auto-detect). If you had `content_language = "ru"` set under
+the old semantics (LLM writes in Russian), re-set it as
+`report_language = "ru"` and clear `content_language` (or leave it empty
+to let the AI auto-detect). The CLI flag `--content-language` was
+similarly renamed to `--report-language`; the new `--content-language`
+flag is the source hint.
 
 ---
 
@@ -1219,10 +1233,31 @@ unread backup up mybackup.sqlite --overwrite
 # Restore a backup (current DB moved aside as data-replaced-…sqlite)
 unread backup restore storage/backups/data-2026-04-25_…sqlite --yes
 
-# Null out old message texts (privacy / disk reclaim)
-unread cleanup --retention 90d                # preview + confirmation
-unread cleanup --retention 90d --yes
-unread cleanup --retention 30d --chat 1234567890
+# `unread cache` is split into three entity groups, each exposing the
+# same five commands: bare `<entity>` = ls, plus purge / stats / show / export.
+
+# Analysis cache (per-LLM-call result rows in `analysis_cache`)
+unread cache ai                                       # list newest first
+unread cache ai stats                                 # size, age range, by (preset, model), prompt-cache hit rate
+unread cache ai show <hash-prefix>                    # print a stored result
+unread cache ai purge --older-than 90d                # delete by age / preset / model / --all
+unread cache ai export -o ai.jsonl                    # dump rows to JSONL or markdown
+
+# Source caches (extracted pages / YouTube transcripts / local-file text)
+unread cache sources                                  # ls all kinds
+unread cache sources ls --kind website                # one kind only
+unread cache sources stats                            # rows + age per kind
+unread cache sources show <page_id|video_id|file_id>  # row metadata + paragraph preview
+unread cache sources purge --domain zh.wikipedia.org  # filter: --url / --domain / --kind / --older-than / --all
+unread cache sources export -o sources.jsonl          # JSONL inventory; pass --include-paragraphs for full text
+
+# Telegram message cache (per-row `messages` table — synced chat history)
+unread cache tg                                       # per-chat counts (text / transcripts / age)
+unread cache tg stats                                 # totals + chats / messages / transcripts / age range
+unread cache tg show 1234567890                       # one chat's stats
+unread cache tg purge --retention 90d                 # blank old message text (renamed from `unread cleanup`)
+unread cache tg purge --retention 30d --chat 1234567890
+unread cache tg export -o tg.jsonl --chat 1234567890  # dump cached rows; user-facing reports = `unread dump`
 
 # Prune old report files to reports/.trash/<ts>/
 unread reports prune --older-than 30d --dry-run    # see what would move
@@ -1244,15 +1279,18 @@ Foreground loop that runs an inner `unread` command on a fixed cadence.
 No daemon — run under `tmux` / `nohup` for persistence.
 
 ```bash
-unread watch --interval 1h analyze --folder Work --post-saved
-unread watch --interval 30m ask "anything urgent?" --folder Work
-unread watch --interval 24h --max-runs 7 analyze --folder Work --digest
+unread watch --interval 1h tg chats run
+unread watch --interval 1h --folder Work --post-saved
+unread watch --interval 30m ask --folder Work "anything urgent?"
+unread watch --interval 6h --max-runs 4 https://example.com/blog
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--interval Nm/Nh/Nd/Nw` | Cadence (or bare seconds). Required. |
+| `--interval Ns/Nm/Nh/Nd/Nw` | Cadence (or bare seconds). Defaults to `1h`. |
 | `--max-runs N` | Stop after N runs (testing / fixed cycles). |
+
+Bare `unread watch` (no inner command) prints this command's help.
 
 Ctrl-C exits cleanly between iterations. The inner command's stdout
 streams live; each iteration is preceded by `── Run K  YYYY-MM-DDThh:mm:ss`.
@@ -1355,8 +1393,9 @@ filter_model_default = "gpt-5.4-nano"    # map phase + cheap rerank + self-check
 # audio_language = ""                    # Whisper hint; empty = autodetect
 
 [locale]
-# language = "en"                        # "en" (default) / "ru" / …
-# content_language = ""                  # follow `language` unless set explicitly
+# language = "en"                        # UI: "en" (default) / "ru" / …
+# report_language = ""                   # LLM output; empty = follow `language`
+# content_language = ""                  # Whisper-style source hint; empty = AI auto-detects
 
 [analyze]
 min_msg_chars = 3                        # filter: drop messages shorter than N chars
@@ -1451,8 +1490,8 @@ every secret masked.
 | `attempt to write a readonly database` | `chmod -R 700 ~/.unread/storage` — the install dir lost write perms (sudo install, restored backup with wrong owner) |
 | `storage permissions overpermissive` (doctor warning) | Run the `chmod 700 … && chmod 600 …` line printed by doctor — older installs predate the 0o700 hardening |
 | Cost reports look truncated / `unread stats` shows zeros | `unread cache stats` to confirm the prompt cache is hitting (hit-rate table at the bottom); if not, verify `[pricing]` covers your model in `~/.unread/config.toml` |
-| Cache directory is huge | `unread cache stats` then `unread cache purge --older-than 30d --vacuum` |
-| Migrating to a new install dir / moved `~/.unread/` | Set `UNREAD_HOME=/new/path` or run `unread migrate` from the old folder |
+| Cache directory is huge | `unread cache ai stats` then `unread cache ai purge --older-than 30d --vacuum`; also `unread cache sources purge` for cached source text |
+| Migrating to a new install dir / moved `~/.unread/` | Set `UNREAD_HOME=/new/path`, or copy `.env` / `config.toml` / `storage/` / `reports/` into the new dir manually |
 | Russian locale, English `--help` | Currently English help only; full localization is on the [roadmap](ROADMAP.md) |
 | Want to start fresh | Delete `~/.unread/storage/data.sqlite` and re-run `unread init` — credentials persist in `data.sqlite::secrets`, so this resets cache + analysis runs while keeping or refreshing keys |
 

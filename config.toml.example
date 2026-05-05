@@ -68,20 +68,31 @@ filter_model_default = "gpt-5.4-nano"
 
 # ==================================================================== Locale
 #
-# Controls what the user sees: wizard, saved reports, citation headings,
-# ask labels, image/link descriptions, and analysis output language.
-# Presets live under presets/<language>/ — the loader reads from the active
-# language's directory only (no fallback). RU users opt in by setting
-# language = "ru"; the experience matches what unread shipped before
-# English support landed.
+# Three independent language axes. See README.md "Language" for the full
+# story; the short version:
+#
+#   * language        — UI / wizard / settings menu / banners. The CLI
+#                       talks to the human in this language.
+#   * report_language — what the LLM writes the analysis in. Picks the
+#                       presets/<lang>/ directory (which is autonomous —
+#                       no cross-language fallback). Empty = follow `language`.
+#   * content_language — Whisper-style hint about the SOURCE content
+#                       language. When set, one extra line is added to
+#                       the system prompt telling the LLM to trust that
+#                       the input is in this language. Empty (the default)
+#                       means the LLM auto-detects from the source text.
 
 # [locale]
 # language = "en"           # "en", "ru" (other ISO codes work if you add
 #                           # presets/<code>/ + i18n entries).
-# content_language = ""     # Empty = follow `language`. Set to "en"/"ru"/…
-#                           # if your chats are predominantly one language
-#                           # and `language` is something else — affects
-#                           # cost estimates only.
+# report_language = ""      # Empty = follow `language`. Set to "ru" if
+#                           # you want the LLM to write in Russian even
+#                           # though your CLI / settings menu is English.
+# content_language = ""     # Empty = AI auto-detects the source language
+#                           # from the content. Set to "zh"/"ru"/… as a
+#                           # Whisper-style override when the AI is
+#                           # mis-detecting (e.g. analyzing Chinese
+#                           # Wikipedia with a Russian report).
 
 # ======================================================================== Ask
 
