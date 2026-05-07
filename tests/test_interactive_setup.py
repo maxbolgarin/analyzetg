@@ -131,17 +131,26 @@ def test_wizard_anthropic_provider(isolated_home: Path, mock_telethon) -> None:
     secrets = _read_secrets(isolated_home)
     assert secrets == {"anthropic.api_key": "sk-ant-fake"}
 
-    # Provider choice persists in app_settings, not secrets.
+    # Provider choice persists in app_settings as four per-slot rows.
+    # Audio snaps to openai (anthropic has no Whisper-shape API) — the
+    # other three slots get the picked provider.
     import sqlite3
 
     db = isolated_home / "unread" / "storage" / "data.sqlite"
     conn = sqlite3.connect(db)
     try:
-        cur = conn.execute("SELECT value FROM app_settings WHERE key='ai.provider'")
-        row = cur.fetchone()
+        cur = conn.execute(
+            "SELECT key, value FROM app_settings "
+            "WHERE key LIKE 'ai.%_provider' OR key = 'ai.provider'"
+        )
+        rows = dict(cur.fetchall())
     finally:
         conn.close()
-    assert row is not None and row[0] == "anthropic"
+    assert "ai.provider" not in rows  # umbrella key no longer written
+    assert rows.get("ai.chat_provider") == "anthropic"
+    assert rows.get("ai.filter_provider") == "anthropic"
+    assert rows.get("ai.audio_provider") == "openai"  # capability snap
+    assert rows.get("ai.vision_provider") == "anthropic"
 
 
 def test_wizard_local_provider_no_key(isolated_home: Path, mock_telethon) -> None:
@@ -159,17 +168,69 @@ def test_wizard_local_provider_no_key(isolated_home: Path, mock_telethon) -> Non
     # No secrets row (local doesn't need a key).
     assert _read_secrets(isolated_home) == {}
 
-    # ai.provider = "local" persisted.
+    # All four slot-provider rows = "local" — no umbrella `ai.provider`.
     import sqlite3
 
     db = isolated_home / "unread" / "storage" / "data.sqlite"
     conn = sqlite3.connect(db)
     try:
-        cur = conn.execute("SELECT value FROM app_settings WHERE key='ai.provider'")
-        row = cur.fetchone()
+        cur = conn.execute(
+            "SELECT key, value FROM app_settings WHERE key LIKE 'ai.%_provider'"
+        )
+        rows = dict(cur.fetchall())
     finally:
         conn.close()
-    assert row is not None and row[0] == "local"
+    assert rows.get("ai.chat_provider") == "local"
+    assert rows.get("ai.filter_provider") == "local"
+    assert rows.get("ai.audio_provider") == "local"
+    assert rows.get("ai.vision_provider") == "local"
+
+
+def test_wizard_skip_ai_provider(isolated_home: Path, mock_telethon) -> None:
+    """Picking 'Skip — configure AI later' leaves slot keys empty.
+
+    The wizard's other steps (Telegram credentials) still run; only
+    the AI provider commitment is deferred. The skip path must NOT
+    write any `ai.*_provider` row, so a later `.env` write or
+    `unread settings` edit starts from a clean slate.
+    """
+    from unread.tg.commands import cmd_init
+
+    # Folder=1, provider=6 (Skip — last entry after the 5 providers
+    # plus a separator). Telegram=n. The Skip path takes no key prompt.
+    prompt_inputs = iter(["1", "6"])
+    with (
+        patch("typer.prompt", side_effect=lambda *a, **kw: next(prompt_inputs)),
+        patch("typer.confirm", return_value=False),
+    ):
+        asyncio.run(cmd_init())
+
+    # No secrets stored — Skip never asked for a key.
+    assert _read_secrets(isolated_home) == {}
+
+    # No slot-provider rows. The whole-skip path may not even create
+    # the DB file (no Telegram, no AI, nothing to persist), so handle
+    # both shapes: missing DB = trivially "no rows", existing DB =
+    # query and confirm zero matches.
+    import sqlite3
+
+    db = isolated_home / "unread" / "storage" / "data.sqlite"
+    if db.is_file():
+        conn = sqlite3.connect(db)
+        try:
+            try:
+                cur = conn.execute(
+                    "SELECT key FROM app_settings "
+                    "WHERE key LIKE 'ai.%_provider' OR key = 'ai.provider'"
+                )
+                rows = [r[0] for r in cur.fetchall()]
+            except sqlite3.OperationalError:
+                # Table doesn't exist — nothing was ever written. Same
+                # outcome as "no DB file" from the user's perspective.
+                rows = []
+        finally:
+            conn.close()
+        assert rows == [], f"expected no AI provider rows, got {rows}"
 
 
 def test_wizard_exit_writes_nothing(isolated_home: Path, mock_telethon) -> None:

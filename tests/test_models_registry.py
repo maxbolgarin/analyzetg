@@ -25,7 +25,6 @@ from unread.ai.models import (
 )
 from unread.ai.openai_provider import OpenAIProvider
 from unread.config import ChatPricing, PricingCfg, Settings
-from unread.settings.commands import _provider_for_model_key
 from unread.util.pricing import chat_cost, chat_pricing_for
 
 
@@ -152,20 +151,31 @@ def testchat_pricing_for_returns_none_for_audio_model():
 
 
 def test_picker_provider_routing_ai_keys_follow_active_provider():
-    """`ai.chat_model` / `ai.filter_model` track the active provider —
-    that's the whole point of the per-provider catalog. With provider
-    set to anthropic, the picker must serve anthropic models for these
-    rows, never OpenAI ones.
+    """Per-slot routing — each slot has its own provider+model. The
+    compound picker uses `_SLOT_PROVIDERS` to constrain provider
+    options (audio excludes anthropic + google) and `_SLOT_ROLE` to
+    pick the catalog filter.
     """
-    assert _provider_for_model_key("ai.chat_model", "anthropic") == "anthropic"
-    assert _provider_for_model_key("ai.filter_model", "google") == "google"
+    from unread.settings.commands import _SLOT_PROVIDERS, _SLOT_ROLE
+
+    # Audio slot is restricted to Whisper-shape providers.
+    assert "anthropic" not in _SLOT_PROVIDERS["audio"]
+    assert "google" not in _SLOT_PROVIDERS["audio"]
+    assert set(_SLOT_PROVIDERS["audio"]) == {"openai", "openrouter", "local"}
+    # Chat / filter / vision accept all five providers.
+    for slot in ("chat", "filter", "vision"):
+        assert set(_SLOT_PROVIDERS[slot]) == {"openai", "openrouter", "anthropic", "google", "local"}
+    # Role mapping mirrors the slot name.
+    assert _SLOT_ROLE == {"chat": "chat", "filter": "filter", "audio": "audio", "vision": "vision"}
 
 
-def test_picker_provider_routing_openai_namespaced_rows_pinned_to_openai():
-    """`openai.chat_model_default` / vision / audio rows are OpenAI
-    capabilities by definition — they must keep showing OpenAI models
-    even if chat provider is anthropic."""
-    for active in ("anthropic", "google", "openrouter", "local"):
-        assert _provider_for_model_key("openai.chat_model_default", active) == "openai"
-        assert _provider_for_model_key("openai.audio_model_default", active) == "openai"
-        assert _provider_for_model_key("enrich.vision_model", active) == "openai"
+def test_per_slot_routing_picks_correct_catalog():
+    """`models_for_provider(provider, role=slot_role)` is the catalog
+    backing the compound picker step 2. Spot-check that slot+provider
+    combinations return non-empty pools where they should."""
+    # Anthropic vision: claude-* models must show up.
+    anth_vision = {m.id for m in models_for_provider("anthropic", role="vision")}
+    assert any(mid.startswith("claude-") for mid in anth_vision), anth_vision
+    # OpenRouter audio: at least one Whisper alias.
+    or_audio = {m.id for m in models_for_provider("openrouter", role="audio")}
+    assert any("whisper" in mid for mid in or_audio), or_audio

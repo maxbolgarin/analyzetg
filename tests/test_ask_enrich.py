@@ -68,8 +68,24 @@ async def test_ask_inline_enrich_runs_before_retrieval():
     fake_settings.locale.report_language = ""
     fake_settings.locale.content_language = ""
     fake_settings.openai.chat_model_default = "gpt-5.4-mini"
+    fake_settings.openai.api_key = "sk-test"
     fake_settings.ask.rerank_enabled = False
     fake_settings.storage.data_path = "/tmp/test.sqlite"
+    # Explicit empty per-slot provider fields so `_resolve_provider_name`
+    # sees a string fallback, not a MagicMock.
+    for _attr in (
+        "provider",
+        "chat_provider",
+        "filter_provider",
+        "audio_provider",
+        "vision_provider",
+        "chat_model",
+        "filter_model",
+        "audio_model",
+        "vision_model",
+        "base_url",
+    ):
+        setattr(fake_settings.ai, _attr, "")
 
     @asyncmgr_factory(fake_client)
     class _TgCtx:
@@ -143,8 +159,24 @@ async def test_ask_no_enrich_skips_enrichment():
     fake_settings.locale.report_language = ""
     fake_settings.locale.content_language = ""
     fake_settings.openai.chat_model_default = "gpt-5.4-mini"
+    fake_settings.openai.api_key = "sk-test"
     fake_settings.ask.rerank_enabled = False
     fake_settings.storage.data_path = "/tmp/test.sqlite"
+    # Explicit empty per-slot provider fields so `_resolve_provider_name`
+    # sees a string fallback, not a MagicMock.
+    for _attr in (
+        "provider",
+        "chat_provider",
+        "filter_provider",
+        "audio_provider",
+        "vision_provider",
+        "chat_model",
+        "filter_model",
+        "audio_model",
+        "vision_model",
+        "base_url",
+    ):
+        setattr(fake_settings.ai, _attr, "")
 
     @asyncmgr_factory(fake_client)
     class _TgCtx:

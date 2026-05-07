@@ -432,8 +432,24 @@ async def test_transcribe_audio_emits_progress_logs(
         audio_model_default = "gpt-4o-mini-transcribe"
         audio_language = None
 
+    class _AICfg:
+        # Empty per-slot keys → resolve_audio falls back to openai +
+        # `_DEFAULT_AUDIO_MODEL["openai"]` (or to legacy
+        # `openai.audio_model_default` since chat_provider == openai).
+        provider = ""
+        chat_provider = ""
+        filter_provider = ""
+        audio_provider = ""
+        audio_model = ""
+        vision_provider = ""
+        vision_model = ""
+        chat_model = ""
+        filter_model = ""
+        base_url = ""
+
     class _Settings:
         openai = _OpenAICfg()
+        ai = _AICfg()
 
     from unread.youtube.transcript import _transcribe_audio
 

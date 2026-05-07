@@ -1,44 +1,54 @@
-"""`unread settings` hides legacy OpenAI-only rows when chat provider is non-OpenAI.
+"""`unread settings` per-slot Models section + API keys.
 
-`resolve_chat_model` only honors `settings.openai.chat_model_default`
-when `ai.provider == "openai"`. Showing the row under a different
-provider creates a phantom-edit experience (set the value, no effect).
+Each of the four model slots (chat / filter / audio / vision) appears
+as a single compound row that writes both `ai.<slot>_provider` and
+`ai.<slot>_model`. The legacy `_OPENAI_PROVIDER_ONLY_KEYS` filter
+went away with `ai.provider` — `_visible_settings` is now a no-op
+identity transform.
 """
 
 from __future__ import annotations
 
 from unread.settings.commands import (
-    _OPENAI_PROVIDER_ONLY_KEYS,
     _SETTINGS,
+    _SLOT_PROVIDERS,
+    _TOP_SETTINGS,
     _visible_settings,
 )
 
 
-def test_openai_provider_shows_all_rows():
-    visible = _visible_settings("openai")
-    assert visible == _SETTINGS
+def test_visible_settings_is_identity():
+    """The legacy provider-aware filter is gone; pool round-trips unchanged."""
+    for active in ("openai", "anthropic", "google", "openrouter", "local"):
+        assert _visible_settings(active, _SETTINGS) == _SETTINGS
 
 
-def test_anthropic_provider_hides_legacy_openai_keys():
-    visible = _visible_settings("anthropic")
-    visible_keys = {sd.key for sd in visible}
-    for k in _OPENAI_PROVIDER_ONLY_KEYS:
-        assert k not in visible_keys, f"{k} should be hidden under anthropic"
-    # OpenAI-backed audio / vision are still visible because they
-    # apply regardless of chat provider.
-    assert "openai.audio_model_default" in visible_keys
-    assert "enrich.vision_model" in visible_keys
+def test_top_level_has_four_model_slots():
+    """The top-level menu must surface all four per-slot rows."""
+    slot_keys = {sd.key for sd in _TOP_SETTINGS if sd.kind == "slot_model"}
+    assert slot_keys == {"__slot_chat__", "__slot_filter__", "__slot_audio__", "__slot_vision__"}
 
 
-def test_google_provider_hides_legacy_openai_keys():
-    visible = _visible_settings("google")
-    visible_keys = {sd.key for sd in visible}
-    assert "openai.chat_model_default" not in visible_keys
-    assert "openai.filter_model_default" not in visible_keys
+def test_top_level_has_five_api_key_rows():
+    """Each provider (incl. local URL) gets one API-keys row."""
+    api_keys = {sd.key for sd in _TOP_SETTINGS if sd.kind == "api_key"}
+    assert api_keys == {
+        "__api_key:openai__",
+        "__api_key:openrouter__",
+        "__api_key:anthropic__",
+        "__api_key:google__",
+        "__api_key:local__",
+    }
 
 
-def test_local_provider_hides_legacy_openai_keys():
-    visible = _visible_settings("local")
-    visible_keys = {sd.key for sd in visible}
-    assert "openai.chat_model_default" not in visible_keys
-    assert "openai.filter_model_default" not in visible_keys
+def test_audio_slot_excludes_anthropic_and_google():
+    """Capability filter — only Whisper-shape providers can be picked for audio."""
+    assert "anthropic" not in _SLOT_PROVIDERS["audio"]
+    assert "google" not in _SLOT_PROVIDERS["audio"]
+    assert set(_SLOT_PROVIDERS["audio"]) == {"openai", "openrouter", "local"}
+
+
+def test_chat_filter_vision_slots_accept_all_providers():
+    expected = {"openai", "openrouter", "anthropic", "google", "local"}
+    for slot in ("chat", "filter", "vision"):
+        assert set(_SLOT_PROVIDERS[slot]) == expected

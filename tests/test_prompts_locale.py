@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from unread.analyzer import prompts
 
 
@@ -18,9 +16,16 @@ def test_get_presets_reads_each_language_directory():
     assert en["summary"].system != ru["summary"].system
 
 
-def test_get_presets_unknown_language_raises():
-    with pytest.raises(RuntimeError, match="Preset directory not found"):
-        prompts.get_presets("zz_no_such_lang")
+def test_get_presets_unknown_language_falls_back_to_en():
+    """Unknown report_language falls back to presets/en/ with a warning log.
+    `compose_system_prompt` injects an explicit OUTPUT LANGUAGE directive,
+    so the LLM still writes in the requested language even though the
+    preset bodies were authored in English.
+    """
+    prompts.clear_preset_cache()
+    en = prompts.get_presets("en")
+    pt = prompts.get_presets("pt")
+    assert set(pt.keys()) == set(en.keys())
 
 
 def test_compose_appends_no_extra_when_language_is_en():

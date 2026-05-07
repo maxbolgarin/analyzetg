@@ -260,19 +260,30 @@ def test_migrate_idempotent(isolated_home: Path, fake_keyring) -> None:
 # ---------- wizard step --------------------------------------------------
 
 
-def test_wizard_keychain_step_noop_when_no_secrets(isolated_home: Path, fake_keyring) -> None:
-    """Wizard's `_run_keychain_step` is a no-op on a fresh install with no secrets."""
+def test_wizard_keychain_step_flips_backend_even_when_no_secrets(
+    isolated_home: Path, fake_keyring, monkeypatch
+) -> None:
+    """Empty-slot install still flips active backend to keychain.
+
+    Without this, an install whose user skipped the credential prompts
+    (or only set them via `.env`) would keep `secrets.backend = db`,
+    and any later credential write via `unread settings` would silently
+    land in plaintext — defeating "keystore by default". The flip
+    ensures `write_secrets` routes correctly from the very next call.
+    """
     from unread.config import reset_settings
-    from unread.secrets_backend import BACKEND_DB, read_active_backend_sync
+    from unread.secrets_backend import BACKEND_KEYCHAIN, read_active_backend_sync
     from unread.tg.commands import _run_keychain_step
 
     db = _seed_db_secrets(isolated_home, {})  # empty
     reset_settings()
 
-    # No prompt should fire; backend stays db.
+    # Force the TTY guard so the auto-flip path runs.
+    monkeypatch.setattr("unread.util.prompt._can_interact", lambda: True)
+
     _run_keychain_step()
 
-    assert read_active_backend_sync(db) == BACKEND_DB
+    assert read_active_backend_sync(db) == BACKEND_KEYCHAIN
 
 
 def test_wizard_keychain_step_auto_migrates_without_prompt(
