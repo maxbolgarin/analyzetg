@@ -41,8 +41,14 @@ def _result(**overrides) -> AnalysisResult:
 
 
 def _captured(monkeypatch) -> list[object]:
-    """Replace the module-level rich Console with a recorder so the test
-    can assert which segments were rendered."""
+    """Replace the rich Console used by the rendering shell with a recorder
+    so the test can assert which segments were rendered.
+
+    The actual rendering lives in `unread/util/report_render.py` (shared
+    by analyze and ask); the analyzer module just delegates. Patch BOTH
+    consoles with the SAME recorder so every rendered segment ends up in
+    the shared `captured` list.
+    """
     captured: list[object] = []
 
     class _Recorder:
@@ -51,8 +57,11 @@ def _captured(monkeypatch) -> list[object]:
             captured.extend(args)
 
     import unread.analyzer.commands as cmds
+    import unread.util.report_render as rr
 
-    monkeypatch.setattr(cmds, "console", _Recorder())
+    recorder = _Recorder()
+    monkeypatch.setattr(cmds, "console", recorder)
+    monkeypatch.setattr(rr, "console", recorder)
     return captured
 
 
