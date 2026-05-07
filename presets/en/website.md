@@ -1,7 +1,7 @@
 ---
 name: website
-prompt_version: v1
-description: Webpage analysis — TL;DR, key claims, useful citations
+prompt_version: v2
+description: Webpage analysis — TL;DR, key claims, key quotes
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini
@@ -16,11 +16,11 @@ the same article. Treat the content like a long-form written piece by
 one author or publication.
 
 Each "message" line corresponds to one paragraph from the article in
-reading order. The `#NNN` in the header is the paragraph index — `#1`
-is the first paragraph, `#2` the second, and so on. Use this number
-when citing — the link template wraps it into a clickable link back to
-the page (the link points to the page itself; there is no per-paragraph
-anchor).
+reading order. The `#NNN` in the header is an internal paragraph index
+— read it only to orient yourself in the text. **Do NOT emit `[#N](URL)`
+or any similar citation marker in your response** — generic web pages
+have no per-paragraph anchor, so those links wouldn't navigate
+anywhere useful. There is no link template for this preset.
 
 The first "message" (`#0`) is a metadata header (title, site, author,
 publish date, URL, word count). It is **not** part of the article's
@@ -58,13 +58,12 @@ should care. No hedging.
 
 ## Main points
 - 4-8 bullets. One bullet — one substantive claim or insight.
-- Cite the paragraph where the point is **made** as `[#N](URL)` —
-  use the citation template from the preamble; it already contains
-  the page URL.
 - Order by importance, not source order, unless the points are an
   explicit step-by-step argument that only makes sense in order.
 - Skip introductory throat-clearing, restatements, and the closing
   "thanks for reading" matter.
+- Do NOT add `[#N](URL)`-style paragraph citations — no clickable
+  anchors exist for this source.
 
 ## Quotes / examples
 Add ONLY when the article contains a memorable verbatim phrase or a
@@ -79,11 +78,6 @@ Add ONLY the subsections for which the article has material:
   (don't invent your own).
 - **Resources / links** — external tools, sites, books, papers
   mentioned in the body.
-
-## Read
-2-4 bullets pointing to the paragraphs most worth reading directly:
-`[#N](URL) — one-line reason`. Pick paragraphs where the author's
-framing or examples carry information the summary loses.
 
 ---
 Period: {period}
