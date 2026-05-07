@@ -180,7 +180,7 @@ def _default_select_instruction() -> str:
 _CHECKBOX_INSTRUCTION = "(↑/↓ navigate · Space toggle · Enter confirm · Esc cancel)"
 
 
-def confirm(message: str, *, default: bool = True) -> bool:
+def confirm(message: str, *, default: bool = True, erase: bool = False) -> bool:
     """Single-key yes/no.
 
     Pressing `y` / `Y` accepts immediately; `n` / `N` declines
@@ -189,6 +189,9 @@ def confirm(message: str, *, default: bool = True) -> bool:
     quietly returning a default — so the wizard can't continue past
     a prompt the user explicitly abandoned. Typer catches the
     exception at the CLI boundary and prints "Aborted!".
+
+    `erase=True` wipes the prompt line on completion (same plumbing
+    as :func:`select`) — used by the settings editor's reset confirm.
     """
     if not _can_interact():
         # Fallback path: typer.confirm. Preserves test patches that
@@ -201,7 +204,7 @@ def confirm(message: str, *, default: bool = True) -> bool:
             raise KeyboardInterrupt from e
 
     def _ask() -> bool:
-        q = questionary.confirm(message, default=default, auto_enter=True)
+        q = questionary.confirm(message, default=default, auto_enter=True, erase_when_done=erase)
         _bind_escape_cancel(q)
         return bool(q.unsafe_ask())
 
@@ -214,6 +217,7 @@ def select(
     choices: Sequence[Choice | _Separator],
     default_value: str | None = None,
     instruction: str | None = None,
+    erase: bool = False,
 ) -> str:
     """Arrow-key selector. Returns the chosen `value`.
 
@@ -222,6 +226,11 @@ def select(
     callers replace the default key-help line that questionary shows
     under the title. `choices` may include :func:`separator` items to
     insert visual dividers — they aren't selectable.
+
+    `erase=True` clears the entire prompt region (header + choices +
+    instruction) when the user picks. Used by the settings editor to
+    keep scrollback clean across many iterations; default off so other
+    call sites keep their record of "user picked X".
 
     Esc and Ctrl-C raise KeyboardInterrupt — same as
     :func:`confirm`. Nested menus that need a "back" navigation
@@ -262,6 +271,10 @@ def select(
             use_jk_keys=False,
             qmark="?",
             style=style,
+            # Forwarded to the underlying prompt_toolkit Application via
+            # questionary's `utils.used_kwargs(kwargs, Application.__init__)`
+            # filter — wipes the rendered prompt region when the user picks.
+            erase_when_done=erase,
         )
         # Drop the default-row "marked" state questionary auto-applies;
         # cursor position survives, Enter still returns the right value.
@@ -277,8 +290,11 @@ def select(
         raise KeyboardInterrupt
     # Replace questionary's full-title echo with a short label when the
     # picked row had a description trailer (the long version clutters
-    # scrollback). Skip in non-TTY: the fallback path didn't print one.
-    if _can_interact():
+    # scrollback). Skip in non-TTY (no echo to rewrite) and when
+    # `erase=True` (the whole prompt was wiped — there's no echo line
+    # above the cursor, so "go up one and clear" would clobber the row
+    # the menu was sitting on).
+    if _can_interact() and not erase:
         picked = next((c for c in choices if isinstance(c, Choice) and c.value == result), None)
         if picked is not None and picked.description:
             _echo_short_answer(message, picked.label)
@@ -333,13 +349,18 @@ def checkbox(
     return [v for v in result if isinstance(v, str)]
 
 
-def ask_text(message: str, *, default: str = "", password: bool = False) -> str:
+def ask_text(message: str, *, default: str = "", password: bool = False, erase: bool = False) -> str:
     """Free-form one-line text input.
 
     `password=True` hides the typed characters — used for API keys and
     2FA passwords. `default` pre-fills the line and is returned on a
     bare Enter. Esc and Ctrl-C raise KeyboardInterrupt — same as
     :func:`select` / :func:`confirm`.
+
+    `erase=True` clears the prompt + typed answer when the user submits
+    (forwarded as `erase_when_done=True` to prompt_toolkit's
+    `PromptSession` via questionary's `**kwargs` passthrough). Used by
+    the settings editor to keep scrollback clean.
     """
     if not _can_interact():
         try:
@@ -349,9 +370,9 @@ def ask_text(message: str, *, default: str = "", password: bool = False) -> str:
 
     def _ask() -> Any:
         q = (
-            questionary.password(message, default=default)
+            questionary.password(message, default=default, erase_when_done=erase)
             if password
-            else questionary.text(message, default=default)
+            else questionary.text(message, default=default, erase_when_done=erase)
         )
         _bind_escape_cancel(q)
         return q.unsafe_ask()

@@ -383,18 +383,32 @@ _presets_cache: dict[str, dict[str, Preset]] = {}
 def get_presets(language: str) -> dict[str, Preset]:
     """Return all presets available in the given language directory.
 
-    Caches per language. Raises if the language directory doesn't exist
-    (use the actual filesystem, not a fallback to another language —
-    each language is autonomous).
+    Caches per language. Falls back to ``presets/en/`` (with a warning
+    log) when the requested directory is absent — `compose_system_prompt`
+    injects an explicit OUTPUT LANGUAGE directive, so the LLM still
+    writes the analysis in `language` even though the preset bodies
+    were authored in English. The fallback is cached under the requested
+    key so subsequent calls are O(1). Raises only if `presets/en/`
+    itself is missing (broken install).
     """
     if language in _presets_cache:
         return _presets_cache[language]
     lang_dir = _language_dir(language)
     if not lang_dir.is_dir():
-        raise RuntimeError(
-            f"Preset directory not found for language {language!r}: {lang_dir}. "
-            f"Add presets there or set [locale] language to a directory that exists."
-        )
+        if language == "en":
+            raise RuntimeError(
+                f"Preset directory not found for language 'en': {lang_dir}. "
+                f"Reinstall the package or check your install."
+            )
+        try:
+            from unread.util.logging import get_logger
+
+            get_logger(__name__).warning("preset_dir_missing_falling_back_to_en", requested=language)
+        except Exception:
+            pass
+        out = get_presets("en")
+        _presets_cache[language] = out
+        return out
     out: dict[str, Preset] = {}
     for md in sorted(lang_dir.glob("*.md")):
         # Underscore-prefixed files are internal helpers (e.g. _base.md, _reduce.md).

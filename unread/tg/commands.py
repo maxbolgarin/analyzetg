@@ -107,6 +107,14 @@ async def cmd_init(*, scope: str = "full") -> None:
         reset_settings()
         settings = get_settings()
 
+    # Step 2b: Report language (LLM-output). Only on full-scope re-runs;
+    # skips when the user already picked one (so re-running `unread init`
+    # to add a sibling key isn't gated on this prompt). Empty stays
+    # empty — the runtime falls back to `locale.language` at analyze time.
+    if scope == "full" and await _run_report_language_step():
+        reset_settings()
+        settings = get_settings()
+
     # Step 3: Telegram credentials (skippable). Skip the prompt entirely
     # when an authorized session already exists — the prior install must
     # have had api_id/hash, and there's no need to ask again to re-auth.
@@ -198,6 +206,94 @@ def _run_folder_step() -> bool:
         return True
 
 
+async def _run_report_language_step() -> bool:
+    """Prompt for `locale.report_language` on first-run setup.
+
+    The LLM writes the analysis / answer in this language; an empty
+    value falls back to ``locale.language`` (the UI language) at
+    analyze time. Returns True iff a value was persisted (caller should
+    `reset_settings()` so the singleton picks it up). Skips silently
+    when a value is already saved — re-running `unread init` shouldn't
+    re-prompt for an already-answered question.
+    """
+    from unread.core.paths import default_data_path
+    from unread.i18n import LANGUAGE_NAMES
+    from unread.util.languages import (
+        POPULAR_CODES,
+        language_display_name,
+        normalize_language_code,
+    )
+    from unread.util.prompt import Choice, _can_interact, ask_text, select, separator
+
+    settings = get_settings()
+    if (settings.locale.report_language or "").strip():
+        return False
+    if not _can_interact():
+        # Non-TTY install (`unread init < /dev/null`, CI smoke test).
+        # Silently keep the empty-string default — runtime falls back
+        # to UI language. The user can `unread settings` later.
+        return False
+
+    ui_lang = (settings.locale.language or "en").lower()
+
+    console.print(
+        "\n[bold]Pick the language the AI writes analyses / answers in.[/]\n"
+        '[grey70]This is independent of the UI language. Pick "Skip" to follow '
+        "the UI language. You can change this any time in `unread settings`.[/]\n"
+    )
+
+    items: list = []
+    for code in POPULAR_CODES:
+        name = LANGUAGE_NAMES.get(code) or language_display_name(code)
+        marker = "  ★" if code == ui_lang else ""
+        items.append(Choice(value=code, label=f"{code:<4} — {name}{marker}"))
+    items.append(separator())
+    items.append(Choice(value="__custom__", label="Custom code…"))
+    items.append(Choice(value="__skip__", label=f"Skip (follow UI language: {ui_lang})"))
+
+    try:
+        picked = select(
+            "Report language",
+            choices=items,
+            default_value=ui_lang if ui_lang in POPULAR_CODES else "en",
+        )
+    except KeyboardInterrupt:
+        return False
+    if picked is None or picked == "__skip__":
+        console.print(f"[grey70]Following UI language: {ui_lang}[/]")
+        return False
+
+    chosen: str | None = None
+    if picked == "__custom__":
+        while True:
+            try:
+                raw = ask_text(
+                    "Enter ISO 639-1 code (e.g. pt, ja, zh) or English name",
+                    default="",
+                )
+            except KeyboardInterrupt:
+                return False
+            raw = (raw or "").strip()
+            if not raw:
+                console.print(f"[grey70]Following UI language: {ui_lang}[/]")
+                return False
+            code = normalize_language_code(raw)
+            if code is None:
+                console.print(f"[red]Not a valid language code: {raw!r}. Try again, or Esc to skip.[/]")
+                continue
+            chosen = code
+            break
+    else:
+        chosen = picked
+
+    assert chosen is not None
+    async with open_repo(default_data_path()) as repo:
+        await repo.set_app_setting("locale.report_language", chosen)
+    name = LANGUAGE_NAMES.get(chosen) or language_display_name(chosen)
+    console.print(f"[green]✓[/] Report language: {chosen} — {name}")
+    return True
+
+
 def _active_provider_has_key(settings) -> bool:  # type: ignore[no-untyped-def]
     """True iff the currently-selected AI provider has a usable API key.
 
@@ -205,7 +301,9 @@ def _active_provider_has_key(settings) -> bool:  # type: ignore[no-untyped-def]
     so this returns True as long as the provider is selected — the
     wizard's provider step is what writes the choice.
     """
-    name = (settings.ai.provider or "openai").strip().lower()
+    from unread.ai.providers import _resolve_provider_name
+
+    name = _resolve_provider_name(settings, "chat")
     if name == "openai":
         return bool(settings.openai.api_key)
     if name == "openrouter":
@@ -214,7 +312,7 @@ def _active_provider_has_key(settings) -> bool:  # type: ignore[no-untyped-def]
         return bool(settings.anthropic.api_key)
     if name == "google":
         return bool(settings.google.api_key)
-    # Local mode is "configured" once `ai.provider == "local"` is
+    # Local mode is "configured" once `ai.chat_provider == "local"` is
     # persisted — the base_url has a sensible default and most
     # servers don't enforce a key. Unknown provider names fall through
     # to False so the wizard re-prompts.
@@ -276,15 +374,17 @@ async def _run_provider_step() -> None:
     from unread.util.prompt import Choice, ask_text, confirm, select, separator
 
     console.print(
-        "\n[bold]Audio transcription (Whisper) is OpenAI-only.[/]\n"
-        "[grey70]The other providers handle chat + image / file analysis "
-        "(image support depends on the chosen model). You can pick OpenAI now "
-        "and switch later, or pick another and add an OpenAI key alongside via "
-        "`unread init` if you need transcription.[/]\n"
+        "\n[bold]Pick a default provider — applied to every slot (chat / filter / audio / image).[/]\n"
+        "[grey70]You can mix providers later (e.g. Anthropic for chat + OpenAI for audio) "
+        "via `unread settings` → Models. Audio is restricted to providers with a "
+        "Whisper-shape API: openai, openrouter, local — picking anthropic / google "
+        "here will snap the audio slot back to openai.[/]\n"
     )
 
+    from unread.ai.providers import _resolve_provider_name
+
     settings = get_settings()
-    current_provider = (settings.ai.provider or "openai").strip().lower()
+    current_provider = _resolve_provider_name(settings, "chat")
     has_key_now = _active_provider_has_key(settings)
 
     provider_choices: list = []
@@ -298,6 +398,21 @@ async def _run_provider_step() -> None:
         )
         provider_choices.append(separator())
     provider_choices.extend(Choice(name, name, hint) for _num, name, _key, _url, hint in _PROVIDER_CHOICES)
+    # Always present: a clean "configure AI later" exit. Without this,
+    # a fresh-install user with no key in mind has to commit to a
+    # provider name they may not even use — the seeded `ai.*_provider`
+    # rows then have to be unwound via `unread settings` before they
+    # can pick the real one. Skip leaves the slot keys empty so a
+    # later `.env` write or `unread settings` edit starts from a
+    # clean slate.
+    provider_choices.append(separator())
+    provider_choices.append(
+        Choice(
+            "__skip__",
+            "Skip — configure AI later via `unread settings`",
+            "leaves slot keys empty; analyze / ask will need at least one provider configured",
+        )
+    )
     chosen = select(
         "Which AI provider do you want to use?",
         choices=provider_choices,
@@ -306,13 +421,29 @@ async def _run_provider_step() -> None:
     if chosen == "__keep__":
         console.print(f"[grey70]Keeping current provider: {current_provider}.[/]")
         return
+    if chosen == "__skip__":
+        console.print(
+            "[grey70]Skipped — `analyze` / `ask` will need an AI key. "
+            "Run `unread settings` (or set `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / etc. "
+            "in `~/.unread/.env`) when you're ready.[/]"
+        )
+        return
     match = next((c for c in _PROVIDER_CHOICES if c[1] == chosen), None)
     if match is None:
         return  # defensive — select() guarantees we got a known value
     _num, provider_name, secret_key, info_url, _hint = match
 
     async with open_repo(settings.storage.data_path) as repo:
-        await repo.set_app_setting("ai.provider", provider_name)
+        # Seed all four per-slot provider keys with the picked value.
+        # Audio snaps to openai when the user picked anthropic/google
+        # (no Whisper-shape API there). The legacy `ai.provider` row
+        # is no longer written; `_migrate_legacy_ai_provider_sync`
+        # cleans up any leftover row at the next bootstrap.
+        for slot in ("chat", "filter", "audio", "vision"):
+            value = provider_name
+            if slot == "audio" and value not in {"openai", "openrouter", "local"}:
+                value = "openai"
+            await repo.set_app_setting(f"ai.{slot}_provider", value)
         if provider_name == "local":
             current = settings.local.base_url
             url_in = ask_text(
@@ -325,35 +456,37 @@ async def _run_provider_step() -> None:
             console.print("[green]✓[/] Local provider configured — no API key needed.")
             return
 
-        # If the picked provider already has a key stored, ask before
-        # overwriting it — common case when the user picked the same
-        # provider again just to look around.
-        existing_key = _provider_key_value(settings, provider_name)
-        if existing_key and not confirm(
-            f"{provider_name} already has a key. Replace it?",
-            default=False,
-        ):
-            console.print(f"[grey70]Kept existing {provider_name} key.[/]")
-            return
+    # If the picked provider already has a key stored, ask before
+    # overwriting it — common case when the user picked the same
+    # provider again just to look around.
+    existing_key = _provider_key_value(settings, provider_name)
+    if existing_key and not confirm(
+        f"{provider_name} already has a key. Replace it?",
+        default=False,
+    ):
+        console.print(f"[grey70]Kept existing {provider_name} key.[/]")
+        return
 
-        prompt_label = f"{provider_name} API key"
-        if info_url:
-            console.print(f"\n[bold]{prompt_label}[/] ([grey70]{info_url}[/])")
-        else:
-            console.print(f"\n[bold]{prompt_label}[/]")
+    prompt_label = f"{provider_name} API key"
+    if info_url:
+        console.print(f"\n[bold]{prompt_label}[/] ([grey70]{info_url}[/])")
+    else:
+        console.print(f"\n[bold]{prompt_label}[/]")
+    console.print(
+        "  [grey70]Press Enter to skip — `dump`, `describe`, `sync`, etc. still work without it.[/]"
+    )
+    raw_in = ask_text("Key", default="", password=True)
+    raw = (raw_in or "").strip()
+    if not raw:
         console.print(
-            "  [grey70]Press Enter to skip — `dump`, `describe`, `sync`, etc. still work without it.[/]"
+            "[grey70]Skipped — `analyze` / `ask` will require an AI key. "
+            "Re-run `unread init` to add one later.[/]"
         )
-        raw_in = ask_text("Key", default="", password=True)
-        raw = (raw_in or "").strip()
-        if not raw:
-            console.print(
-                "[grey70]Skipped — `analyze` / `ask` will require an AI key. "
-                "Re-run `unread init` to add one later.[/]"
-            )
-            return
-        assert secret_key is not None  # guaranteed by _PROVIDER_CHOICES
-        await repo.put_secrets({secret_key: raw})
+        return
+    assert secret_key is not None  # guaranteed by _PROVIDER_CHOICES
+    from unread.secrets import write_secrets
+
+    await write_secrets(settings, {secret_key: raw})
     console.print("[green]✓[/] Saved.")
 
     # Smoke test only for OpenAI (cheap `models.list()`). Other providers'
@@ -439,14 +572,18 @@ async def _run_telegram_creds_step() -> bool:
             console.print("[yellow]api_hash is required — try again, or Esc to bail.[/]")
 
     settings = get_settings()
-    async with open_repo(settings.storage.data_path) as repo:
-        await repo.put_secrets({"telegram.api_id": str(api_id), "telegram.api_hash": api_hash})
+    from unread.secrets import write_secrets
+
+    await write_secrets(
+        settings,
+        {"telegram.api_id": str(api_id), "telegram.api_hash": api_hash},
+    )
     console.print("[green]✓[/] Saved.")
     return True
 
 
 def _run_keychain_step() -> None:
-    """Move saved credentials from data.sqlite into the OS keychain.
+    """Move saved credentials into the OS keychain and flip the active backend.
 
     Keystore is the default storage. This step runs automatically at
     the end of every fresh init when the host has a working OS keychain
@@ -455,17 +592,26 @@ def _run_keychain_step() -> None:
       - we're not on a real TTY (tests, scripted invocations) — silently
         migrating non-interactively is surprising; the user can run
         `unread security set keystore` once they're at a real shell;
-      - the active backend is anything OTHER than ``db`` — migrating
-        from ``keychain`` is a no-op, and migrating from ``passphrase``
-        would copy ciphertext into the keychain as if it were
-        plaintext (the bug this guard prevents);
+      - the active backend is anything OTHER than ``db`` — flipping
+        from ``keychain`` is a no-op, and flipping from ``passphrase``
+        would silently demote encryption (use explicit
+        `unread security set keystore` for that);
       - the keychain backend is unavailable on this host (headless
         Linux without Secret Service, etc.) — secrets stay in the
-        plaintext DB as the only viable fallback;
-      - no slots are populated yet.
+        plaintext DB as the only viable fallback.
+
+    When slots are already populated, ``cmd_migrate`` moves them into
+    the keychain and flips the active flag in one step. When slots are
+    empty (e.g. user skipped both the AI-key and Telegram-creds steps),
+    we still flip the active flag to ``keychain`` so any future write
+    via :func:`unread.secrets.write_secrets` lands in the keychain
+    rather than the plaintext DB. Without this flip, an install that
+    later fills credentials via `unread settings` or a re-run of `tg
+    login` would silently keep the plaintext default.
     """
     from unread.secrets_backend import (
         BACKEND_DB,
+        BACKEND_KEYCHAIN,
         keychain_available,
         keychain_describe,
         read_active_backend_sync,
@@ -485,31 +631,43 @@ def _run_keychain_step() -> None:
         return
     if not keychain_available():
         return
-    # Probe for any populated secret. The function is sync and cheap,
-    # so don't open an aiosqlite connection just for the count.
+    # Probe for populated secrets. Sync + cheap; no aiosqlite needed.
     from unread.db.repo import read_data_db_secrets_sync
 
     rows = read_data_db_secrets_sync(db_path)
-    if not any((rows.get(k) or "") for k in rows):
+    has_populated = any((rows.get(k) or "") for k in rows)
+
+    if has_populated:
+        from unread.security.commands import cmd_migrate
+
+        console.print("\n[bold]Securing credentials in the system keychain…[/]")
+        console.print(
+            f"  [grey70]Default storage is {keychain_describe()} (encrypted at rest, "
+            "unlocked when you log in). Run `unread security set plain` to opt out.[/]"
+        )
+        try:
+            cmd_migrate(BACKEND_KEYCHAIN)
+        except typer.Exit:
+            # `cmd_migrate` already printed a useful error message
+            # before raising; swallow the Exit so the wizard finishes
+            # cleanly rather than aborting the user's whole setup over
+            # one keychain hiccup.
+            return
         return
 
-    from unread.secrets_backend import BACKEND_KEYCHAIN
-    from unread.security.commands import cmd_migrate
+    # No slots to migrate yet, but flip the active backend so the
+    # user's next credential write (via `unread settings`, a re-run of
+    # `tg login`, etc.) goes through the keychain. Without this, the
+    # status command would show "db" indefinitely on installs that
+    # skipped the credential prompts.
+    from unread.security.commands import _set_active_backend_sync
 
-    console.print("\n[bold]Securing credentials in the system keychain…[/]")
+    _set_active_backend_sync(db_path, BACKEND_KEYCHAIN)
     console.print(
-        f"  [grey70]Default storage is {keychain_describe()} (encrypted at rest, "
-        "unlocked when you log in). Run `unread security set plain` to opt out.[/]"
+        f"\n[grey70]Credential storage set to {keychain_describe()} — "
+        "future API keys will land in the OS keychain. "
+        "Run `unread security set plain` to opt out.[/]"
     )
-
-    try:
-        cmd_migrate(BACKEND_KEYCHAIN)
-    except typer.Exit:
-        # `cmd_migrate` already printed a useful error message before
-        # raising; swallow the Exit so the wizard finishes cleanly
-        # rather than aborting the user's whole setup over one
-        # keychain hiccup.
-        return
 
 
 async def _run_telethon_auth_step(settings, *, confirm_login: bool = False) -> None:  # type: ignore[no-untyped-def]
@@ -1031,22 +1189,31 @@ async def cmd_doctor() -> None:
         except Exception as e:
             _line(warn, "OpenAI API check failed", str(e)[:200])
 
-    # 7b. Active chat provider reachability. If the user picked
-    # Anthropic / Google / OpenRouter / local, ping that endpoint too.
-    # We don't burn an LLM call — just instantiate the provider, which
-    # validates the key + base URL via the SDK constructor.
-    chat_provider = (settings.ai.provider or "openai").lower()
-    if chat_provider != "openai":
-        try:
-            from unread.ai.providers import make_chat_provider
+    # 7b. Per-slot provider key check. Each of the four slots resolves
+    # to its own (provider, model); doctor reports whether the chosen
+    # provider has a usable key. Local needs no key (placeholder OK).
+    from unread.ai.providers import _resolve_provider_name
 
-            make_chat_provider(settings)
-            _line(ok, "chat provider configured", chat_provider)
-        except Exception as e:
+    def _slot_key_present(slot_provider: str) -> bool:
+        if slot_provider == "openai":
+            return bool(settings.openai.api_key)
+        if slot_provider == "openrouter":
+            return bool(settings.openrouter.api_key)
+        if slot_provider == "anthropic":
+            return bool(settings.anthropic.api_key)
+        if slot_provider == "google":
+            return bool(settings.google.api_key)
+        return slot_provider == "local"
+
+    for slot in ("chat", "filter", "audio", "vision"):
+        slot_provider = _resolve_provider_name(settings, slot)
+        if _slot_key_present(slot_provider):
+            _line(ok, f"{slot} slot", slot_provider)
+        else:
             _line(
-                fail,
-                f"chat provider {chat_provider!r} not configured",
-                str(e)[:200],
+                warn,
+                f"{slot} slot has no key",
+                f"provider={slot_provider}; run `unread settings` → API keys",
             )
 
     # 8. Presets

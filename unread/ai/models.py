@@ -329,6 +329,11 @@ _OPENROUTER_MODELS: tuple[ModelInfo, ...] = (
         context_window=1_000_000,
         max_output_tokens=8_192,
     ),
+    # Audio. OpenRouter exposes Whisper-class endpoints under the
+    # `openai/...` namespace; pricing mirrors the upstream provider.
+    # Useful for users running Anthropic / Google as their chat slot
+    # who still want OpenAI-quality transcription via OpenRouter's key.
+    ModelInfo("openai/whisper-1", "OpenRouter → Whisper v1", "audio", 0.006),
 )
 
 
@@ -350,6 +355,41 @@ _REGISTRY: dict[str, tuple[ModelInfo, ...]] = {
 }
 
 
+# IDs of chat-class models that also accept image input. The vision
+# picker folds these in alongside any `role="vision"` entries so users
+# of Anthropic / Google / OpenRouter can pick "claude-sonnet-4-6 for
+# image" without needing a parallel vision-only catalog entry.
+_VISION_CAPABLE_IDS: frozenset[str] = frozenset(
+    {
+        # OpenAI flagships (vision via chat completions image_url).
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-4o",
+        # Anthropic — every modern Claude accepts image blocks.
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        # Google — all Gemini 2.5 / 3.1 entries accept image parts.
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        # OpenRouter mirrors — vendor-prefixed.
+        "openai/gpt-5.5",
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5.4-nano",
+        "openai/gpt-4o-mini",
+        "anthropic/claude-opus-4-7",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-haiku-4-5",
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-flash-lite",
+    }
+)
+
+
 def models_for_provider(provider: str, *, role: str | None = None) -> list[ModelInfo]:
     """Return the catalog for `provider`, optionally filtered by role.
 
@@ -362,6 +402,12 @@ def models_for_provider(provider: str, *, role: str | None = None) -> list[Model
     pin a budget model to the chat slot. The reverse isn't true — when
     asking for filter models we hide flagships to keep the picker focused
     on cheap options.
+
+    For `role="vision"` we include the explicit `role="vision"` entry
+    (e.g. OpenAI's gpt-4o-mini) plus every chat-class model that's known
+    to accept image input via :data:`_VISION_CAPABLE_IDS`. This avoids
+    duplicating Anthropic / Google catalog entries just to expose them
+    under the vision picker.
     """
     pool = _REGISTRY.get(provider.strip().lower(), ())
     if role is None:
@@ -370,6 +416,8 @@ def models_for_provider(provider: str, *, role: str | None = None) -> list[Model
         return [m for m in pool if m.role in {"chat", "filter"}]
     if role == "filter":
         return [m for m in pool if m.role == "filter"]
+    if role == "vision":
+        return [m for m in pool if m.role == "vision" or m.id in _VISION_CAPABLE_IDS]
     return [m for m in pool if m.role == role]
 
 

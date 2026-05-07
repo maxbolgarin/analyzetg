@@ -93,6 +93,25 @@ def _resolve_system_prompt(language: str) -> str:
     return _SYSTEM_PROMPT.get(language, _SYSTEM_PROMPT["en"])
 
 
+def _chat_slot_provider_has_key(settings, provider: str) -> bool:  # type: ignore[no-untyped-def]
+    """True iff `provider` has a usable key for the chat slot.
+
+    Mirrors :func:`unread.cli._active_provider_credentials_present` for
+    the `ask` flow but takes the provider name as input so the same
+    helper can be used to gate other slots in tests.
+    """
+    name = (provider or "").strip().lower()
+    if name == "openai":
+        return bool(settings.openai.api_key)
+    if name == "openrouter":
+        return bool(settings.openrouter.api_key)
+    if name == "anthropic":
+        return bool(settings.anthropic.api_key)
+    if name == "google":
+        return bool(settings.google.api_key)
+    return name == "local"
+
+
 @asynccontextmanager
 async def _null_async_client():
     """Async no-op replacement for `tg_client(...)`.
@@ -243,15 +262,18 @@ async def cmd_ask(
     when the scope resolves to a single chat — folder / global scopes
     silently no-op since there's no single chat to mark.
     """
-    # Bail with a friendly banner before any retrieval / Telegram work
-    # if the OpenAI key is missing — `ask` always ends with an LLM call,
-    # so there's no value in doing the work first. Reads through the
-    # already-imported `get_settings` so test patches on this module's
-    # binding are honored.
-    if not get_settings().openai.api_key:
+    # Bail with a friendly banner if the chat slot's provider has no
+    # key — `ask` always ends with an LLM call. Embeddings have a
+    # separate gate further down (semantic retrieval degrades to
+    # keyword-only when the OpenAI key is missing).
+    from unread.ai.providers import _resolve_provider_name as _slot_provider
+
+    _ask_settings = get_settings()
+    _chat_slot_provider = _slot_provider(_ask_settings, "chat")
+    if not _chat_slot_provider_has_key(_ask_settings, _chat_slot_provider):
         from unread.cli import _print_first_run_banner
 
-        _print_first_run_banner("openai")
+        _print_first_run_banner("openai" if _chat_slot_provider == "openai" else "ai")
         raise typer.Exit(1)
 
     # `tg` is the magic ref token: route to the interactive picker wizard.
@@ -728,6 +750,17 @@ async def _run_single_turn(
     tokens = tokenize_question(question)
     candidate_limit = max(limit, ask_cfg.rerank_top_k) if rerank_on else limit
 
+    # Embeddings are OpenAI-only. When `--semantic` was requested but
+    # the OpenAI key is missing, degrade to keyword retrieval with a
+    # one-line warning — the answer still goes through whichever
+    # chat-slot provider the user configured (Anthropic, Gemini, …).
+    if semantic and not settings.openai.api_key:
+        console.print(
+            "[yellow]No OpenAI key — embeddings disabled. "
+            "Falling back to keyword retrieval; results may be less precise.[/]"
+        )
+        semantic = False
+
     if semantic:
         from openai import AsyncOpenAI
 
@@ -741,13 +774,6 @@ async def _run_single_turn(
                 "synced chat would be slow without an ANN index."
             )
             raise typer.Exit(2)
-        # Embeddings are OpenAI-only — same gate as `--build-index`.
-        if not settings.openai.api_key:
-            console.print(
-                "[yellow]Semantic retrieval (`ask --semantic`) needs an OpenAI key.[/] "
-                "Run `unread init` to add one (chat provider can stay non-OpenAI)."
-            )
-            raise typer.Exit(1)
         console.print(
             f"[grey70]→ Semantic retrieval[/] ({embed_model}; "
             f"pool={candidate_limit}"

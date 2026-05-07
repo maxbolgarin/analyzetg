@@ -158,6 +158,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Answer a question about your synced Telegram archive.",
         "ru": "Ответ на вопрос по синхронизированному архиву Telegram.",
     },
+    "cmd_prompt": {
+        "en": "Send a plain prompt to the configured AI provider (no retrieval, no archive context).",
+        "ru": "Отправить произвольный prompt в выбранного AI-провайдера (без поиска и контекста архива).",
+    },
     "cmd_dump": {
         "en": "Dump chat history to a file. Default window = messages since your Telegram read marker.",
         "ru": "Сохранение истории чата в файл. По умолчанию — сообщения после маркера прочтения.",
@@ -535,6 +539,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "(сбросить / следовать UI-языку)",
     },
     "settings_clear_autodetect": {"en": "(autodetect)", "ru": "(автоопределение)"},
+    "settings_lang_custom_choice": {
+        "en": "Custom code…",
+        "ru": "Свой код…",
+    },
+    "settings_lang_custom_prompt": {
+        "en": "Enter ISO 639-1 code (e.g. pt, ja, zh) or English name",
+        "ru": "Введите код ISO 639-1 (например, pt, ja, zh) или английское название",
+    },
+    "settings_lang_invalid": {
+        "en": "Not a valid language code: {raw}",
+        "ru": "Неверный код языка: {raw}",
+    },
+    "settings_lang_not_whisper": {
+        "en": "Note: {code} may not be supported by Whisper transcription.",
+        "ru": "Внимание: {code} может не поддерживаться Whisper.",
+    },
     "settings_state_on": {"en": "On", "ru": "Вкл"},
     "settings_state_off": {"en": "Off", "ru": "Выкл"},
     "settings_value_on": {"en": "on", "ru": "вкл"},
@@ -542,6 +562,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "settings_value_unset": {"en": "(unset)", "ru": "(не задано)"},
     "settings_value_follows_ui": {"en": "(follows UI)", "ru": "(следует UI)"},
     "settings_value_autodetect": {"en": "(autodetect)", "ru": "(автоопределение)"},
+    "settings_value_default": {
+        "en": "{value}  (default)",
+        "ru": "{value}  (по умолчанию)",
+    },
     "settings_int_prompt": {
         "en": "{label} [{desc}] — current: {current}. New value (blank = keep, 'q' = exit)",
         "ru": "{label} [{desc}] — текущее: {current}. Новое значение (пусто — оставить, 'q' — выход)",
@@ -573,9 +597,156 @@ _STRINGS: dict[str, dict[str, str]] = {
     # Setting categories
     "settings_cat_languages": {"en": "Languages", "ru": "Языки"},
     "settings_cat_models": {"en": "Models", "ru": "Модели"},
+    "settings_cat_api_keys": {"en": "API keys", "ru": "API-ключи"},
     "settings_cat_provider": {"en": "AI provider", "ru": "AI-провайдер"},
     "settings_cat_enrich": {"en": "Enrichment defaults", "ru": "Обогащение (по умолчанию)"},
     "settings_cat_analyze": {"en": "Analyze tuning", "ru": "Настройка анализа"},
+    "settings_cat_tuning_ai": {"en": "AI overrides", "ru": "AI: расширенные настройки"},
+    # Compound (provider, model) picker — two-step flow.
+    "settings_slot_step1_prefix": {
+        "en": "Step 1/2: pick a provider for the {slot} slot.",
+        "ru": "Шаг 1/2: выберите провайдера для слота {slot}.",
+    },
+    "settings_slot_use_default": {
+        "en": "(use provider's default model)",
+        "ru": "(использовать модель провайдера по умолчанию)",
+    },
+    "settings_slot_use_default_named": {
+        "en": "(use provider's default: {value})",
+        "ru": "(использовать значение по умолчанию: {value})",
+    },
+    # Live-fetch / reload action rows in the model picker.
+    "settings_fetch_models_row": {
+        "en": "🔄  Fetch model list from API",
+        "ru": "🔄  Получить список моделей из API",
+    },
+    "settings_reload_models_row": {
+        "en": "🔄  Reload model list from API",
+        "ru": "🔄  Обновить список моделей из API",
+    },
+    "settings_reload_running": {
+        "en": "→ Fetching model list from {provider}…",
+        "ru": "→ Запрашиваем список моделей у {provider}…",
+    },
+    "settings_reload_ok": {
+        "en": "✓ Got {n} model(s) from the API.",
+        "ru": "✓ Получено {n} модель(ей) из API.",
+    },
+    "settings_reload_empty": {
+        "en": "No additional models returned (no key, network error, or empty list). Using catalog only.",
+        "ru": "API не вернул дополнительных моделей (нет ключа, ошибка сети или пустой список). Используем каталог.",
+    },
+    "settings_reload_failed": {
+        "en": "Reload failed: {err}",
+        "ru": "Не удалось обновить список: {err}",
+    },
+    # Smoke-test prompts shown after a provider switch / key change.
+    "settings_smoke_running": {
+        "en": "→ Verifying {provider} (no tokens used)…",
+        "ru": "→ Проверяем {provider} (без расхода токенов)…",
+    },
+    "settings_smoke_ok": {
+        "en": "✓ {provider} reachable.",
+        "ru": "✓ {provider} доступен.",
+    },
+    "settings_smoke_fail": {
+        "en": "✗ {provider} verification failed: {err}",
+        "ru": "✗ Проверка {provider} провалена: {err}",
+    },
+    "settings_smoke_continue": {
+        "en": "Continue with this provider anyway?",
+        "ru": "Всё равно использовать этого провайдера?",
+    },
+    "settings_smoke_local_unreachable": {
+        "en": "✗ Local server not reachable at {url}: {err}",
+        "ru": "✗ Локальный сервер недоступен по {url}: {err}",
+    },
+    "settings_smoke_local_edit_q": {
+        "en": "Edit the local server URL now?",
+        "ru": "Изменить URL локального сервера сейчас?",
+    },
+    "settings_provider_no_key_prompt": {
+        "en": "{provider} has no API key stored. Enter it now (or skip).",
+        "ru": "Для {provider} нет API-ключа. Введите его (или пропустите).",
+    },
+    # API keys section — one row per keyed provider plus local URL.
+    "set_label_api_key_openai": {"en": "OpenAI API key", "ru": "API-ключ OpenAI"},
+    "set_desc_api_key_openai": {
+        "en": (
+            "Unlocks OpenAI for any of the four model slots. "
+            "Also required by `unread ask --semantic` (embeddings are OpenAI-only); "
+            "the answer step still uses whichever provider you set for the chat slot."
+        ),
+        "ru": (
+            "Открывает OpenAI для любого из четырёх слотов моделей. "
+            "Также нужен для `unread ask --semantic` (эмбеддинги — только OpenAI); "
+            "ответ при этом идёт через провайдера chat-слота."
+        ),
+    },
+    "set_label_api_key_openrouter": {"en": "OpenRouter API key", "ru": "API-ключ OpenRouter"},
+    "set_desc_api_key_openrouter": {
+        "en": (
+            "Multi-vendor proxy. Unlocks OpenRouter for any slot — chat + vision via "
+            "`anthropic/...` / `google/...` / `openai/...` aliases; one Whisper alias "
+            "for audio. Useful as a single-key fallback across providers."
+        ),
+        "ru": (
+            "Мульти-провайдерский прокси. Открывает OpenRouter для любого слота — chat + vision "
+            "через алиасы `anthropic/...` / `google/...` / `openai/...`; один Whisper-алиас для аудио. "
+            "Удобно как один ключ для всех провайдеров."
+        ),
+    },
+    "set_label_api_key_anthropic": {"en": "Anthropic API key", "ru": "API-ключ Anthropic"},
+    "set_desc_api_key_anthropic": {
+        "en": (
+            "Claude (Sonnet / Haiku / Opus). Pick Anthropic for the chat / filter / vision "
+            "slots — `unread <chat>`, `unread ask`, image enrichment all run through Claude. "
+            "No native audio (use OpenAI / OpenRouter for the audio slot)."
+        ),
+        "ru": (
+            "Claude (Sonnet / Haiku / Opus). Можно выбрать Anthropic для слотов chat / filter / vision — "
+            "`unread <чат>`, `unread ask`, обогащение картинок пойдут через Claude. "
+            "Аудио нет (для слота audio выбирайте OpenAI / OpenRouter)."
+        ),
+    },
+    "set_label_api_key_google": {"en": "Google API key", "ru": "API-ключ Google"},
+    "set_desc_api_key_google": {
+        "en": (
+            "Gemini (2.5 / 3.1). Pick Google for chat / filter / vision — `unread <chat>`, "
+            "`unread ask`, image enrichment all run through Gemini. "
+            "No Whisper-shape audio (use OpenAI / OpenRouter for the audio slot)."
+        ),
+        "ru": (
+            "Gemini (2.5 / 3.1). Можно выбрать Google для слотов chat / filter / vision — "
+            "`unread <чат>`, `unread ask`, обогащение картинок пойдут через Gemini. "
+            "Аудио в формате Whisper нет (для слота audio выбирайте OpenAI / OpenRouter)."
+        ),
+    },
+    "set_label_api_key_local": {
+        "en": "Local server URL (host:port)",
+        "ru": "Адрес локального сервера (host:port)",
+    },
+    "set_desc_api_key_local": {
+        "en": (
+            "Self-hosted OpenAI-compatible server (Ollama / LM Studio / vLLM). "
+            "No API key needed. Default: http://localhost:11434/v1. "
+            "The model you load on the server determines what works for each slot."
+        ),
+        "ru": (
+            "Self-hosted сервер с OpenAI-совместимым API (Ollama / LM Studio / vLLM). "
+            "API-ключ не нужен. По умолчанию: http://localhost:11434/v1. "
+            "Какие слоты заработают — зависит от загруженной на сервере модели."
+        ),
+    },
+    "settings_tuning_row": {
+        "en": "⚙  Tuning…   (enrichment, analyze, advanced overrides)",
+        "ru": "⚙  Тонкая настройка…   (обогащение, анализ, расширенные)",
+    },
+    "settings_back_row": {"en": "←  Back", "ru": "←  Назад"},
+    "settings_tuning_prompt": {
+        "en": "Tuning — pick a setting (ESC = back)",
+        "ru": "Тонкая настройка — выберите параметр (ESC = назад)",
+    },
     # Setting labels
     "set_label_locale_language": {"en": "UI language", "ru": "Язык интерфейса"},
     "set_label_locale_report_language": {
@@ -591,10 +762,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Подсказка языка для Whisper",
     },
     "set_label_chat_model": {
-        "en": "Analyze / ask flagship model",
-        "ru": "Флагманская модель для analyze / ask",
+        "en": "OpenAI default chat model (legacy)",
+        "ru": "OpenAI: chat-модель по умолчанию (legacy)",
     },
-    "set_label_filter_model": {"en": "Filter / cheap model", "ru": "Дешёвая / фильтр-модель"},
+    "set_label_filter_model": {
+        "en": "OpenAI default filter model (legacy)",
+        "ru": "OpenAI: фильтр-модель по умолчанию (legacy)",
+    },
     "set_label_audio_model": {"en": "Audio transcription model", "ru": "Модель транскрибации аудио"},
     "set_label_vision_model": {"en": "Vision (image) model", "ru": "Vision-модель (изображения)"},
     "set_label_voice": {"en": "Voice → transcript", "ru": "Голос → транскрипт"},
@@ -649,20 +823,36 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Пусто = автоопределение. Не зависит от UI / контентного языка.",
     },
     "set_desc_chat_model": {
-        "en": "Reduce-phase + single-pass + ask answer model.",
-        "ru": "Reduce-фаза + одно-проход + ответ ask.",
+        "en": "Legacy OpenAI-only chat model. Ignored unless the active provider is OpenAI; prefer Analyze model.",
+        "ru": "Legacy: только для OpenAI. Игнорируется при другом провайдере; предпочтительно Analyze model.",
     },
     "set_desc_filter_model": {
-        "en": "Map-phase + rerank + self-check + link/doc enrichers.",
-        "ru": "Map-фаза + rerank + self-check + обогатители ссылок/документов.",
+        "en": "Legacy OpenAI-only filter model. Ignored unless the active provider is OpenAI; prefer Filter model.",
+        "ru": "Legacy: только для OpenAI. Игнорируется при другом провайдере; предпочтительно Filter model.",
     },
     "set_desc_audio_model": {
-        "en": "Used by voice / videonote / video enrichers.",
-        "ru": "Используется обогатителями voice / videonote / video.",
+        "en": (
+            "Transcribes voice / video-notes / videos. "
+            "Used by `unread <chat>` (with `--enrich voice|videonote|video`), "
+            "`unread <youtube-url>` (transcript fallback), and `unread <audio|video file>`."
+        ),
+        "ru": (
+            "Транскрибирует голос / видеосообщения / видео. "
+            "Используется в `unread <чат>` (с `--enrich voice|videonote|video`), "
+            "`unread <youtube-url>` (фолбэк транскрипта) и `unread <аудио|видео-файл>`."
+        ),
     },
     "set_desc_vision_model": {
-        "en": "Used when image enrichment is enabled.",
-        "ru": "Используется при включённом обогащении изображений.",
+        "en": (
+            "Describes images attached to messages. "
+            "Used by `unread <chat>` and `unread ask` (with `--enrich image`), "
+            "and by `unread <image-file>`."
+        ),
+        "ru": (
+            "Описывает изображения из сообщений. "
+            "Используется в `unread <чат>` и `unread ask` (с `--enrich image`), "
+            "а также в `unread <файл-картинки>`."
+        ),
     },
     "set_desc_enrich_default": {
         "en": "Default for `--enrich`.",
@@ -700,26 +890,110 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "openai | openrouter | anthropic | google | local. Each provider's key lives in its own block.",
         "ru": "openai | openrouter | anthropic | google | local. Ключ каждого провайдера хранится отдельно.",
     },
+    "set_label_ai_api_key": {
+        "en": "API key (active provider)",
+        "ru": "API-ключ (активного провайдера)",
+    },
+    "set_desc_ai_api_key": {
+        "en": "Set / update / delete the API key for the active provider.",
+        "ru": "Задать / обновить / удалить API-ключ активного провайдера.",
+    },
+    # Replaces the API-key row when the active provider is `local`.
+    "set_label_local_base_url": {
+        "en": "Local server URL (host:port)",
+        "ru": "Адрес локального сервера (host:port)",
+    },
+    "set_desc_local_base_url": {
+        "en": "Self-hosted server URL (Ollama / LM Studio / vLLM). Default: http://localhost:11434/v1",
+        "ru": "URL self-hosted сервера (Ollama / LM Studio / vLLM). По умолчанию: http://localhost:11434/v1",
+    },
+    "settings_local_base_url_prompt": {
+        "en": "Local server URL (current: {current}, blank to revert to default)",
+        "ru": "URL локального сервера (текущий: {current}, пусто = сбросить)",
+    },
+    "settings_local_base_url_saved": {
+        "en": "✓ Saved local.base_url = {url}",
+        "ru": "✓ Сохранено local.base_url = {url}",
+    },
+    "settings_local_base_url_cleared": {
+        "en": "✓ Cleared local.base_url override (reverted to default).",
+        "ru": "✓ Переопределение local.base_url удалено (сброшено к значению по умолчанию).",
+    },
     "set_label_ai_chat_model": {
-        "en": "Chat model override",
-        "ru": "Переопределение chat-модели",
+        "en": "Analyze model",
+        "ru": "Модель analyze",
     },
     "set_desc_ai_chat_model": {
-        "en": "Empty = each provider's default. Use to pin a specific model on the active provider.",
-        "ru": "Пусто = модель по умолчанию провайдера. Используйте, чтобы зафиксировать конкретную модель.",
+        "en": (
+            "Flagship model — the most capable / most expensive call per run. "
+            "Used by `unread <chat>` (final summary), `unread ask <chat> <q>` (answer), "
+            "`unread chats run`, and `unread <youtube-url|web-url|file>`."
+        ),
+        "ru": (
+            "Флагманская модель — самый ёмкий и дорогой вызов на запуск. "
+            "Используется в `unread <чат>` (итоговое резюме), `unread ask <чат> <вопрос>` (ответ), "
+            "`unread chats run` и `unread <youtube-url|веб-url|файл>`."
+        ),
     },
     "set_label_ai_filter_model": {
-        "en": "Filter / cheap-model override",
-        "ru": "Переопределение фильтр-модели",
+        "en": "Filter model",
+        "ru": "Фильтр-модель",
     },
     "set_desc_ai_filter_model": {
-        "en": "Empty = each provider's default cheap model. Used by the map / rerank / enricher cheap-passes.",
-        "ru": "Пусто = дешёвая модель провайдера по умолчанию. Используется для map / rerank / обогащений.",
+        "en": (
+            "Cheap, called many times per run. "
+            "Used by `unread <chat>` (map / pre-filter pass on long chats), "
+            "`unread ask` (rerank candidates before the answer call), "
+            "and the link / doc enrichers."
+        ),
+        "ru": (
+            "Дешёвая модель, вызывается много раз за запуск. "
+            "Используется в `unread <чат>` (map / предфильтр в длинных чатах), "
+            "`unread ask` (rerank кандидатов перед ответом) "
+            "и обогатителями ссылок / документов."
+        ),
     },
     "set_label_ai_base_url": {"en": "AI base URL override", "ru": "Переопределение AI base URL"},
     "set_desc_ai_base_url": {
         "en": "Point the active provider at a private gateway / proxy. Empty = SDK default.",
         "ru": "Перенаправить активного провайдера на приватный шлюз / прокси. Пусто = по умолчанию SDK.",
+    },
+    # Inline API-key editor that runs after the provider picker.
+    "settings_provider_key_prompt": {
+        "en": "{provider} API key",
+        "ru": "API-ключ {provider}",
+    },
+    "settings_provider_key_set": {
+        "en": "Stored {provider} key: {masked}",
+        "ru": "Сохранённый ключ {provider}: {masked}",
+    },
+    "settings_provider_key_unset": {
+        "en": "No API key stored for {provider}.",
+        "ru": "API-ключ для {provider} не задан.",
+    },
+    "settings_provider_key_update": {"en": "Update API key", "ru": "Обновить ключ"},
+    "settings_provider_key_delete": {"en": "Delete API key", "ru": "Удалить ключ"},
+    "settings_provider_key_set_now": {"en": "Set API key now", "ru": "Задать ключ сейчас"},
+    "settings_provider_key_skip": {"en": "Skip", "ru": "Пропустить"},
+    "settings_provider_key_input": {
+        "en": "Paste {provider} API key (input hidden)",
+        "ru": "Вставьте API-ключ {provider} (ввод скрыт)",
+    },
+    "settings_provider_key_empty": {
+        "en": "Empty input — no changes saved.",
+        "ru": "Пустой ввод — изменения не сохранены.",
+    },
+    "settings_provider_key_saved": {
+        "en": "✓ Saved {provider} API key.",
+        "ru": "✓ Ключ {provider} сохранён.",
+    },
+    "settings_provider_key_updated": {
+        "en": "✓ Updated {provider} API key.",
+        "ru": "✓ Ключ {provider} обновлён.",
+    },
+    "settings_provider_key_deleted": {
+        "en": "✓ Deleted {provider} API key.",
+        "ru": "✓ Ключ {provider} удалён.",
     },
     # ---- Wizard banner / tips ------------------------------------------
     "wiz_banner": {
@@ -2151,8 +2425,25 @@ LANGUAGE_NAMES: dict[str, str] = {
 
 
 def language_name(code: str) -> str:
-    """Human-readable name for an ISO code; falls back to a Title-cased code."""
-    return LANGUAGE_NAMES.get(code.lower(), code.title() if code else "English")
+    """Human-readable name for an ISO code.
+
+    Lookup order: the curated `LANGUAGE_NAMES` table → the full
+    ISO 639-1 catalog in `unread.util.languages` → a Title-cased copy
+    of the input code as a last-resort fallback.
+    """
+    if not code:
+        return "English"
+    key = code.lower()
+    if key in LANGUAGE_NAMES:
+        return LANGUAGE_NAMES[key]
+    try:
+        from unread.util.languages import ISO_639_1
+
+        if key in ISO_639_1:
+            return ISO_639_1[key]
+    except Exception:
+        pass
+    return code.title()
 
 
 def t(key: str, lang: str | None = None) -> str:

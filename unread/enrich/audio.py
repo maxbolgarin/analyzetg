@@ -2,7 +2,9 @@
 
 Downloads the media via existing `media.download` utilities, transcodes to
 OpenAI-compatible mp3 (for video/videonote) via ffmpeg, and transcribes via
-the OpenAI Audio API. Results cache in `media_enrichments(kind='transcript')`
+the audio slot's resolved provider (`settings.ai.audio_provider` —
+openai / openrouter / local; capability filter snaps anthropic + google
+back to openai). Results cache in `media_enrichments(kind='transcript')`
 keyed by Telegram's `document_id` so the same audio forwarded across chats
 is transcribed once.
 """
@@ -16,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
+from unread.ai.providers import ProviderUnavailableError, make_audio_client, resolve_audio
 from unread.config import get_settings
 from unread.db.repo import Repo
 from unread.enrich.base import EnrichResult
@@ -37,17 +40,27 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-def _openai_client() -> AsyncOpenAI:
+def _audio_client_or_none() -> tuple[str, AsyncOpenAI] | None:
+    """Resolve the audio slot's provider + construct its client.
+
+    Returns ``(provider, client)`` on success, or ``None`` when the
+    resolved provider has no key configured. Logs a one-line warning
+    in the no-key case so the analyze run keeps going for text-only
+    messages instead of crashing.
+    """
     s = get_settings()
-    return AsyncOpenAI(api_key=s.openai.api_key, timeout=s.openai.request_timeout_sec)
-
-
-def _openai_key_present() -> bool:
-    """Audio transcription is OpenAI-only (Whisper). Multi-provider installs
-    that picked Anthropic / Google still need an OpenAI key for this — we
-    skip with a one-line warning when it's missing rather than failing
-    the whole analyze run."""
-    return bool(get_settings().openai.api_key)
+    provider, _model = resolve_audio(s)
+    try:
+        client = make_audio_client(provider, s)
+    except ProviderUnavailableError as e:
+        log.warning(
+            "enrich.audio.skipped_no_key",
+            provider=provider,
+            err=str(e),
+            hint="run `unread settings` and set the audio slot's API key",
+        )
+        return None
+    return provider, client
 
 
 @retry_on_429()
@@ -96,17 +109,13 @@ async def enrich_audio(
     if msg.media_doc_id is None or msg.media_type is None:
         return None
 
-    # Whisper requires an OpenAI key regardless of which chat provider
-    # is active. Skip with a clear warning so the analyze pipeline keeps
-    # going for the text-only messages instead of crashing the whole run.
-    if not _openai_key_present():
-        log.warning(
-            "enrich.audio.skipped_no_openai_key",
-            chat_id=msg.chat_id,
-            msg_id=msg.msg_id,
-            hint="run `unread login` and add an OpenAI key (chat provider can stay non-OpenAI)",
-        )
+    # Resolve the audio slot's provider + construct its client. Skip
+    # with a one-line warning when the resolved provider has no key —
+    # the analyze pipeline keeps going for text-only messages.
+    audio_resolved = _audio_client_or_none()
+    if audio_resolved is None:
         return None
+    audio_provider, oai = audio_resolved
 
     cached = await repo.get_media_enrichment(msg.media_doc_id, "transcript")
     if cached:
@@ -117,7 +126,7 @@ async def enrich_audio(
         msg.transcript_model = used_model
         return EnrichResult(kind="transcript", content=content, model=used_model, cache_hit=True)
 
-    used_model = model or settings.openai.audio_model_default
+    used_model = model or resolve_audio(settings)[1]
     # Empty string in config also means "autodetect" — normalize to None so
     # _transcribe_file omits the language param entirely.
     cfg_lang = settings.openai.audio_language or None
@@ -148,9 +157,16 @@ async def enrich_audio(
             )
             return None
         produced.append(downloaded)
-        # gpt-4o-mini-transcribe / gpt-4o-transcribe reject opus voice
-        # files; force the transcoder to re-encode them as mp3 first.
-        prefer_mp3 = used_model in {"gpt-4o-mini-transcribe", "gpt-4o-transcribe"}
+        # gpt-4o-mini-transcribe / gpt-4o-transcribe / whisper-1 reject
+        # opus voice files; force the transcoder to re-encode them as
+        # mp3 first. The OpenRouter `openai/whisper-1` alias goes
+        # through the same OpenAI Whisper backend, so it's covered too.
+        prefer_mp3 = used_model in {
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe",
+            "whisper-1",
+            "openai/whisper-1",
+        }
         try:
             parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir, prefer_mp3=prefer_mp3)
         except FfmpegMissing as e:
@@ -170,7 +186,6 @@ async def enrich_audio(
             return None
         produced.extend(p for p in parts if p != downloaded)
 
-        oai = _openai_client()
         texts: list[str] = []
         for part in parts:
             text = await _transcribe_file(oai, part, used_model, used_lang)
@@ -205,11 +220,13 @@ async def enrich_audio(
                 "chat_id": msg.chat_id,
                 "msg_id": msg.msg_id,
                 "msg_date": msg.date.isoformat() if msg.date else None,
+                "provider": audio_provider,
             },
         )
         log.info(
-            "openai.audio",
+            "audio.transcribe",
             phase=f"enrich_{msg.media_type}",
+            provider=audio_provider,
             model=used_model,
             seconds=duration,
             cost=float(cost or 0.0),

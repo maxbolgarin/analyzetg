@@ -233,32 +233,42 @@ def extract_text_from_bytes(data: bytes, label: str = "stdin") -> ExtractResult:
 
 
 async def extract_audio(path: Path) -> ExtractResult:
-    """Transcribe an audio file via Whisper.
+    """Transcribe an audio file via the audio slot's resolved provider.
 
     Reuses `enrich/audio.py`'s `_transcribe_file` and
     `media/transcode.py:transcode_for_openai` (so chunking + format
     conversion stay consistent with the Telegram voice path). Raises
-    `RuntimeError` with a friendly message when the OpenAI key is
-    missing — Whisper has no non-OpenAI fallback in unread.
+    `RuntimeError` with a friendly message when the resolved provider
+    has no key configured.
     """
-    from openai import AsyncOpenAI
-
+    from unread.ai.providers import (
+        ProviderUnavailableError as _ProviderUnavailableError,
+    )
+    from unread.ai.providers import (
+        make_audio_client as _make_audio_client,
+    )
+    from unread.ai.providers import (
+        resolve_audio as _resolve_audio,
+    )
     from unread.config import get_settings
     from unread.enrich.audio import _transcribe_file
     from unread.media.download import transcode_for_openai
 
     settings = get_settings()
-    if not settings.openai.api_key:
-        raise RuntimeError(_t("error_audio_no_openai"))
+    audio_provider, audio_model = _resolve_audio(settings)
+    try:
+        oai = _make_audio_client(audio_provider, settings)
+    except _ProviderUnavailableError as e:
+        if audio_provider == "openai":
+            raise RuntimeError(_t("error_audio_no_openai")) from e
+        raise RuntimeError(str(e)) from e
 
     tmp_dir = settings.media.tmp_dir
     from unread.util.fsmode import ensure_private_dir
 
     ensure_private_dir(tmp_dir)
     parts = await transcode_for_openai(path, "voice", tmp_dir)
-    audio_model = settings.openai.audio_model_default
     audio_lang = settings.openai.audio_language or None
-    oai = AsyncOpenAI(api_key=settings.openai.api_key, timeout=settings.openai.request_timeout_sec)
     pieces: list[str] = []
     for part in parts:
         text = await _transcribe_file(oai, part, audio_model, audio_lang)
@@ -266,35 +276,48 @@ async def extract_audio(path: Path) -> ExtractResult:
     text = "\n".join(p for p in pieces if p)
     if not text:
         raise ValueError(_t("error_audio_silent"))
-    return ExtractResult(text=text, extra={"audio_model": audio_model, "chars": len(text)})
+    return ExtractResult(
+        text=text,
+        extra={"audio_provider": audio_provider, "audio_model": audio_model, "chars": len(text)},
+    )
 
 
 async def extract_video(path: Path) -> ExtractResult:
-    """Transcribe a video file via ffmpeg → Whisper.
+    """Transcribe a video file via ffmpeg → audio slot's resolved provider.
 
     `media.transcode.transcode_for_openai` already handles the
     extract-audio step when given media_type="video". Result shape
     matches :func:`extract_audio` so the caller can treat them
     interchangeably.
     """
-    from openai import AsyncOpenAI
-
+    from unread.ai.providers import (
+        ProviderUnavailableError as _ProviderUnavailableError,
+    )
+    from unread.ai.providers import (
+        make_audio_client as _make_audio_client,
+    )
+    from unread.ai.providers import (
+        resolve_audio as _resolve_audio,
+    )
     from unread.config import get_settings
     from unread.enrich.audio import _transcribe_file
     from unread.media.download import transcode_for_openai
 
     settings = get_settings()
-    if not settings.openai.api_key:
-        raise RuntimeError(_t("error_video_no_openai"))
+    audio_provider, audio_model = _resolve_audio(settings)
+    try:
+        oai = _make_audio_client(audio_provider, settings)
+    except _ProviderUnavailableError as e:
+        if audio_provider == "openai":
+            raise RuntimeError(_t("error_video_no_openai")) from e
+        raise RuntimeError(str(e)) from e
 
     tmp_dir = settings.media.tmp_dir
     from unread.util.fsmode import ensure_private_dir
 
     ensure_private_dir(tmp_dir)
     parts = await transcode_for_openai(path, "video", tmp_dir)
-    audio_model = settings.openai.audio_model_default
     audio_lang = settings.openai.audio_language or None
-    oai = AsyncOpenAI(api_key=settings.openai.api_key, timeout=settings.openai.request_timeout_sec)
     pieces: list[str] = []
     for part in parts:
         text = await _transcribe_file(oai, part, audio_model, audio_lang)
@@ -302,27 +325,38 @@ async def extract_video(path: Path) -> ExtractResult:
     text = "\n".join(p for p in pieces if p)
     if not text:
         raise ValueError(_t("error_video_silent"))
-    return ExtractResult(text=text, extra={"audio_model": audio_model, "chars": len(text)})
+    return ExtractResult(
+        text=text,
+        extra={"audio_provider": audio_provider, "audio_model": audio_model, "chars": len(text)},
+    )
 
 
 async def extract_image(path: Path) -> ExtractResult:
-    """Describe an image via the vision model.
+    """Describe an image via the vision slot's resolved provider.
 
-    Reuses `enrich/image.py:_vision_complete` so the prompt + model
-    selection match the Telegram-photo enrichment path. The
-    description is the body fed to the LLM; analyze produces a
-    summary of the image content as if it were a text document.
+    Routes through the same vision adapter that enriches Telegram
+    photos so the prompt + model + provider selection stay consistent
+    across input sources. The description is the body fed to the LLM;
+    analyze produces a summary as if the image were a text document.
     """
-    import base64
-
-    from openai import AsyncOpenAI
-
+    from unread.ai.providers import (
+        ProviderUnavailableError as _ProviderUnavailableError,
+    )
+    from unread.ai.providers import (
+        resolve_vision as _resolve_vision,
+    )
+    from unread.ai.vision_provider import make_vision_provider
     from unread.config import get_settings
-    from unread.enrich.image import _mime_from_path, _resolve_prompts, _vision_complete
+    from unread.enrich.image import _mime_from_path, _resolve_prompts
 
     settings = get_settings()
-    if not settings.openai.api_key:
-        raise RuntimeError(_t("error_image_no_openai"))
+    vision_provider, model = _resolve_vision(settings)
+    try:
+        adapter = make_vision_provider(vision_provider, settings)
+    except _ProviderUnavailableError as e:
+        if vision_provider == "openai":
+            raise RuntimeError(_t("error_image_no_openai")) from e
+        raise RuntimeError(str(e)) from e
 
     # Image-description prompt is fed to the LLM; pick the report language
     # so the description matches the rest of the analysis output.
@@ -330,21 +364,20 @@ async def extract_image(path: Path) -> ExtractResult:
     sys_prompt, user_prompt = _resolve_prompts(lang)
     mime = _mime_from_path(path)
     with path.open("rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            ],
-        },
-    ]
-    oai = AsyncOpenAI(api_key=settings.openai.api_key, timeout=settings.openai.request_timeout_sec)
-    model = settings.enrich.vision_model
-    resp = await _vision_complete(oai, model, messages)
-    description = (resp.choices[0].message.content or "").strip()
+        image_bytes = f.read()
+    result = await adapter.describe_image(
+        model=model,
+        image_bytes=image_bytes,
+        mime_type=mime,
+        system_prompt=sys_prompt,
+        user_prompt=user_prompt,
+        max_tokens=400,
+        temperature=0.2,
+    )
+    description = result.text
     if not description:
         raise ValueError(_t("error_image_empty"))
-    return ExtractResult(text=description, extra={"vision_model": model, "chars": len(description)})
+    return ExtractResult(
+        text=description,
+        extra={"vision_provider": vision_provider, "vision_model": model, "chars": len(description)},
+    )

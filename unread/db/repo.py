@@ -2660,19 +2660,111 @@ def _apply_one_override(settings, key: str, value: str) -> None:
             return
         settings.analyze.plain_citations = b
         return
-    # AI provider routing — strings, empty value resets to default.
+    # AI per-slot routing. The umbrella `ai.provider` is deprecated —
+    # `_migrate_legacy_ai_provider` rewrites the row into the four
+    # `*_provider` keys at bootstrap, but for one cycle we still tolerate
+    # a manually-written `ai.provider` row (or one left over from an
+    # older binary) by mirroring it onto every slot that's still empty.
     if key == "ai.provider":
         if value:
             settings.ai.provider = value
+            for slot in ("chat", "filter", "audio", "vision"):
+                attr = f"{slot}_provider"
+                if not getattr(settings.ai, attr, ""):
+                    snap = value
+                    if slot == "audio" and snap not in {"openai", "openrouter", "local"}:
+                        snap = "openai"
+                    setattr(settings.ai, attr, snap)
         return
-    if key in {"ai.base_url", "ai.chat_model", "ai.filter_model"}:
-        attr = key.split(".", 1)[1]
-        setattr(settings.ai, attr, value)
+    if key in {
+        "ai.base_url",
+        "ai.chat_provider",
+        "ai.chat_model",
+        "ai.filter_provider",
+        "ai.filter_model",
+        "ai.audio_provider",
+        "ai.audio_model",
+        "ai.vision_provider",
+        "ai.vision_model",
+    }:
+        setattr(settings.ai, key.split(".", 1)[1], value or "")
         return
     if key == "local.base_url":
         if value:
             settings.local.base_url = value
         return
+
+
+def _migrate_legacy_ai_provider_sync(db_path: Path) -> None:
+    """One-shot rewrite of the deprecated ``ai.provider`` row.
+
+    The umbrella ``ai.provider`` knob has been split into four per-slot
+    keys (``ai.chat_provider``, ``ai.filter_provider``,
+    ``ai.audio_provider``, ``ai.vision_provider``). At first read after
+    the upgrade we copy the legacy value into every slot whose key
+    isn't already set, then delete the legacy row so the migration
+    never runs again.
+
+    Idempotent and defensive — every sqlite error degrades to "skip
+    migration"; the worst-case is the legacy row sticking around and
+    `_apply_one_override("ai.provider", ...)` mirroring it onto empty
+    slot fields each bootstrap (correct, just less tidy).
+
+    Audio capability snap: anthropic / google → openai (those providers
+    have no Whisper-shape API).
+    """
+    import sqlite3
+
+    if not db_path.is_file():
+        return
+    try:
+        absolute = db_path.resolve()
+        conn = sqlite3.connect(absolute, timeout=1.0)
+    except sqlite3.Error:
+        return
+    try:
+        cur = conn.execute(
+            "SELECT key, value FROM app_settings "
+            "WHERE key IN (?, ?, ?, ?, ?)",
+            (
+                "ai.provider",
+                "ai.chat_provider",
+                "ai.filter_provider",
+                "ai.audio_provider",
+                "ai.vision_provider",
+            ),
+        )
+        rows = dict(cur.fetchall())
+    except sqlite3.Error:
+        conn.close()
+        return
+    legacy = rows.get("ai.provider", "").strip()
+    if not legacy:
+        conn.close()
+        return
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for slot in ("chat", "filter", "audio", "vision"):
+            target_key = f"ai.{slot}_provider"
+            if rows.get(target_key, ""):
+                continue
+            value = legacy
+            if slot == "audio" and value not in {"openai", "openrouter", "local"}:
+                value = "openai"
+            now_iso = _utcnow()
+            conn.execute(
+                "INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (target_key, value, now_iso),
+            )
+        conn.execute("DELETE FROM app_settings WHERE key = 'ai.provider'")
+        conn.commit()
+    except sqlite3.Error:
+        with __import__("contextlib").suppress(sqlite3.Error):
+            conn.rollback()
+    finally:
+        conn.close()
 
 
 def apply_db_overrides_sync(settings, db_path: Path | str | None = None) -> None:
@@ -2693,6 +2785,10 @@ def apply_db_overrides_sync(settings, db_path: Path | str | None = None) -> None
     target = Path(db_path) if db_path is not None else Path(settings.storage.data_path)
     if not target.is_file():
         return
+    # One-shot rewrite of the deprecated `ai.provider` row before the
+    # read pass. After this call the legacy row is gone and the four
+    # `ai.<slot>_provider` rows reflect the migrated value.
+    _migrate_legacy_ai_provider_sync(target)
     try:
         # `mode=ro` opens read-only without creating the file; relative
         # paths inside `file:` URIs don't resolve against cwd, so go
@@ -2757,6 +2853,11 @@ async def _apply_db_overrides(repo: Repo) -> None:
     rows produces the same settings. Settings the user hasn't saved are
     untouched (config.toml / defaults still win).
     """
+    # Run the legacy `ai.provider` rewrite before the read pass. Sync
+    # call is fine — the migration is a single transaction with a 1 s
+    # timeout, safe to drive from inside an event loop. Once it runs
+    # once for an install, subsequent calls return immediately.
+    _migrate_legacy_ai_provider_sync(Path(repo._path))
     try:
         rows = await repo.get_all_app_settings()
     except Exception:

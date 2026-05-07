@@ -58,11 +58,23 @@ OVERRIDE_KEYS: tuple[str, ...] = (
     "openai.filter_model_default",
     "openai.audio_model_default",
     "enrich.vision_model",
-    # Chat-provider routing (multi-provider support)
+    # AI routing — per-slot (provider, model). Each slot is independent:
+    # analyze + filter + audio + vision can each pick its own provider.
+    # `ai.provider` is the legacy umbrella key — kept on the allowlist
+    # for one cycle so a fresh install can still read a row written by
+    # an older binary; `db.repo._migrate_legacy_ai_provider` copies its
+    # value into the four `*_provider` keys at bootstrap and deletes
+    # the row. Stop writing it from new code.
     "ai.provider",
     "ai.base_url",
+    "ai.chat_provider",
     "ai.chat_model",
+    "ai.filter_provider",
     "ai.filter_model",
+    "ai.audio_provider",
+    "ai.audio_model",
+    "ai.vision_provider",
+    "ai.vision_model",
     "local.base_url",
     # Enrichment defaults (booleans persisted as "0"/"1")
     "enrich.voice",

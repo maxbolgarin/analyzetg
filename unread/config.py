@@ -56,23 +56,49 @@ class OpenAICfg(_StrictCfg):
 
 
 class AICfg(_StrictCfg):
-    """Primary chat-completion provider routing.
+    """Per-slot AI routing.
 
-    `provider` is the single switch that selects which adapter
-    `chat_complete()` dispatches to. The OpenAI key still lives in
-    `[openai]` (back-compat) and continues to back capabilities the
-    other providers can't supply (Whisper transcription, embeddings,
-    vision). Per-provider keys for the four alternative providers
-    live in their own blocks below.
+    Each capability slot — analyze (chat), filter (cheap-pass),
+    audio (transcription), vision (image understanding) — has its own
+    `(provider, model)` pair. Resolution order for a slot's effective
+    model: `ai.<slot>_model` (explicit) → legacy `openai.<slot>_default`
+    if the slot's provider is openai → provider class default.
 
-    `base_url` and `chat_model` / `filter_model` are optional
-    overrides — when empty, each provider supplies its own default.
+    The `provider` field is **deprecated** — kept only because some
+    legacy config readers still touch it. The on-disk migration in
+    `db.repo._migrate_legacy_ai_provider` copies its value into all
+    four `*_provider` keys on first read, then deletes the row. New
+    code must read `chat_provider` / `filter_provider` / `audio_provider`
+    / `vision_provider` directly.
+
+    Audio capability filter: `audio_provider` snaps to `openai` when
+    set to a provider with no Whisper-shape API (anthropic, google) —
+    the UI prevents the bad pick, but defense-in-depth at the resolver
+    means a hand-edited config still works.
+
+    `base_url` is a generic OpenAI-compatible-endpoint override.
+    `base_url_trusted` gates the cleartext-key safety check at send
+    time (see :class:`unread.security.api_request`).
     """
 
-    provider: str = "openai"  # openai | openrouter | anthropic | google | local
-    base_url: str = ""  # OpenAI-compatible endpoint override; auto-derived for openrouter
-    chat_model: str = ""  # empty → provider's hard-coded default
-    filter_model: str = ""  # ditto
+    # Deprecated umbrella — see class docstring. Default empty so a
+    # fresh install with no migration runs falls through to the per-slot
+    # defaults (each slot defaults to "openai" via its resolver).
+    provider: str = ""
+    # Per-slot provider routing.
+    chat_provider: str = ""  # analyze / ask flagship
+    filter_provider: str = ""  # map / rerank / enricher cheap-passes
+    audio_provider: str = ""  # voice / videonote / video transcription
+    vision_provider: str = ""  # image enrichment
+    # Per-slot model override (empty → slot resolver picks the default).
+    chat_model: str = ""
+    filter_model: str = ""
+    audio_model: str = ""
+    vision_model: str = ""
+    # Generic gateway override — applies when the active slot's provider
+    # uses an OpenAI-compatible base URL (openai / openrouter / local).
+    # Anthropic and Google use their own SDK base-URL config.
+    base_url: str = ""
     # Safety: when `base_url` resolves to anything outside the per-provider
     # trusted-host allowlist (api.openai.com, api.anthropic.com,
     # generativelanguage.googleapis.com, openrouter.ai, plus localhost/RFC1918
@@ -638,6 +664,23 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
             settings.anthropic.api_key = k
         if not settings.google.api_key and (k := persisted.get("google.api_key")):
             settings.google.api_key = k
+
+    # Layer 5 (final): overlay persisted `app_settings` rows (locale, models,
+    # AI routing, enrich toggles, …). Without this, a `reset_settings()`
+    # followed by `get_settings()` regresses to config.toml defaults — the
+    # cli.py bootstrap applies them once at import time, but mid-session
+    # refreshes (e.g. the `unread init` wizard between steps, the
+    # `unread settings` editor, the post-`tg login` reload) would silently
+    # drop them and re-prompt for already-answered questions. Lazy import
+    # to avoid a hard cycle with `db.repo` (which lazy-imports back into
+    # `config`); defensive — any sqlite / import failure leaves the
+    # config-default in place rather than taking down the whole CLI.
+    try:
+        from unread.db.repo import apply_db_overrides_sync
+
+        apply_db_overrides_sync(settings)
+    except Exception:
+        pass
 
     return settings
 

@@ -363,3 +363,129 @@ def read_secrets(settings) -> dict[str, str]:  # type: ignore[no-untyped-def]
         return _read_db_secrets_passphrase(settings.storage.data_path)
 
     return read_data_db_secrets_sync(settings.storage.data_path)
+
+
+async def write_secrets(settings, values: dict[str, str]) -> None:  # type: ignore[no-untyped-def]
+    """Persist ``values`` through the currently active backend.
+
+    The user-facing write counterpart to :func:`read_secrets` — every
+    code path that takes a freshly-typed credential and saves it
+    (``init`` wizard, ``settings`` menu, ``tg login`` re-auth) goes
+    through here so the user's "keystore by default" choice is durable.
+    Without this routing, post-init writes would land in
+    ``data.sqlite::secrets`` regardless of the active backend, leaving
+    a partial-plaintext install behind a "keystore" status flag.
+
+    Migration plumbing (``security migrate`` / ``upgrade`` /
+    ``downgrade``) deliberately bypasses this and writes directly via
+    :meth:`Repo.put_secrets`: those paths are moving values BETWEEN
+    backends and routing-through-active would feed them back into the
+    backend they're trying to leave.
+
+    Backend semantics:
+      - ``db``      → plaintext row in ``secrets`` (current behaviour).
+      - ``keychain``→ each value lands under the install-namespaced
+                      keychain service. Empty values are skipped to
+                      mirror :meth:`Repo.put_secrets`.
+      - ``passphrase`` → encrypted with the install key, then written
+                      to the ``secrets`` table as ciphertext.
+
+    Allowlist enforcement happens here (and again at the schema layer
+    when we route to DB), so a typo in `key` raises ``ValueError``
+    regardless of which backend ends up servicing the write.
+    """
+    if not values:
+        return
+    from unread.db._keys import SECRET_KEYS as _ALLOWLIST
+
+    for key in values:
+        if key not in _ALLOWLIST:
+            raise ValueError(f"unknown secret key: {key!r}; allowed: {sorted(_ALLOWLIST)}")
+
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        BACKEND_PASSPHRASE,
+        keychain_write,
+        read_active_backend_sync,
+    )
+
+    backend = read_active_backend_sync(settings.storage.data_path)
+
+    if backend == BACKEND_KEYCHAIN:
+        failures: list[str] = []
+        for key, value in values.items():
+            if not value:
+                # Match Repo.put_secrets: empty values are no-ops
+                # rather than wiping the existing entry.
+                continue
+            if not keychain_write(key, value):
+                failures.append(key)
+        if failures:
+            raise RuntimeError(
+                "keychain write failed for: "
+                + ", ".join(sorted(failures))
+                + " — run `unread security status` to inspect the active backend"
+            )
+        return
+
+    if backend == BACKEND_PASSPHRASE:
+        # Encrypt with the install-salt-derived key. Same envelope
+        # shape as `write_session_string_async`, just iterated over
+        # multiple slots.
+        from unread.security.crypto import encrypt_with_key, lookup_key_for_salt
+        from unread.security.passphrase import ensure_install_key, read_install_salt
+
+        salt = read_install_salt(settings.storage.data_path)
+        if salt is None:
+            raise RuntimeError("install salt missing — run `unread security upgrade --passphrase`")
+        key_bytes = lookup_key_for_salt(salt) or ensure_install_key(settings.storage.data_path)
+        encrypted: dict[str, str] = {}
+        for slot, value in values.items():
+            if not value:
+                continue
+            encrypted[slot] = encrypt_with_key(value, key_bytes, salt=salt, slot_name=slot)
+        if not encrypted:
+            return
+        from unread.db.repo import open_repo
+
+        async with open_repo(settings.storage.data_path) as repo:
+            await repo.put_secrets(encrypted)
+        return
+
+    # backend == BACKEND_DB (default).
+    from unread.db.repo import open_repo
+
+    async with open_repo(settings.storage.data_path) as repo:
+        await repo.put_secrets(values)
+
+
+async def delete_secret(settings, key: str) -> bool:  # type: ignore[no-untyped-def]
+    """Remove ``key`` from the currently active backend.
+
+    Returns True iff a row / entry actually existed. Allowlist-checked
+    against `SECRET_KEYS` for the same reason as :func:`write_secrets`.
+    Migration code paths (which know which backend they're targeting)
+    keep using :meth:`Repo.delete_secret` directly.
+    """
+    from unread.db._keys import SECRET_KEYS as _ALLOWLIST
+
+    if key not in _ALLOWLIST:
+        raise ValueError(f"unknown secret key: {key!r}")
+
+    from unread.secrets_backend import (
+        BACKEND_KEYCHAIN,
+        keychain_delete,
+        read_active_backend_sync,
+    )
+
+    backend = read_active_backend_sync(settings.storage.data_path)
+    if backend == BACKEND_KEYCHAIN:
+        return keychain_delete(key)
+
+    # `db` and `passphrase` both keep rows in `secrets`; delete is
+    # backend-independent (the row is going away regardless of
+    # whether its `value` was plaintext or ciphertext).
+    from unread.db.repo import open_repo
+
+    async with open_repo(settings.storage.data_path) as repo:
+        return await repo.delete_secret(key)

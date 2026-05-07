@@ -1,26 +1,24 @@
 """Image enricher: download a photo, send to a vision model, cache the description.
 
-Dedup key is the Telegram photo id (stable across chats). Uses the OpenAI
-Chat Completions vision format (an `image_url` with a `data:` base64 payload),
-so the whole pipeline works through the existing `AsyncOpenAI` client —
-no separate endpoint or file upload.
+Dedup key is the Telegram photo id (stable across chats). Routes through
+the vision slot's resolved provider (`settings.ai.vision_provider`) —
+OpenAI / Anthropic / Google / OpenRouter / local each have a native
+adapter in :mod:`unread.ai.vision_provider`.
 """
 
 from __future__ import annotations
 
-import base64
 import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from openai import AsyncOpenAI
-
+from unread.ai.providers import ProviderSafetyBlockedError, ProviderUnavailableError, resolve_vision
+from unread.ai.vision_provider import make_vision_provider
 from unread.config import get_settings
 from unread.db.repo import Repo
 from unread.enrich.base import EnrichResult
 from unread.media.download import download_message
 from unread.models import Message
-from unread.util.flood import retry_on_429
 from unread.util.logging import get_logger
 from unread.util.pricing import chat_cost
 
@@ -62,11 +60,6 @@ def _resolve_prompts(language: str) -> tuple[str, str]:
     )
 
 
-def _openai_client() -> AsyncOpenAI:
-    s = get_settings()
-    return AsyncOpenAI(api_key=s.openai.api_key, timeout=s.openai.request_timeout_sec)
-
-
 def _mime_from_path(path: Path) -> str:
     suffix = path.suffix.lower().lstrip(".")
     if suffix in {"jpg", "jpeg"}:
@@ -78,16 +71,6 @@ def _mime_from_path(path: Path) -> str:
     if suffix == "gif":
         return "image/gif"
     return "image/jpeg"
-
-
-@retry_on_429()
-async def _vision_complete(oai: AsyncOpenAI, model: str, messages: list[dict]) -> object:
-    return await oai.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_completion_tokens=400,
-        temperature=0.2,
-    )
 
 
 async def enrich_image(
@@ -107,16 +90,21 @@ async def enrich_image(
     if msg.media_type != "photo" or msg.media_doc_id is None:
         return None
 
-    # Vision (image description) is OpenAI-only in our pipeline. Skip
-    # cleanly with a one-line warning when the OpenAI key is missing —
-    # multi-provider installs that picked Anthropic / Google can still
-    # run the rest of the analyze pipeline.
-    if not settings.openai.api_key:
+    # Resolve the vision slot's provider + model. If the resolved
+    # provider has no key configured, skip cleanly with a one-line
+    # warning so the rest of the analyze pipeline keeps going.
+    vision_provider, default_model = resolve_vision(settings)
+    used_model = model or default_model
+    try:
+        adapter = make_vision_provider(vision_provider, settings)
+    except ProviderUnavailableError as e:
         log.warning(
-            "enrich.image.skipped_no_openai_key",
+            "enrich.image.skipped_no_key",
+            provider=vision_provider,
             chat_id=msg.chat_id,
             msg_id=msg.msg_id,
-            hint="run `unread login` and add an OpenAI key (chat provider can stay non-OpenAI)",
+            err=str(e),
+            hint="run `unread settings` and set the vision slot's API key",
         )
         return None
 
@@ -131,7 +119,6 @@ async def enrich_image(
             cache_hit=True,
         )
 
-    used_model = model or settings.enrich.vision_model
     # Fall back through report_language → language so descriptions match
     # the analysis output language regardless of UI locale.
     lang = (language or settings.locale.report_language or settings.locale.language or "en").lower()
@@ -163,30 +150,38 @@ async def enrich_image(
             return None
         mime = _mime_from_path(downloaded)
         raw = downloaded.read_bytes()
-        b64 = base64.b64encode(raw).decode("ascii")
-        data_url = f"data:{mime};base64,{b64}"
 
-        messages = [
-            {"role": "system", "content": sys_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            },
-        ]
+        try:
+            result = await adapter.describe_image(
+                model=used_model,
+                image_bytes=raw,
+                mime_type=mime,
+                system_prompt=sys_prompt,
+                user_prompt=user_prompt,
+                max_tokens=400,
+                temperature=0.2,
+            )
+        except ProviderSafetyBlockedError as e:
+            log.warning(
+                "enrich.image.safety_blocked",
+                provider=vision_provider,
+                model=used_model,
+                chat_id=msg.chat_id,
+                msg_id=msg.msg_id,
+                reason=getattr(e, "reason", ""),
+            )
+            return None
 
-        oai = _openai_client()
-        resp = await _vision_complete(oai, used_model, messages)
-        choice = resp.choices[0]
-        description = (choice.message.content or "").strip()
-        usage = getattr(resp, "usage", None)
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        details = getattr(usage, "prompt_tokens_details", None)
-        cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
-        cost = chat_cost(used_model, prompt_tokens, cached_tokens, completion_tokens) or 0.0
+        description = result.text
+        cost = (
+            chat_cost(
+                used_model,
+                result.prompt_tokens,
+                result.cached_tokens,
+                result.completion_tokens,
+            )
+            or 0.0
+        )
 
         if not description:
             log.warning("enrich.image.empty_response", chat_id=msg.chat_id, msg_id=msg.msg_id)
@@ -202,9 +197,9 @@ async def enrich_image(
         await repo.log_usage(
             kind="chat",
             model=used_model,
-            prompt_tokens=prompt_tokens,
-            cached_tokens=cached_tokens,
-            completion_tokens=completion_tokens,
+            prompt_tokens=result.prompt_tokens,
+            cached_tokens=result.cached_tokens,
+            completion_tokens=result.completion_tokens,
             cost_usd=float(cost),
             context={
                 "phase": "enrich_image",
@@ -212,15 +207,17 @@ async def enrich_image(
                 "chat_id": msg.chat_id,
                 "msg_id": msg.msg_id,
                 "msg_date": msg.date.isoformat() if msg.date else None,
+                "provider": vision_provider,
             },
         )
         log.info(
-            "openai.chat",
+            "vision.describe",
             phase="enrich_image",
+            provider=vision_provider,
             model=used_model,
-            prompt=prompt_tokens,
-            cached=cached_tokens,
-            completion=completion_tokens,
+            prompt=result.prompt_tokens,
+            cached=result.cached_tokens,
+            completion=result.completion_tokens,
             cost=float(cost),
             doc_id=msg.media_doc_id,
             chat_id=msg.chat_id,

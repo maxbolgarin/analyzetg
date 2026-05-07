@@ -408,16 +408,19 @@ def _openai_credentials_present() -> bool:
 
 
 def _active_provider_credentials_present() -> bool:
-    """True iff the currently-selected chat provider has its key set.
+    """True iff the chat slot's provider has its key set.
 
-    Routed by `settings.ai.provider`. Used to gate chat-only commands
-    (`analyze`, `ask`) so a Telegram-only or wrong-provider install
-    surfaces a focused banner instead of a confusing 401.
+    Routed by `settings.ai.chat_provider` (per-slot). Used to gate
+    chat-only commands (`analyze`, `ask`) so a Telegram-only or
+    wrong-provider install surfaces a focused banner instead of a
+    confusing 401.
     """
     import os as _os
 
+    from unread.ai.providers import _resolve_provider_name
+
     s = get_settings()
-    name = (s.ai.provider or "openai").strip().lower()
+    name = _resolve_provider_name(s, "chat")
     if name == "openai":
         return bool(s.openai.api_key) or bool(_os.environ.get("OPENAI_API_KEY"))
     if name == "openrouter":
@@ -570,6 +573,51 @@ def _seed_home_templates() -> None:
             )
 
 
+def _validate_lang_flags(
+    language: str | None,
+    report_language: str | None,
+    source_language: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Validate and normalise the three language CLI flags.
+
+    Returns the canonical lowercase ISO 639-1 codes, or the original
+    value when ``None`` / empty (which means "use config default").
+    Raises :class:`typer.BadParameter` on any unrecognised code.
+
+    ``--language`` (UI) is held to a stricter pool — only languages
+    that ship i18n + presets — because rendering UI strings in an
+    untranslated language produces fallback English anyway.
+    """
+    from unread.util.languages import normalize_language_code
+
+    def _check(name: str, value: str | None, *, ui: bool = False) -> str | None:
+        if value is None or value == "":
+            return value
+        code = normalize_language_code(value)
+        if code is None:
+            raise typer.BadParameter(
+                f"Invalid language code for --{name}: {value!r}. "
+                f"Use an ISO 639-1 code (e.g. 'en', 'pt', 'zh') or its English name."
+            )
+        if ui:
+            from unread.settings.commands import _supported_ui_languages
+
+            supported = _supported_ui_languages()
+            if code not in supported:
+                raise typer.BadParameter(
+                    f"--{name}={value!r} is not available as a UI language. "
+                    f"UI is only translated into: {', '.join(supported)}. "
+                    f"For LLM output language, use --report-language."
+                )
+        return code
+
+    return (
+        _check("language", language, ui=True),
+        _check("report-language", report_language),
+        _check("content-language", source_language),
+    )
+
+
 def _dispatch_analyze(**kwargs) -> None:
     """Shared bridge from the root + tg callbacks to `cmd_analyze`.
 
@@ -580,6 +628,15 @@ def _dispatch_analyze(**kwargs) -> None:
     """
     from unread.analyzer.commands import cmd_analyze
 
+    (
+        kwargs["language"],
+        kwargs["report_language"],
+        kwargs["source_language"],
+    ) = _validate_lang_flags(
+        kwargs.get("language"),
+        kwargs.get("report_language"),
+        kwargs.get("source_language"),
+    )
     save_flag = kwargs.pop("save", False)
     # Reject contradictory output flags up front so the user gets a
     # clear error rather than discovering downstream that one of the
@@ -892,11 +949,12 @@ def _print_config_status() -> None:
     isn't shown — it would require ``client.get_me()`` which is what
     ``unread doctor`` is for.
     """
+    from unread.ai.providers import _resolve_provider_name
     from unread.core.paths import unread_home
 
     s = get_settings()
     home = unread_home()
-    active = (s.ai.provider or "openai").strip().lower()
+    active = _resolve_provider_name(s, "chat")
 
     # Per-provider key state. Mirrors `_active_provider_credentials_present`
     # but for every provider, not just the active one — this is the panel
@@ -921,6 +979,18 @@ def _print_config_status() -> None:
     # so the panel reads the same on every theme.
     rows: list[str] = []
     rows.append(f"  [bold]Install:[/] [grey70]{home}[/]")
+
+    # Languages: UI / report / source. Report falls back to UI when unset
+    # (matches `_resolve_report_lang` runtime semantics); source is shown
+    # only when the user explicitly opted in (empty = LLM auto-detect).
+    ui_lang = (s.locale.language or "en").lower()
+    report_lang = (s.locale.report_language or "").strip().lower() or ui_lang
+    source_lang = (s.locale.content_language or "").strip().lower()
+    lang_parts = [f"UI [cyan]{ui_lang}[/]", f"report [cyan]{report_lang}[/]"]
+    if source_lang:
+        lang_parts.append(f"source [cyan]{source_lang}[/]")
+    rows.append(f"  [bold]Languages:[/] {' · '.join(lang_parts)}")
+
     active_ok = next((ok for name, ok in provider_keys if name == active), False)
     rows.append(
         f"  [bold]AI provider:[/] {active} {_mark(active_ok)}"
@@ -1010,10 +1080,11 @@ def _status_one_liner() -> str:
     """
     import os as _os
 
+    from unread.ai.providers import _resolve_provider_name
     from unread.tg.session_state import is_session_authorized_sync
 
     s = get_settings()
-    active = (s.ai.provider or "openai").strip().lower()
+    active = _resolve_provider_name(s, "chat")
     has_key = {
         "openai": bool(s.openai.api_key) or bool(_os.environ.get("OPENAI_API_KEY")),
         "openrouter": bool(s.openrouter.api_key),
@@ -1496,8 +1567,10 @@ def _ensure_ready_for_analyze(ref: str | None) -> bool:
 
 def _exit_missing_provider_credentials() -> typer.Exit:
     """Banner + exit for chat commands when the active provider has no key."""
+    from unread.ai.providers import _resolve_provider_name
+
     s = get_settings()
-    provider = (s.ai.provider or "openai").strip().lower()
+    provider = _resolve_provider_name(s, "chat")
     _print_provider_credentials_banner(provider)
     raise typer.Exit(1)
 
@@ -3850,6 +3923,9 @@ def ask(
       unread ask --folder Work "..." --last-days 7
       unread ask --global "..."                                  # all synced, no wizard
     """
+    language, report_language, source_language = _validate_lang_flags(
+        language, report_language, source_language
+    )
     # Pre-TG dispatch: file / YouTube / website refs route to dedicated
     # adapters (mirrors cmd_dump's shape) so non-TG sources never trigger
     # a Telegram session open. The detection helpers (_looks_like_local_file,
@@ -4007,6 +4083,79 @@ def ask(
             report_language=report_language,
             source_language=source_language,
             mark_read=mark_read,
+        )
+    )
+
+
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_prompt"))
+def prompt(
+    text: str = typer.Argument(
+        ...,
+        help="Free-form prompt sent straight to the configured AI provider.",
+    ),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the answering model."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Save answer to a markdown file (default: render to terminal).",
+    ),
+    console_out: bool = typer.Option(
+        False,
+        "--console",
+        "-c",
+        help="Force terminal rendering even when --output is also set.",
+    ),
+    report_language: str | None = typer.Option(
+        None,
+        "--report-language",
+        help=(
+            "Answer language hint (en, ru, …). Becomes a one-line `Respond in <lang>.` "
+            "system message. Defaults to [locale] report_language; empty = LLM auto-detects."
+        ),
+    ),
+    max_tokens: int = typer.Option(
+        2000,
+        "--max-tokens",
+        help="Cap output tokens (the orchestrator may auto-retry on truncation).",
+    ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        help="Abort if the estimated USD cost exceeds N.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the over-budget confirmation prompt (combined with --max-cost).",
+    ),
+) -> None:
+    """Send a plain prompt to the configured AI — no retrieval, no archive, no Telegram.
+
+    The only context attached is an optional one-line `Respond in <lang>.`
+    system message driven by --report-language (or [locale] report_language).
+    Cost flows through the same usage_log as analyze/ask under
+    `phase=prompt`, so `unread stats --by kind` will list it.
+
+    Examples:
+      unread prompt "say hi in one word"
+      unread prompt --report-language ru "what is 2+2"
+      unread prompt -o /tmp/p.md "explain CRDT in 2 lines"
+    """
+    _, report_language, _ = _validate_lang_flags(None, report_language, None)
+    from unread.ai.prompt import cmd_prompt
+
+    _run(
+        cmd_prompt(
+            prompt=text,
+            model=model,
+            output=output,
+            console_out=console_out,
+            report_language=report_language,
+            max_tokens=max_tokens,
+            max_cost=max_cost,
+            yes=yes,
         )
     )
 
@@ -4917,6 +5066,9 @@ def dump(
     Without `<ref>` and with `--folder NAME`: batch-dumps every chat in
     that Telegram folder that has unread messages.
     """
+    language, report_language, source_language = _validate_lang_flags(
+        language, report_language, source_language
+    )
     from unread.export.commands import cmd_dump
 
     _run(

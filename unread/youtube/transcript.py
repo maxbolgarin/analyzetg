@@ -27,8 +27,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from openai import AsyncOpenAI
-
 from unread.config import Settings
 from unread.db.repo import Repo
 from unread.enrich.audio import _transcribe_file
@@ -447,15 +445,33 @@ async def _transcribe_audio(
 ) -> tuple[str, str, float, int]:
     """Whisper path: download audio → segment → transcribe → return text+model+cost+seconds.
 
-    Whisper is OpenAI-only; if the user picked a different chat
-    provider and didn't add an OpenAI key, raise a focused error
-    instead of letting the SDK throw a 401 mid-download.
+    Resolves the audio slot's provider (openai / openrouter / local —
+    capability snap excludes anthropic/google). Raises a focused error
+    when the resolved provider has no key configured, instead of
+    letting the SDK throw a 401 mid-download.
     """
-    if not settings.openai.api_key:
+    from unread.ai.providers import (
+        ProviderUnavailableError as _ProviderUnavailableError,
+    )
+    from unread.ai.providers import (
+        make_audio_client as _make_audio_client,
+    )
+    from unread.ai.providers import (
+        resolve_audio as _resolve_audio,
+    )
+
+    audio_provider, audio_model = _resolve_audio(settings)
+    try:
+        oai = _make_audio_client(audio_provider, settings)
+    except _ProviderUnavailableError as e:
         from unread.i18n import t as _t
 
-        raise RuntimeError(_t("youtube_whisper_no_openai"))
-    audio_model = settings.openai.audio_model_default
+        # Surface the friendly i18n string when audio_provider is openai
+        # (the historical case); for non-openai providers, raise the
+        # adapter's own message which names the missing key explicitly.
+        if audio_provider == "openai":
+            raise RuntimeError(_t("youtube_whisper_no_openai")) from e
+        raise RuntimeError(str(e)) from e
     cfg_lang = settings.openai.audio_language or None
     duration = int(metadata.duration_sec or 0)
 
@@ -482,14 +498,11 @@ async def _transcribe_audio(
             segments=len(parts),
         )
 
-        oai = AsyncOpenAI(
-            api_key=settings.openai.api_key,
-            timeout=settings.openai.request_timeout_sec,
-        )
         log.info(
             "youtube.audio.transcribe.start",
             video_id=metadata.video_id,
             segments=len(parts),
+            provider=audio_provider,
             model=audio_model,
         )
         texts: list[str] = []
@@ -515,6 +528,7 @@ async def _transcribe_audio(
             "phase": "enrich_youtube",
             "video_id": metadata.video_id,
             "channel_id": metadata.channel_id,
+            "provider": audio_provider,
         },
     )
     log.info(
@@ -524,8 +538,9 @@ async def _transcribe_audio(
         cost=round(cost, 4),
     )
     log.info(
-        "openai.audio",
+        "audio.transcribe",
         phase="enrich_youtube",
+        provider=audio_provider,
         model=audio_model,
         seconds=duration,
         cost=cost,
