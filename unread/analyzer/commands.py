@@ -31,7 +31,7 @@ from unread.core.paths import parse_ymd as _parse_ymd
 from unread.core.paths import reports_dir as _reports_dir
 from unread.core.paths import slugify as _slugify  # noqa: F401  re-export for tests
 from unread.core.paths import topic_slug as _topic_slug
-from unread.core.paths import unique_path as _unique_path
+from unread.core.paths import unique_path as _unique_path  # noqa: F401  re-export for tests
 from unread.db.repo import Repo, open_repo
 from unread.enrich.base import EnrichOpts
 from unread.i18n import t as _t
@@ -2145,115 +2145,19 @@ def _format_transcript_provenance(result: AnalysisResult) -> str:
     return lang or kind_label
 
 
-def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
-    """Build the fixed-format metadata block prepended to every saved report.
+def _analyze_meta_rows(result: AnalysisResult, *, title: str | None) -> list[tuple[str, str]]:
+    """Build the (i18nized label, value) row list for an analyze report.
 
-    Labels go through `i18n.t()` so the saved-file metadata follows the
-    user's UI language (`locale.language`) — independent of the analysis
-    body's language.
+    Single source of truth for analyze's metadata: feeds both the saved
+    markdown header and the on-screen Rich grid via the shared shell at
+    `unread/util/report_render.py`. Labels arrive `**bold**` so the
+    saved file renders bold; the Rich grid strips the wrapper.
     """
-    lines: list[str] = ["---"]
-    lines.append(f"{_t('report_meta_chat')} {title or result.chat_id}")
+    rows: list[tuple[str, str]] = []
+    rows.append((_t("report_meta_chat"), str(title or result.chat_id)))
     if result.thread_id:
-        lines.append(f"{_t('report_meta_thread')} {result.thread_id}")
-    lines.append(f"{_t('report_meta_period')} {_fmt_period_header(result.period)}")
-
-    msg_line = f"{_t('report_meta_messages')} {result.msg_count}"
-    if result.raw_msg_count and result.raw_msg_count != result.msg_count:
-        dropped = result.raw_msg_count - result.msg_count
-        msg_line += (
-            " (" + _tf("report_meta_messages_filtered", raw=result.raw_msg_count, dropped=dropped) + ")"
-        )
-    lines.append(msg_line)
-
-    breakdown_line = _format_breakdown_line(result)
-    if breakdown_line:
-        lines.append(breakdown_line)
-
-    preset_line = f"{_t('report_meta_preset')} `{result.preset}`"
-    if result.prompt_version:
-        preset_line += f" (v={result.prompt_version})"
-    lines.append(preset_line)
-
-    model_line = f"{_t('report_meta_model')} `{result.model}`"
-    if result.chunk_count > 1 and result.filter_model and result.filter_model != result.model:
-        model_line += f" (+ `{result.filter_model}` {_t('report_meta_model_map_phase')})"
-    lines.append(model_line)
-
-    if result.chunk_count:
-        lines.append(f"{_t('report_meta_chunks')} {result.chunk_count}")
-
-    total_calls = result.cache_hits + result.cache_misses
-    if total_calls:
-        lines.append(
-            f"{_t('report_meta_cache')} "
-            + _tf("report_meta_cache_hits_of", hits=result.cache_hits, total=total_calls)
-        )
-
-    if result.enrich_kinds:
-        lines.append(f"{_t('report_meta_enrichment')} {', '.join(result.enrich_kinds)}")
-    if result.enrich_summary:
-        lines.append(f"{_t('report_meta_enrichment_detail')} {result.enrich_summary}")
-    transcript_value = _format_transcript_provenance(result)
-    if transcript_value:
-        lines.append(f"{_t('report_meta_transcript')} {transcript_value}")
-    # Visibility for the user that PII was scrubbed before sending: shows
-    # what kinds (and how many of each) so an operator can sanity-check
-    # the redactor caught what they expected.
-    if result.redact_counts:
-        bits = ", ".join(f"{k}: {v}" for k, v in sorted(result.redact_counts.items()))
-        lines.append(f"{_t('report_meta_redact')} {bits}")
-
-    analysis_cost = result.total_cost_usd
-    if result.enrich_cost_usd:
-        total = analysis_cost + result.enrich_cost_usd
-        lines.append(
-            f"{_t('report_meta_cost')} {_fmt_cost_precise(total)} "
-            f"(analysis {_fmt_cost_precise(analysis_cost)} + "
-            f"enrichment {_fmt_cost_precise(result.enrich_cost_usd)})"
-        )
-    else:
-        lines.append(f"{_t('report_meta_cost')} {_fmt_cost_precise(analysis_cost)}")
-
-    lines.append(f"{_t('report_meta_generated')} {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-
-    lines.append("---")
-    lines.append("")  # blank line before the LLM body
-    return "\n".join(lines)
-
-
-def _strip_md_bold(label: str) -> str:
-    """Strip the `**...**` wrapper from i18n labels for Rich rendering.
-
-    Header labels are stored as Markdown (`**Chat:**`) so the saved file
-    renders correctly. The Rich console grid styles them via Rich markup
-    instead, so we drop the bold wrapper here.
-    """
-    if label.startswith("**") and label.endswith("**"):
-        return label[2:-2]
-    return label
-
-
-def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
-    """Build a Rich `Table` (key/value grid) that mirrors the markdown header.
-
-    Same content as `_render_report_header`, but laid out one field per
-    line with a bold cyan label column — without this, Rich's `Markdown`
-    renderer flattens the saved-report header's single-newline-separated
-    lines into a single wrapping paragraph, which is what made the
-    console summary look cramped.
-    """
-    grid = Table.grid(padding=(0, 1))
-    grid.add_column(justify="right", style="bold cyan", no_wrap=True)
-    grid.add_column(overflow="fold")
-
-    def row(key: str, value: str) -> None:
-        grid.add_row(_strip_md_bold(key), value)
-
-    row(_t("report_meta_chat"), title or str(result.chat_id))
-    if result.thread_id:
-        row(_t("report_meta_thread"), str(result.thread_id))
-    row(_t("report_meta_period"), _fmt_period_header(result.period))
+        rows.append((_t("report_meta_thread"), str(result.thread_id)))
+    rows.append((_t("report_meta_period"), _fmt_period_header(result.period)))
 
     msg_value = str(result.msg_count)
     if result.raw_msg_count and result.raw_msg_count != result.msg_count:
@@ -2261,45 +2165,50 @@ def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
         msg_value += (
             " (" + _tf("report_meta_messages_filtered", raw=result.raw_msg_count, dropped=dropped) + ")"
         )
-    row(_t("report_meta_messages"), msg_value)
+    rows.append((_t("report_meta_messages"), msg_value))
 
     breakdown_line = _format_breakdown_line(result)
     if breakdown_line:
         # `_format_breakdown_line` returns "**Breakdown:** text 5, voice 2 — 1 with links".
-        # Split off the bold label so the grid styles it like the others.
+        # Split off the bold label so the row tuple matches the other entries.
         label, _, value = breakdown_line.partition(" ")
-        row(label, value)
+        rows.append((label, value))
 
-    preset_value = f"[cyan]{result.preset}[/]"
+    preset_value = f"`{result.preset}`"
     if result.prompt_version:
         preset_value += f" (v={result.prompt_version})"
-    row(_t("report_meta_preset"), preset_value)
+    rows.append((_t("report_meta_preset"), preset_value))
 
-    model_value = f"[cyan]{result.model}[/]"
+    model_value = f"`{result.model}`"
     if result.chunk_count > 1 and result.filter_model and result.filter_model != result.model:
-        model_value += f" (+ [cyan]{result.filter_model}[/] {_t('report_meta_model_map_phase')})"
-    row(_t("report_meta_model"), model_value)
+        model_value += f" (+ `{result.filter_model}` {_t('report_meta_model_map_phase')})"
+    rows.append((_t("report_meta_model"), model_value))
 
     if result.chunk_count:
-        row(_t("report_meta_chunks"), str(result.chunk_count))
+        rows.append((_t("report_meta_chunks"), str(result.chunk_count)))
 
     total_calls = result.cache_hits + result.cache_misses
     if total_calls:
-        row(
-            _t("report_meta_cache"),
-            _tf("report_meta_cache_hits_of", hits=result.cache_hits, total=total_calls),
+        rows.append(
+            (
+                _t("report_meta_cache"),
+                _tf("report_meta_cache_hits_of", hits=result.cache_hits, total=total_calls),
+            )
         )
 
     if result.enrich_kinds:
-        row(_t("report_meta_enrichment"), ", ".join(result.enrich_kinds))
+        rows.append((_t("report_meta_enrichment"), ", ".join(result.enrich_kinds)))
     if result.enrich_summary:
-        row(_t("report_meta_enrichment_detail"), result.enrich_summary)
+        rows.append((_t("report_meta_enrichment_detail"), result.enrich_summary))
     transcript_value = _format_transcript_provenance(result)
     if transcript_value:
-        row(_t("report_meta_transcript"), transcript_value)
+        rows.append((_t("report_meta_transcript"), transcript_value))
+    # Visibility for the user that PII was scrubbed before sending: shows
+    # what kinds (and how many of each) so an operator can sanity-check
+    # the redactor caught what they expected.
     if result.redact_counts:
         bits = ", ".join(f"{k}: {v}" for k, v in sorted(result.redact_counts.items()))
-        row(_t("report_meta_redact"), bits)
+        rows.append((_t("report_meta_redact"), bits))
 
     analysis_cost = result.total_cost_usd
     if result.enrich_cost_usd:
@@ -2311,10 +2220,27 @@ def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
         )
     else:
         cost_value = _fmt_cost_precise(analysis_cost)
-    row(_t("report_meta_cost"), cost_value)
+    rows.append((_t("report_meta_cost"), cost_value))
 
-    row(_t("report_meta_generated"), datetime.now().strftime("%Y-%m-%d %H:%M"))
-    return grid
+    rows.append((_t("report_meta_generated"), datetime.now().strftime("%Y-%m-%d %H:%M")))
+    return rows
+
+
+# Public-ish back-compat aliases. Some tests / external callers grab
+# these names directly; reroute them onto the shared shell so they keep
+# working but produce identical output.
+def _render_report_header(result: AnalysisResult, *, title: str | None) -> str:
+    """Back-compat: build the saved-file markdown header from the row list."""
+    from unread.util.report_render import render_md_header
+
+    return render_md_header(_analyze_meta_rows(result, title=title))
+
+
+def _render_console_meta(result: AnalysisResult, *, title: str | None) -> Table:
+    """Back-compat: build the Rich grid from the row list."""
+    from unread.util.report_render import render_meta_grid
+
+    return render_meta_grid(_analyze_meta_rows(result, title=title))
 
 
 def _print_and_write(
@@ -2336,18 +2262,18 @@ def _print_and_write(
 
     `thread_title` is used only for the default output path when
     `output` is None and the run targeted a forum topic.
+
+    The actual rendering is delegated to `unread/util/report_render.py`
+    so analyze and `unread ask` produce visually-identical output (same
+    Rule + grid + body + saved-file shape). Only analyze-specific UX —
+    the truncation banner — stays here.
     """
-    console.print(
-        f"[bold cyan]Run[/] preset={result.preset} msgs={result.msg_count} "
-        f"chunks={result.chunk_count} cache_hits={result.cache_hits}/"
-        f"{result.cache_hits + result.cache_misses} cost=${result.total_cost_usd:.4f}"
-    )
-    # The saved file gets the markdown header + body verbatim. The console
-    # renders the metadata as a Rich grid (proper line stacking) and only
-    # feeds the LLM body through Markdown so citation links stay clickable.
-    body = _render_report_header(result, title=title) + _with_truncation_banner(result)
+    from unread.util.report_render import print_report_shell
 
     if result.truncated:
+        # Analyze-specific Rich warning before the shell runs. The
+        # truncation banner is also injected into the saved body
+        # (`_with_truncation_banner`) so the file mentions it too.
         console.print(
             "[bold red]⚠ Output truncated[/] — the model hit "
             "[cyan]output_budget_tokens[/]. Edit the preset file "
@@ -2355,42 +2281,31 @@ def _print_and_write(
             "[cyan]--no-cache[/] if a stale cache is in the way."
         )
 
-    if console_out:
-        from rich.markdown import Markdown
-        from rich.rule import Rule
+    summary_line = (
+        f"[bold cyan]{_t('report_summary_run')}[/] preset={result.preset} msgs={result.msg_count} "
+        f"chunks={result.chunk_count} cache_hits={result.cache_hits}/"
+        f"{result.cache_hits + result.cache_misses} cost=${result.total_cost_usd:.4f}"
+    )
 
-        console.print(Rule(title or "result", style="cyan"))
-        console.print(_render_console_meta(result, title=title))
-        console_body = _with_truncation_banner(result)
-        if get_settings().analyze.plain_citations:
-            console_body = _flatten_citations(console_body)
-        console.print(Markdown(console_body))
-        console.print(Rule(style="cyan"))
+    default_path = _default_output_path(
+        chat_title=title,
+        chat_id=result.chat_id,
+        thread_id=result.thread_id or 0,
+        thread_title=thread_title,
+        preset=result.preset,
+    )
 
-    if no_save:
-        return
-
-    if output is None:
-        output = _default_output_path(
-            chat_title=title,
-            chat_id=result.chat_id,
-            thread_id=result.thread_id or 0,
-            thread_title=thread_title,
-            preset=result.preset,
-        )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    # Even with seconds-precision stamps, two parallel invocations can
-    # still land in the same second — _unique_path appends -2/-3 so we
-    # never silently overwrite a previous report.
-    output = _unique_path(output)
-    output.write_text(body, encoding="utf-8")
-    # Reports contain chat content (often private). Tighten to owner-only
-    # so other local users on a shared box can't read them.
-    from unread.util.fsmode import tighten
-
-    tighten(output)
-    label = "also_saved" if console_out else "written_to"
-    console.print(f"[green]{_tf(label, path=output)}[/]")
+    print_report_shell(
+        summary_line=summary_line,
+        title=title,
+        meta_rows=_analyze_meta_rows(result, title=title),
+        body_md=_with_truncation_banner(result),
+        output=output,
+        default_path=default_path,
+        no_console=not console_out,
+        no_save=no_save,
+        plain_citations=get_settings().analyze.plain_citations,
+    )
 
 
 # Telegram caps a single message at 4096 chars (UTF-16 code units, but

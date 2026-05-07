@@ -1173,6 +1173,7 @@ _COMMON_PATTERNS: tuple[tuple[str, str], ...] = (
     ("unread <ref>", "analyze (default action)"),
     ('unread ask <ref> "question"', "ask a question about the ref"),
     ("unread dump <ref>", "export the ref's messages to disk"),
+    ('unread prompt "..."', "send a plain prompt to the configured AI"),
     ("unread tg", "open the interactive Telegram picker"),
 )
 
@@ -3761,13 +3762,23 @@ def ask(
         None,
         "--output",
         "-o",
-        help="Save the answer to a file (markdown). Without --output the answer prints to terminal.",
+        help="Override the report path. Default: ~/.unread/reports/ask/<source>/<slug>-<stamp>.md.",
     ),
     console_out: bool = typer.Option(
         False,
         "--console",
         "-c",
-        help="Force terminal rendering even when --output is also set.",
+        help="[DEPRECATED] Force terminal rendering. Saving + rendering is now the default.",
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="Skip writing the answer file. The result still renders in the terminal.",
+    ),
+    no_console: bool = typer.Option(
+        False,
+        "--no-console",
+        help="Skip rendering the answer to the terminal. The file is still saved. Cannot be combined with --no-save.",
     ),
     refresh: bool = typer.Option(
         False,
@@ -3907,6 +3918,11 @@ def ask(
             "no-op for --folder / --global. Default: don't mark."
         ),
     ),
+    youtube_source: str = typer.Option(
+        "auto",
+        "--youtube-source",
+        help="YouTube transcript source: auto (captions, fallback to Whisper), captions, or audio (always Whisper).",
+    ),
 ) -> None:
     """Answer a question about your synced Telegram archive.
 
@@ -3926,6 +3942,14 @@ def ask(
     language, report_language, source_language = _validate_lang_flags(
         language, report_language, source_language
     )
+    # Reject contradictory output flags up front (mirrors `_dispatch_analyze`):
+    # --no-console + --no-save (or its deprecated alias --no-console + --console)
+    # would suppress every form of output, leaving an LLM-billed run with
+    # nothing to show for the spend.
+    if no_console and (no_save or console_out):
+        raise typer.BadParameter(
+            "--no-console combined with --no-save would suppress all output; pick at most one."
+        )
     # Pre-TG dispatch: file / YouTube / website refs route to dedicated
     # adapters (mirrors cmd_dump's shape) so non-TG sources never trigger
     # a Telegram session open. The detection helpers (_looks_like_local_file,
@@ -3980,6 +4004,8 @@ def ask(
                     model=model,
                     output=output,
                     console_out=console_out,
+                    no_console=no_console,
+                    no_save=no_save,
                     max_cost=max_cost,
                     yes=yes,
                     language=language,
@@ -4006,8 +4032,11 @@ def ask(
                     model=model,
                     output=output,
                     console_out=console_out,
+                    no_console=no_console,
+                    no_save=no_save,
                     max_cost=max_cost,
                     yes=yes,
+                    youtube_source=youtube_source,
                     language=language,
                     report_language=report_language,
                     source_language=source_language,
@@ -4032,6 +4061,8 @@ def ask(
                     model=model,
                     output=output,
                     console_out=console_out,
+                    no_console=no_console,
+                    no_save=no_save,
                     max_cost=max_cost,
                     yes=yes,
                     language=language,
@@ -4067,6 +4098,8 @@ def ask(
             model=model,
             output=output,
             console_out=console_out,
+            no_console=no_console,
+            no_save=no_save,
             refresh=refresh,
             show_retrieved=show_retrieved,
             rerank=rerank,
@@ -4130,18 +4163,32 @@ def prompt(
         "-y",
         help="Skip the over-budget confirmation prompt (combined with --max-cost).",
     ),
+    no_followup: bool = typer.Option(
+        False,
+        "--no-followup",
+        help=(
+            "Skip the post-answer 'Continue chatting?' prompt. Use in "
+            "scripts / cron / non-interactive contexts. Same flag as "
+            "`unread ask`."
+        ),
+    ),
 ) -> None:
     """Send a plain prompt to the configured AI — no retrieval, no archive, no Telegram.
 
-    The only context attached is an optional one-line `Respond in <lang>.`
-    system message driven by --report-language (or [locale] report_language).
-    Cost flows through the same usage_log as analyze/ask under
-    `phase=prompt`, so `unread stats --by kind` will list it.
+    After the first answer, offers a 'Continue chatting?' keypress
+    (Enter / y to continue, n / Esc / Ctrl-D to exit) and turns into a
+    multi-turn conversation — same UX as `unread ask`. Pass
+    `--no-followup` to skip the prompt for one-shot scripts. The only
+    context attached to every turn is an optional one-line
+    `Respond in <lang>.` system message driven by --report-language (or
+    [locale] report_language). Cost flows through the same usage_log as
+    analyze/ask under `phase=prompt`.
 
     Examples:
       unread prompt "say hi in one word"
       unread prompt --report-language ru "what is 2+2"
       unread prompt -o /tmp/p.md "explain CRDT in 2 lines"
+      unread prompt --no-followup "one-shot, no chat loop"
     """
     _, report_language, _ = _validate_lang_flags(None, report_language, None)
     from unread.ai.prompt import cmd_prompt
@@ -4156,6 +4203,7 @@ def prompt(
             max_tokens=max_tokens,
             max_cost=max_cost,
             yes=yes,
+            no_followup=no_followup,
         )
     )
 

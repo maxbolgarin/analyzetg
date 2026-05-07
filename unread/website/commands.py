@@ -180,9 +180,13 @@ def _meta_header(meta: WebsiteMetadata, *, paragraphs_count: int) -> str:
 def _build_synthetic_messages(meta: WebsiteMetadata, paragraphs: list[str]) -> list[Message]:
     """Header + per-paragraph `Message` list keyed off `chat_id=0`.
 
-    msg_id strategy: header is `#0`; paragraphs are `#1..#N` so a
-    citation `[#7]` resolves to "the 7th paragraph" — the link template
-    is just the page URL (no fragment). The article author / publisher
+    msg_id strategy: header is `#0`; paragraphs are `#1..#N` so the
+    LLM's `[#7]` citation refers to "the 7th segment". The LLM still
+    receives the page URL as link template, but we post-process the
+    saved report via `unread.website.citations.strip_citations` to
+    drop both `[#N](URL)` markdown wrappers AND bare `#N` markers —
+    websites have no per-paragraph HTML anchor so the numbers don't
+    point anywhere a click could land. The article author / publisher
     name is reused as `sender_name` for every row so the formatter has
     something coherent to print, even though websites have no real
     "speaker" concept.
@@ -419,8 +423,10 @@ async def cmd_analyze_website(
             source_kind="website",
         )
 
-        # Citations like `[#7](URL)` jump straight back to the page (no
-        # fragment — paragraph indices have no native HTML anchor).
+        # The LLM gets the bare page URL as the citation template; we
+        # post-process its `[#N](URL)` output below to drop the link
+        # wrapper, since per-paragraph anchors aren't reliable on a
+        # generic web page.
         link_template = page.metadata.url
 
         console.print(f"[grey70]{_t('running_analysis')}[/]")
@@ -450,6 +456,17 @@ async def cmd_analyze_website(
             elif verification_err:
                 failure_line = _t("verification_failed", language).format(err=verification_err)
                 result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + failure_line
+
+        # Strip every citation reference (`[#N](URL)` AND bare `#N`)
+        # from the LLM's output — websites have no per-paragraph anchor
+        # and the bare numbers are noise without a target.
+        if result.final_result:
+            from unread.website.citations import strip_citations
+
+            result.final_result = strip_citations(
+                result.final_result,
+                base_url=page.metadata.url,
+            )
 
         if output is None and not console_out:
             output_path: Path | None = website_report_path(

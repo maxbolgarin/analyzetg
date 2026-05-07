@@ -20,16 +20,53 @@ def _is_tty() -> bool:
         return False
 
 
-def _prompt_question(source_label: str) -> str:
-    """Inline single-line question prompt. Errors on non-TTY."""
+async def _prompt_question(source_label: str) -> str:
+    """Inline single-line question prompt with prompt_toolkit line editing.
+
+    Uses `prompt_toolkit.PromptSession` (same pattern as the follow-up
+    loop in `unread/ask/commands.py`) so Esc / arrow keys / Backspace
+    are handled instead of leaking literal `^[^[^[` into the buffer
+    like raw `input()` does. Esc / Ctrl-C / Ctrl-D abort the prompt
+    with exit code 130. Empty submission also aborts — the doc-mode
+    ask paths require a real question to send to the LLM.
+
+    The styled prefix ("Question for <source>:") is fed straight into
+    `prompt_async` instead of being printed via Rich beforehand.
+    prompt_toolkit owns the line and redraws on every keypress, so a
+    pre-printed Rich prefix would get overlapped by the user's input
+    on the next redraw.
+    """
     if not _is_tty():
         console.print("[red]ask requires a question for non-Telegram refs.[/]")
         raise typer.Exit(2)
-    console.print(f"[bold]Question for[/] [cyan]{source_label}[/][bold]:[/] ", end="")
+
+    from html import escape as _html_escape
+
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    @kb.add("c-d")
+    def _abort(event):
+        event.app.exit(exception=KeyboardInterrupt())
+
+    safe_label = _html_escape(source_label)
+    prefix = HTML(f"<b>Question for</b> <ansicyan>{safe_label}</ansicyan><b>:</b> ")
+    session: PromptSession = PromptSession()
     try:
-        return input().strip()
+        text = await session.prompt_async(prefix, key_bindings=kb)
     except (EOFError, KeyboardInterrupt):
+        console.print()
         raise typer.Exit(130) from None
+    text = (text or "").strip()
+    if not text:
+        console.print("[red]No question provided.[/]")
+        raise typer.Exit(2)
+    return text
 
 
 async def cmd_ask_file(
@@ -39,6 +76,8 @@ async def cmd_ask_file(
     model: str | None = None,
     output: Path | None = None,
     console_out: bool = False,
+    no_console: bool = False,
+    no_save: bool = False,
     max_cost: float | None = None,
     yes: bool = False,
     language: str | None = None,
@@ -72,6 +111,7 @@ async def cmd_ask_file(
         source_id = _file_id_for_stdin(raw)
         content_hash = _hash_content(text)
         citations = [DocCitation(uri="stdin://", label="stdin", offset_start=0, offset_end=len(text))]
+        source_kind = "stdin"
     else:
         path = Path(ref).expanduser().resolve()
         if not path.is_file():
@@ -84,18 +124,22 @@ async def cmd_ask_file(
         source_id = _file_id_for_path(path)
         content_hash = _hash_content(text)
         citations = [DocCitation(uri=f"file://{path}", label=path.name, offset_start=0, offset_end=len(text))]
+        source_kind = "file"
 
-    used_question = question or _prompt_question(source_label)
+    used_question = question if question else await _prompt_question(source_label)
     await cmd_ask_document(
         extracted_text=text,
         citations=citations,
         source_label=source_label,
         source_id=source_id,
+        source_kind=source_kind,
         content_hash=content_hash,
         question=used_question,
         model=model,
         output=output,
         console_out=console_out,
+        no_console=no_console,
+        no_save=no_save,
         max_cost=max_cost,
         yes=yes,
         language=language,

@@ -615,6 +615,15 @@ async def cmd_analyze_youtube(
             # Sources section.
             log.info("youtube.cite_context_skipped", reason="no telegram chat")
 
+        # Pull every cited `?t=Ns` back a few seconds so a click on a
+        # citation lands the listener slightly before the cited segment
+        # boundary instead of mid-phrase. Done post-cache so cached LLM
+        # output produces shifted links on every render.
+        if result.final_result:
+            from unread.youtube.citations import shift_citation_timestamps
+
+            result.final_result = shift_citation_timestamps(result.final_result)
+
         # Compute output path: explicit --output wins; else a youtube/<channel>/...
         # report file — never the chat-shaped default path.
         if output is None and not console_out:

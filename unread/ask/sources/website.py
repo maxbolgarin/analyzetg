@@ -21,6 +21,8 @@ async def cmd_ask_website(
     model: str | None = None,
     output: Path | None = None,
     console_out: bool = False,
+    no_console: bool = False,
+    no_save: bool = False,
     max_cost: float | None = None,
     yes: bool = False,
     language: str | None = None,
@@ -34,10 +36,16 @@ async def cmd_ask_website(
     show_retrieved: bool = False,
 ) -> None:
     """Fetch a webpage's text and ask a question over it."""
+    from unread.website.commands import _render_panel
     from unread.website.content import fetch_page
 
     settings = get_settings()
     page = await fetch_page(ref, settings=settings)
+    # Print the page-metadata panel BEFORE any LLM-call activity, mirroring
+    # `cmd_analyze_website` (`unread/website/commands.py:342`). Skip it in
+    # --no-console mode since the saved file doesn't include it anyway.
+    if not no_console:
+        console.print(_render_panel(page))
 
     text = "\n\n".join(page.paragraphs).strip()
     if not text:
@@ -55,17 +63,20 @@ async def cmd_ask_website(
             offset_end=len(text),
         )
     ]
-    used_question = question or _prompt_question(source_label)
+    used_question = question if question else await _prompt_question(source_label)
     await cmd_ask_document(
         extracted_text=text,
         citations=citations,
         source_label=source_label,
         source_id=source_id,
+        source_kind="website",
         content_hash=content_hash,
         question=used_question,
         model=model,
         output=output,
         console_out=console_out,
+        no_console=no_console,
+        no_save=no_save,
         max_cost=max_cost,
         yes=yes,
         language=language,

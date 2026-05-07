@@ -223,6 +223,8 @@ async def cmd_ask(
     model: str | None = None,
     output: Path | None = None,
     console_out: bool = False,
+    no_console: bool = False,
+    no_save: bool = False,
     refresh: bool = False,
     show_retrieved: bool = False,
     rerank: bool | None = None,
@@ -597,6 +599,8 @@ async def cmd_ask(
                 show_retrieved=show_retrieved,
                 output=output if not is_followup else None,
                 console_out=console_out or is_followup,
+                no_console=no_console if not is_followup else False,
+                no_save=no_save if not is_followup else True,
                 max_cost=max_cost,
                 yes=yes,
                 fallback_pool=prior_pool if is_followup else None,
@@ -725,6 +729,8 @@ async def _run_single_turn(
     show_retrieved: bool,
     output,
     console_out: bool,
+    no_console: bool = False,
+    no_save: bool = False,
     max_cost: float | None,
     yes: bool,
     fallback_pool: list[tuple] | None = None,
@@ -955,31 +961,77 @@ async def _run_single_turn(
         console.print(f"[red]{_t('ask_model_empty')}[/]")
         raise typer.Exit(1)
 
-    body = (
-        f"# {question.strip()}\n\n"
-        f"_{len(msgs)} message(s) from {scope_label}, "
-        f"model {used_model}, ${float(res.cost_usd or 0):.4f}_\n\n"
-        f"{answer}\n"
-    )
-    if console_out or output is None:
+    is_first_turn = len(history) == 0
+    if is_first_turn:
+        # First turn: render the full analyze-style shell via the shared
+        # report-render helper — same `Run …` summary line + Rule + grid +
+        # body shape as `unread <ref>` (analyze).
+        from datetime import datetime
+
+        from unread.analyzer.commands import _fmt_cost_precise
+        from unread.ask.render import default_ask_path, truncate_value
+        from unread.i18n import tf as _tf2
+        from unread.util.report_render import print_report_shell
+
+        if semantic:
+            mode_value = _tf2("ask_mode_semantic", pool=limit)
+        else:
+            mode_value = _tf2("ask_mode_keyword", pool=candidate_limit)
+        if rerank_on:
+            keep_n = min(limit, ask_cfg.rerank_keep)
+            mode_value += _tf2("ask_mode_rerank_suffix", keep=keep_n)
+
+        header_rows: list[tuple[str, str]] = [
+            (_t("ask_meta_scope"), scope_label),
+            (_t("ask_meta_question"), truncate_value(question, 120)),
+            (_t("ask_meta_mode"), mode_value),
+            (_t("ask_meta_messages"), _tf2("ask_messages_retrieved", n=len(msgs))),
+            (_t("report_meta_model"), f"`{used_model}`"),
+            (_t("report_meta_cost"), _fmt_cost_precise(float(res.cost_usd or 0))),
+            (_t("report_meta_generated"), datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ]
+
+        # Legacy behavior shim: --output without --console used to mean
+        # "save only, no terminal render". Preserve it so existing
+        # scripts keep working when callers haven't migrated to
+        # --no-console / --no-save.
+        effective_no_console = no_console or (output is not None and not console_out and not no_save)
+
+        summary_line = (
+            f"[bold cyan]{_t('report_summary_run')}[/] scope={scope_label} "
+            f"mode={mode_value} messages={len(msgs)} cost=${float(res.cost_usd or 0):.4f}"
+        )
+
+        print_report_shell(
+            summary_line=summary_line,
+            title=scope_label,
+            meta_rows=header_rows,
+            body_md=f"{answer}\n",
+            output=output,
+            default_path=default_ask_path("tg", scope_label),
+            no_console=effective_no_console,
+            no_save=no_save,
+            plain_citations=get_settings().analyze.plain_citations,
+        )
+    else:
+        # Follow-up turn inside the conversational loop: keep a slim
+        # Rule + Markdown render so the screen doesn't fill with the
+        # full header on every reply. Don't save follow-ups — the first
+        # turn's report carries the canonical scope record; chasing
+        # every interactive turn into a separate file would just
+        # produce spam under reports/ask/tg/.
         from rich.markdown import Markdown
         from rich.rule import Rule
 
         from unread.analyzer.commands import _flatten_citations
 
-        console_body = body
+        console_body = f"{answer}\n"
         if get_settings().analyze.plain_citations:
             console_body = _flatten_citations(console_body)
+        console.print(f"[grey70]turn {len(history) + 1} · {used_model} · ${float(res.cost_usd or 0):.4f}[/]")
         console.print(Rule("answer", style="cyan"))
         console.print(Markdown(console_body))
         console.print(Rule(style="cyan"))
-    if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(body, encoding="utf-8")
-        from unread.util.fsmode import tighten
-
-        tighten(output)
-        console.print(f"[green]{_tf('saved_to_path', path=output)}[/]")
     return answer, scored
 
 

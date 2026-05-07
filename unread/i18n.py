@@ -1358,6 +1358,35 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "report_meta_cost": {"en": "**Cost:**", "ru": "**Стоимость:**"},
     "report_meta_generated": {"en": "**Generated:**", "ru": "**Создано:**"},
+    "report_summary_run": {"en": "Run", "ru": "Запуск"},
+    # ---- Ask report header (mirrors report_meta_*; only ask-specific keys live here) ----
+    "ask_meta_source": {"en": "**Source:**", "ru": "**Источник:**"},
+    "ask_meta_question": {"en": "**Question:**", "ru": "**Вопрос:**"},
+    "ask_meta_mode": {"en": "**Mode:**", "ru": "**Режим:**"},
+    "ask_meta_messages": {"en": "**Messages:**", "ru": "**Сообщений:**"},
+    "ask_meta_scope": {"en": "**Scope:**", "ru": "**Контекст:**"},
+    "ask_meta_tokens": {"en": "**Tokens:**", "ru": "**Токенов:**"},
+    "ask_mode_whole_doc": {"en": "whole document", "ru": "весь документ"},
+    "ask_mode_retrieval": {
+        "en": "retrieval (top-{k}/{n} chunks)",
+        "ru": "поиск (топ-{k}/{n} чанков)",
+    },
+    "ask_mode_keyword": {
+        "en": "keyword retrieval (pool={pool})",
+        "ru": "поиск по ключевым словам (пул={pool})",
+    },
+    "ask_mode_semantic": {
+        "en": "semantic retrieval (pool={pool})",
+        "ru": "семантический поиск (пул={pool})",
+    },
+    "ask_mode_rerank_suffix": {
+        "en": " → rerank top-{keep}",
+        "ru": " → реранк топ-{keep}",
+    },
+    "ask_messages_retrieved": {
+        "en": "{n} retrieved",
+        "ru": "найдено: {n}",
+    },
     "report_meta_period_unread": {
         "en": "unread / full history (no date filter)",
         "ru": "непрочитанные / вся история (без фильтра по дате)",
