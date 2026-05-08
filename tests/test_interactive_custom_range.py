@@ -17,20 +17,28 @@ from unread.interactive import _count_custom_range
 
 
 def test_call_site_passes_utc_aware_datetimes_to_count_custom_range():
-    """Pin the call-site fix at interactive.py ~972 — the strptime result
-    must have .replace(tzinfo=UTC) applied so it lands tz-aware."""
+    """Pin the call-site fix in the custom-range step — the strptime
+    result must have .replace(tzinfo=UTC) applied so it lands tz-aware
+    by the time it reaches `_count_custom_range` / `_count_custom_range_topic`.
+
+    The construction may live inline at the call site or in local
+    variables a few lines above (e.g. when the step dispatches between
+    chat-wide and topic-scoped helpers); either layout is fine as long
+    as both bounds end up tz-aware before the helper sees them.
+    """
     src = inspect.getsource(__import__("unread.interactive", fromlist=["interactive"]))
-    # Find the `_count_custom_range(` call and capture surrounding context.
-    idx = src.find("_count_custom_range(\n")
-    assert idx > 0, "couldn't find the _count_custom_range call site"
-    # Window: ~600 chars after the call should include the since/until kwargs.
-    window = src[idx : idx + 800]
-    # Both `since=` and `until=` lines must apply tzinfo=UTC.
-    assert "tzinfo=UTC" in window, (
-        f"call site at ~interactive.py:972 must build tz-aware datetimes; got:\n{window}"
-    )
-    # Belt-and-suspenders: count the strptime + tzinfo combos. Two date
-    # bounds → at least two tzinfo=UTC applications.
+    # Anchor on the wizard's custom-range handler block (not the
+    # `_period_to_db_filters` helper, which has a similar `period ==
+    # "custom"` check). The dispatch between chat-wide and topic-scoped
+    # helpers pushed the kwargs out of a tight window after the call,
+    # so we anchor at the block start instead.
+    idx = src.find('if period == "custom" and chat is not None')
+    assert idx > 0, "couldn't find the wizard custom-range handler block"
+    # Wide window: covers both since/until construction AND the call(s).
+    window = src[idx : idx + 1600]
+    assert "_count_custom_range" in window, "custom-range block must call the helper"
+    # Both `since=` and `until=` bounds must apply tzinfo=UTC.
+    assert "tzinfo=UTC" in window, f"custom-range handler must build tz-aware datetimes; got:\n{window}"
     assert window.count("tzinfo=UTC") >= 2, "both since= and until= must be tz-aware"
 
 
