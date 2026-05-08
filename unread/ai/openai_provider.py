@@ -24,6 +24,15 @@ from unread.ai.providers import ChatResult, ProviderUnavailableError
 from unread.ai.trust import enforce_base_url_trust
 from unread.util.flood import retry_on_429
 
+# OpenRouter uses `HTTP-Referer` + `X-Title` to attribute requests to a
+# specific app on its public leaderboard / per-app analytics. Sending
+# them is optional but recommended; without them the app shows up as
+# "Unknown" in the OpenRouter dashboard.
+OPENROUTER_APP_HEADERS: dict[str, str] = {
+    "HTTP-Referer": "https://github.com/maxbolgarin/unread",
+    "X-Title": "unread",
+}
+
 
 def _is_reasoning_model(model: str) -> bool:
     """True when `model` is an OpenAI reasoning-class model that rejects
@@ -169,6 +178,7 @@ class OpenRouterProvider(_OpenAICompatBase):
             api_key=settings.openrouter.api_key,
             base_url=settings.ai.base_url or settings.openrouter.base_url,
             timeout=settings.openai.request_timeout_sec,
+            default_headers=OPENROUTER_APP_HEADERS,
         )
 
 

@@ -34,6 +34,7 @@ importing it doesn't drag in `analyzer/commands.py`.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from rich.console import Console
@@ -46,6 +47,38 @@ from unread.i18n import tf as _tf
 from unread.util.fsmode import tighten
 
 console = Console()
+
+# Terminals where OSC 8 hyperlinks reliably fire Cmd/Ctrl+click. Anything
+# outside this set falls back to plaintext URL rendering in the console
+# so the link is at least clickable via the terminal's built-in URL
+# detector. VS Code / Cursor / most Linux terminals advertise OSC 8
+# support but in practice line wrapping inside Rich's Markdown renderer
+# breaks the sequence often enough that clicks land on inert styled
+# text.
+_OSC8_FRIENDLY_TERMINALS = frozenset(
+    {
+        "iTerm.app",
+        "WezTerm",
+        "kitty",
+        "ghostty",
+        "Tabby",
+        "Hyper",
+    }
+)
+
+
+def _should_use_plain_citations(*, force_plain: bool) -> bool:
+    """Return True iff the console renderer should flatten `[#N](URL)`.
+
+    `force_plain=True` (user setting / `--plain-citations` flag) always
+    wins. Otherwise we auto-detect: only well-known OSC 8-friendly
+    terminal emulators keep the styled clickable form; everywhere else
+    we drop to `#N (URL)` so the URL is visible and the terminal's
+    plaintext URL detector can make it clickable.
+    """
+    if force_plain:
+        return True
+    return os.environ.get("TERM_PROGRAM", "") not in _OSC8_FRIENDLY_TERMINALS
 
 
 def _strip_md_bold(label: str) -> str:
@@ -136,7 +169,7 @@ def print_report_shell(
         console.print(render_meta_grid(meta_rows))
         console.print()  # blank line between header grid and body
         rendered = body_md
-        if plain_citations:
+        if _should_use_plain_citations(force_plain=plain_citations):
             from unread.analyzer.commands import _flatten_citations
 
             rendered = _flatten_citations(rendered)

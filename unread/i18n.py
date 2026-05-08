@@ -1001,8 +1001,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "unread — интерактивный режим  (действие: {action})",
     },
     "wiz_tips": {
-        "en": "Tips: type letters to filter (e.g. uni → UNION), ↑/↓ navigate, Enter select, ESC back, Ctrl-C cancel.",
-        "ru": "Подсказки: введите буквы для фильтра (напр. uni → UNION), ↑/↓ — навигация, Enter — выбор, ESC — назад, Ctrl-C — отмена.",
+        "en": "Tips: type letters to filter (e.g. uni → UNION), ↑/↓ navigate, Enter select, ESC back, ESC×2 exit, Ctrl-C cancel.",
+        "ru": "Подсказки: введите буквы для фильтра (напр. uni → UNION), ↑/↓ — навигация, Enter — выбор, ESC — назад, ESC×2 — выход, Ctrl-C — отмена.",
     },
     "wiz_pick_chat_n_unread": {
         "en": "Pick a chat — {n} with unread, sorted by count (type to filter, ↑/↓ to move)",
@@ -1561,6 +1561,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     "wiz_plan_preset_kv": {"en": "preset={preset}", "ru": "пресет={preset}"},
     "wiz_plan_enrich_kv": {"en": "enrich={kinds}", "ru": "обогащение={kinds}"},
     "wiz_plan_enrich_none": {"en": "enrich=none", "ru": "обогащение=ничего"},
+    # Bare values for the multiline confirm rendering — used after the
+    # row label ("enrich:" / "вопрос:" etc.) where the "key=" prefix
+    # would be redundant.
+    "wiz_plan_enrich_none_value": {"en": "none", "ru": "ничего"},
+    "wiz_plan_question_label": {"en": "question", "ru": "вопрос"},
     "wiz_plan_period_kv": {"en": "period={period}", "ru": "период={period}"},
     "wiz_plan_range_with_count": {
         "en": "({range}, {n} msgs)",
@@ -1597,6 +1602,15 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "(добавляет ~$0.003/мин аудио, ~$0.0002/фото, ~$0.0001/ссылка; точная стоимость на запуск в",
     },
     "wiz_plan_extra_enrich_hint_close": {"en": ")", "ru": ")"},
+    # Multi-line confirm-step labels for the per-kind enrichment cost
+    # estimate (computed from media counts * per-unit rates). Replaces
+    # the rate-list `wiz_plan_extra_enrich_hint` whenever we have media
+    # counts to multiply against.
+    "wiz_plan_enrich_cost_label": {"en": "+ enrichment ≈", "ru": "+ обогащение ≈"},
+    "wiz_plan_enrich_cost_assumptions": {
+        "en": "(assumes ~30s voice/videonote, ~60s video; actual cost per run in",
+        "ru": "(предполагается ~30с голос/видеонота, ~60с видео; точная стоимость в",
+    },
     "wiz_plan_zero_msgs": {
         "en": "0 messages in this period — nothing to analyze.",
         "ru": "0 сообщений за этот период — анализировать нечего.",

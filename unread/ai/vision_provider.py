@@ -161,8 +161,7 @@ class OpenAIVisionProvider(_OpenAICompatVision):
 
         if not settings.openai.api_key:
             raise ProviderUnavailableError(
-                "Vision via OpenAI selected but `openai.api_key` is empty. "
-                "Run `unread settings` to add one."
+                "Vision via OpenAI selected but `openai.api_key` is empty. Run `unread settings` to add one."
             )
         enforce_base_url_trust("openai", settings)
         kwargs: dict[str, Any] = {
@@ -181,6 +180,7 @@ class OpenRouterVisionProvider(_OpenAICompatVision):
     def _make_client(self, settings):  # type: ignore[no-untyped-def]
         from openai import AsyncOpenAI
 
+        from unread.ai.openai_provider import OPENROUTER_APP_HEADERS
         from unread.ai.trust import enforce_base_url_trust
 
         if not settings.openrouter.api_key:
@@ -193,6 +193,7 @@ class OpenRouterVisionProvider(_OpenAICompatVision):
             api_key=settings.openrouter.api_key,
             base_url=settings.ai.base_url or settings.openrouter.base_url,
             timeout=settings.openai.request_timeout_sec,
+            default_headers=OPENROUTER_APP_HEADERS,
         )
 
 
@@ -369,8 +370,7 @@ class GoogleVisionProvider:
             ) from e
         if not settings.google.api_key:
             raise ProviderUnavailableError(
-                "Vision via Google selected but `google.api_key` is empty. "
-                "Run `unread settings` to add one."
+                "Vision via Google selected but `google.api_key` is empty. Run `unread settings` to add one."
             )
         self._client = genai.Client(api_key=settings.google.api_key)
         self._settings = settings
@@ -422,8 +422,7 @@ class GoogleVisionProvider:
                     raise
                 delay = min(1.5**attempt, 30.0) + random.uniform(0, 1)
                 _user_visible_retry_status(
-                    f"Gemini {code} — retrying in {delay:.0f}s "
-                    f"(attempt {attempt + 1}/{max_retries})…"
+                    f"Gemini {code} — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})…"
                 )
                 await asyncio.sleep(delay)
         if resp is None:

@@ -100,10 +100,13 @@ async def _fetch_openai_compat(provider: str, settings) -> list[str]:  # type: i
     elif provider == "openrouter":
         if not settings.openrouter.api_key:
             return []
+        from unread.ai.openai_provider import OPENROUTER_APP_HEADERS
+
         kwargs = {
             "api_key": settings.openrouter.api_key,
             "base_url": settings.ai.base_url or settings.openrouter.base_url,
             "timeout": settings.openai.request_timeout_sec,
+            "default_headers": OPENROUTER_APP_HEADERS,
         }
     elif provider == "local":
         kwargs = {
@@ -316,10 +319,13 @@ async def _verify_openai_compat(name: str, settings) -> tuple[bool, str]:  # typ
     elif name == "openrouter":
         if not settings.openrouter.api_key:
             return False, "no API key"
+        from unread.ai.openai_provider import OPENROUTER_APP_HEADERS
+
         kwargs = {
             "api_key": settings.openrouter.api_key,
             "base_url": settings.ai.base_url or settings.openrouter.base_url,
             "timeout": min(10.0, settings.openai.request_timeout_sec),
+            "default_headers": OPENROUTER_APP_HEADERS,
         }
     else:  # local
         kwargs = {

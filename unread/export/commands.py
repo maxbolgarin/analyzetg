@@ -635,6 +635,11 @@ async def _dump_single(
     if with_transcribe and not effective_enrich.any_enabled():
         effective_enrich = EnrichOpts(voice=True, videonote=True, video=True)
 
+    # `source_language` intentionally NOT passed to `prepare_chat_run`:
+    # see the matching note in `analyzer/commands.py`. The source-
+    # language hint is consumed only by `compose_system_prompt`, which
+    # `cmd_dump`'s analyzer counterpart calls — `dump` itself doesn't
+    # invoke an LLM for the dump, so the hint has no consumer here.
     prepared = await prepare_chat_run(
         client=client,
         repo=repo,
@@ -657,7 +662,6 @@ async def _dump_single(
         with_comments=with_comments,
         language=language,
         report_language=report_language,
-        source_language=source_language,
     )
 
     if save_media and prepared.messages:
@@ -745,6 +749,8 @@ async def _dump_forum_per_topic(
     ext = {"md": "md", "jsonl": "jsonl", "csv": "csv"}.get(fmt, "md")
     chat_slug_str = _chat_slug(chat_title, chat_id)
 
+    # `source_language` is not consumed by the dump pipeline (see the
+    # note on the earlier `prepare_chat_run` call). Don't pass it down.
     async for prepared in prepare_chat_runs_per_topic(
         client=client,
         repo=repo,
@@ -763,7 +769,6 @@ async def _dump_forum_per_topic(
         yes=yes,
         language=language,
         report_language=report_language,
-        source_language=source_language,
     ):
         try:
             if save_media and prepared.messages:

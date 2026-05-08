@@ -326,8 +326,7 @@ def make_audio_client(provider: str, settings):  # type: ignore[no-untyped-def]
     if name == "openai":
         if not settings.openai.api_key:
             raise ProviderUnavailableError(
-                "audio provider 'openai' has no API key — set OPENAI_API_KEY or "
-                "run `unread settings`."
+                "audio provider 'openai' has no API key — set OPENAI_API_KEY or run `unread settings`."
             )
         return AsyncOpenAI(api_key=settings.openai.api_key, timeout=timeout)
     if name == "openrouter":
@@ -336,10 +335,13 @@ def make_audio_client(provider: str, settings):  # type: ignore[no-untyped-def]
                 "audio provider 'openrouter' has no API key — set OPENROUTER_API_KEY or "
                 "run `unread settings`."
             )
+        from unread.ai.openai_provider import OPENROUTER_APP_HEADERS
+
         return AsyncOpenAI(
             api_key=settings.openrouter.api_key,
             base_url=settings.openrouter.base_url,
             timeout=timeout,
+            default_headers=OPENROUTER_APP_HEADERS,
         )
     if name == "local":
         return AsyncOpenAI(
@@ -348,6 +350,5 @@ def make_audio_client(provider: str, settings):  # type: ignore[no-untyped-def]
             timeout=timeout,
         )
     raise ProviderUnavailableError(
-        f"audio provider {name!r} is not Whisper-compatible. "
-        "Pick openai / openrouter / local."
+        f"audio provider {name!r} is not Whisper-compatible. Pick openai / openrouter / local."
     )

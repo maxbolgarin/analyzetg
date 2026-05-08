@@ -94,15 +94,59 @@ ALL_LOCAL = object()
 _AVG_TOKENS_PER_MSG = 60
 
 
+# Window for the double-Esc "exit wizard" shortcut. 500ms matches the
+# OS-typical double-click window — short enough that deliberate back-
+# stepping (Esc · pause · Esc) won't trip it, long enough that a quick
+# Esc-Esc tap registers as "get me out" rather than two single backs.
+_DOUBLE_ESC_WINDOW_S: float = 0.5
+
+# Module-level timestamp of the most recent Esc key event (across all
+# prompts). prompt_toolkit's key handler exits the current prompt on
+# the first Esc, so we cannot detect Esc-Esc within a single picker —
+# instead we straddle prompts: if the user presses Esc on picker N and
+# then Esc on picker N+1 within the window, the second Esc cancels the
+# whole wizard. Single-threaded asyncio, so no lock needed.
+_LAST_ESC_AT: float = 0.0
+
+
+def _is_double_esc(now: float, last_esc_at: float, window: float) -> bool:
+    """Decide whether `now` qualifies as the second tap of a double-Esc.
+
+    Extracted so the timing logic in `_bind_escape` is unit-testable
+    without spinning up prompt_toolkit. The strict `0 <` lower bound
+    rules out the very first Esc (where `last_esc_at` is the initial
+    `0.0` sentinel), which would otherwise satisfy `now - 0 <= window`
+    on a fresh interpreter and mis-classify a single Esc as a double.
+    """
+    return 0 < (now - last_esc_at) <= window
+
+
 def _bind_escape(question, value):
     """Make ESC exit the questionary prompt with `value`.
 
-    Use `BACK` on steps that have a back action; use `None` on the first step
-    (same semantics as Ctrl-C there). `eager=True` so we win over any default
-    ESC behaviour (e.g. clearing the search filter)."""
+    Use `BACK` on steps that have a back action; use `None` on the first
+    step (same semantics as Ctrl-C there). `eager=True` so we win over
+    any default ESC behaviour (e.g. clearing the search filter).
+
+    Double-tap exit: pressing Esc twice within `_DOUBLE_ESC_WINDOW_S`
+    exits the prompt with `None` (full cancel) regardless of the
+    caller's `value`. Wizard callers already treat a `None` result as
+    "user cancelled" and unwind the loop.
+    """
+    import time as _time
 
     @question.application.key_bindings.add(Keys.Escape, eager=True)
     def _(event):
+        global _LAST_ESC_AT
+        now = _time.monotonic()
+        if _is_double_esc(now, _LAST_ESC_AT, _DOUBLE_ESC_WINDOW_S):
+            # Second Esc within the window → cancel the wizard entirely.
+            # Reset the timestamp so a third stray press doesn't get
+            # mis-classified against this same window.
+            _LAST_ESC_AT = 0.0
+            event.app.exit(result=None)
+            return
+        _LAST_ESC_AT = now
         event.app.exit(result=value)
 
     return question
@@ -768,6 +812,10 @@ async def _collect_answers(
         thread_id: int | None = None
         forum_all_flat = False
         forum_all_per_topic = False
+        # Authoritative unread count for the picked single topic (from
+        # GetForumTopicsRequest). None when no single topic is picked
+        # (chat is not a forum, or user picked all-flat / per-topic mode).
+        topic_unread: int | None = None
         preset: str | None = None
         enrich_kinds: list[str] | None = None
         period: str | None = None
@@ -778,6 +826,12 @@ async def _collect_answers(
         # Resolved linked-chat id for the picked channel, cached so a
         # back-step doesn't refetch from Telegram.
         linked_chat_id: int | None = None
+        # Estimated msg count from the linked discussion chat for the
+        # selected analysis window. Filled lazily after the period is
+        # picked when with_comments is on; lets the confirm step show
+        # `messages ≈ N + ~M comments` and roll comments into the
+        # analyze cost estimate.
+        comments_count_est: int | None = None
         # Local, step-level state for output + mark_read — start from CLI
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
@@ -793,6 +847,14 @@ async def _collect_answers(
         # know the chat and, for forums, the thread). Used by `_pick_period`
         # to decorate choices and by the confirm step to estimate cost.
         period_counts: dict[str, int | None] = {}
+        # Per-media-kind counts (voice / videonote / video / photo / doc /
+        # links / text). For topics, this is filled by the period-step
+        # walk (`_fetch_topic_period_counts` returns it for free off the
+        # same iteration). For chat-wide scope, the enrich step fills it
+        # from `Repo.media_breakdown`. Confirm step renders it on the
+        # `enrich:` row so the user sees how much enrichment work each
+        # enabled kind will trigger.
+        media_counts: dict[str, int] = {}
 
         run_on_all = False
         run_on_all_local = False
@@ -808,6 +870,14 @@ async def _collect_answers(
                 run_on_all_local = False
                 chat = None
                 linked_chat_id = None
+                # Topic-scoped state from a prior thread step, plus any
+                # cached per-period / media counts: a different chat
+                # means stale.
+                thread_id = None
+                topic_unread = None
+                period_counts = {}
+                media_counts = {}
+                comments_count_est = None
                 # Ask mode swaps "Run on all N unread" for "Search ALL
                 # synced chats (local DB)" — the analyze/dump batch flow
                 # doesn't make sense for ask (one question across many
@@ -914,7 +984,11 @@ async def _collect_answers(
                 if result is None:
                     console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
-                thread_id, forum_all_flat, forum_all_per_topic = result
+                thread_id, forum_all_flat, forum_all_per_topic, topic_unread = result
+                # Different topic → different per-period and media counts.
+                # Force a refetch on the next period / enrich step.
+                period_counts = {}
+                media_counts = {}
                 step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
 
             elif step == "preset":
@@ -941,17 +1015,37 @@ async def _collect_answers(
 
             elif step == "period":
                 # Lazily fetch per-period counts once we know chat+thread.
-                # `unread_hint` comes from the dialog picker (chat object).
                 # ALL_LOCAL (ask mode) has no chat scope, so skip the
                 # per-chat count fetch — counts are simply absent.
                 if not period_counts and chat is not None:
-                    unread_hint = int(chat.get("unread") or 0)
-                    period_counts = await _fetch_period_counts(
-                        client,
-                        chat_id=int(chat["chat_id"]),
-                        thread_id=thread_id,
-                        unread_hint=unread_hint,
-                    )
+                    if thread_id is not None:
+                        # Single-topic scope: msg_ids interleave across
+                        # topics in a forum, so the chat-level
+                        # `_fetch_period_counts` approximation is wrong
+                        # here. `topic_unread` is authoritative (from
+                        # GetForumTopicsRequest); periods come from a
+                        # capped iteration over the topic's messages.
+                        # The same walk also classifies each message's
+                        # media so we can show per-kind counts on the
+                        # `enrich:` row at confirm time without an
+                        # extra DB round-trip.
+                        period_counts, media_counts = await _fetch_topic_period_counts(
+                            client,
+                            chat_id=int(chat["chat_id"]),
+                            thread_id=thread_id,
+                            topic_unread=int(topic_unread or 0),
+                        )
+                    else:
+                        # Whole-chat scope (incl. forum all-flat / all-per-topic
+                        # modes where thread_id is None). `unread_hint`
+                        # comes from the dialog picker (chat object).
+                        unread_hint = int(chat.get("unread") or 0)
+                        period_counts = await _fetch_period_counts(
+                            client,
+                            chat_id=int(chat["chat_id"]),
+                            thread_id=None,
+                            unread_hint=unread_hint,
+                        )
                 result = await _pick_period(counts=period_counts)
                 if result is BACK:
                     # Period sits between `preset` (analyze) / chat-or-thread
@@ -984,16 +1078,49 @@ async def _collect_answers(
                     # parameter, skewing the confirm-screen count by the
                     # host's TZ offset (a user in NZST seeing yesterday's
                     # messages counted under today's date).
-                    period_counts["custom"] = await _count_custom_range(
-                        client,
-                        chat_id=int(chat["chat_id"]),
-                        thread_id=thread_id,
-                        since=datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
+                    _since_dt = (
+                        datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
                         if custom_since
-                        else None,
-                        until=datetime.strptime(custom_until, "%Y-%m-%d").replace(tzinfo=UTC)
+                        else None
+                    )
+                    _until_dt = (
+                        datetime.strptime(custom_until, "%Y-%m-%d").replace(tzinfo=UTC)
                         if custom_until
-                        else None,
+                        else None
+                    )
+                    if thread_id is not None:
+                        # Same reasoning as the period-counts dispatch
+                        # above: msg_id arithmetic is chat-wide, so use
+                        # iteration for a single topic.
+                        period_counts["custom"] = await _count_custom_range_topic(
+                            client,
+                            chat_id=int(chat["chat_id"]),
+                            thread_id=thread_id,
+                            since=_since_dt,
+                            until=_until_dt,
+                        )
+                    else:
+                        period_counts["custom"] = await _count_custom_range(
+                            client,
+                            chat_id=int(chat["chat_id"]),
+                            thread_id=None,
+                            since=_since_dt,
+                            until=_until_dt,
+                        )
+                # When comments are on for a channel, estimate the linked
+                # discussion's message count for the same window so the
+                # plan reflects the real workload. The actual run pulls
+                # comments by date range bounded by the channel posts'
+                # date span; we approximate that here per the chosen
+                # period. Best-effort — None on lookup failure.
+                if with_comments and linked_chat_id is not None and chat is not None and period:
+                    comments_count_est = await _estimate_comments_count(
+                        client,
+                        channel_chat=chat,
+                        linked_chat_id=linked_chat_id,
+                        period=period,
+                        custom_since=custom_since,
+                        custom_until=custom_until,
                     )
                 # Ask mode skips output/mark_read but keeps enrich (so
                 # voice/image/link content becomes searchable mid-flow).
@@ -1008,8 +1135,14 @@ async def _collect_answers(
                 # period-scoped: filter the local DB by the time/msg-id
                 # window the user just picked so "(N in db)" reflects
                 # what the run will actually process.
-                media_counts: dict[str, int] = {}
-                if chat is not None:
+                #
+                # For a single forum topic, the period step's walk
+                # already classified every message's media (see
+                # `_fetch_topic_period_counts`) and populated
+                # `media_counts` for free — and from Telegram, not the
+                # DB, so it isn't gated on whether the topic has been
+                # synced. Skip the DB round-trip in that case.
+                if chat is not None and not media_counts:
                     breakdown_kwargs = _period_to_db_filters(
                         period=period,
                         custom_since=custom_since,
@@ -1109,83 +1242,105 @@ async def _collect_answers(
                 step = "confirm"
 
             elif step == "confirm":
-                summary_bits = []
+                # Header line: action + chat scope (chat title, with
+                # forum topic id / mode qualifier appended). Lead with
+                # the action (analyze / dump / ask) so the user doesn't
+                # have to scroll up to remember which command they ran.
                 if run_on_all:
-                    summary_bits.append(i18n_t("wiz_plan_all_unread_chats"))
+                    header_value = i18n_t("wiz_plan_all_unread_chats")
                 elif run_on_all_local:
-                    # Ask mode "search ALL synced chats" path. Re-uses the
-                    # picker label for consistency with the chat-step echo.
-                    summary_bits.append(i18n_t("wiz_ask_all_local"))
+                    # Ask mode "search ALL synced chats" path. Re-uses
+                    # the picker label for consistency with the chat-
+                    # step echo.
+                    header_value = i18n_t("wiz_ask_all_local")
                 else:
-                    summary_bits.append(chat.get("title") or str(chat["chat_id"]))
-                if thread_id:
-                    summary_bits.append(i18n_tf("wiz_plan_topic", id=thread_id))
-                if forum_all_flat:
-                    summary_bits.append(i18n_t("wiz_plan_all_flat"))
-                if forum_all_per_topic:
-                    summary_bits.append(i18n_t("wiz_plan_per_topic"))
-                if mode == "analyze":
-                    summary_bits.append(i18n_tf("wiz_plan_preset_kv", preset=preset))
-                # Show the enrichment choice explicitly so the user can
-                # sanity-check it before spending — the step happens early
-                # in the wizard and is easy to forget by the time we hit
-                # confirm. Applies to analyze, dump, and ask (all three
-                # walk through the enrich step now).
-                if enrich_kinds is not None and not run_on_all:
-                    if enrich_kinds:
-                        summary_bits.append(i18n_tf("wiz_plan_enrich_kv", kinds=",".join(enrich_kinds)))
-                    else:
-                        summary_bits.append(i18n_t("wiz_plan_enrich_none"))
-                if not run_on_all:
-                    summary_bits.append(i18n_tf("wiz_plan_period_kv", period=period))
-                    if period == "custom":
-                        # Include the estimated count next to the date
-                        # range so the user sees the scope at confirm time.
-                        n = period_counts.get("custom") if period_counts else None
-                        range_str = f"{custom_since or ''}..{custom_until or ''}"
-                        summary_bits.append(
-                            i18n_tf("wiz_plan_range_with_count", range=range_str, n=n)
-                            if n is not None
-                            else i18n_tf("wiz_plan_range", range=range_str)
-                        )
-                    elif period == "from_msg" and custom_from_msg:
-                        summary_bits.append(i18n_tf("wiz_plan_from", ref=custom_from_msg))
-                # Ask mode skips the output line (no save step) but DOES
-                # surface the mark-read pick when applicable — single-chat
-                # ask scope is the only case it matters, and ALL_LOCAL
-                # skips the step entirely so chosen_mark_read stays at its
-                # CLI / default value (False) and isn't shown.
-                if mode != "ask":
-                    summary_bits.append(
-                        i18n_t("wiz_plan_console")
-                        if chosen_console_out
-                        else (
-                            i18n_tf("wiz_plan_file_kv", path=chosen_output_path)
-                            if chosen_output_path
-                            else i18n_t("wiz_plan_save_reports")
+                    header_value = chat.get("title") or str(chat["chat_id"])
+                    if thread_id:
+                        header_value += f" / {i18n_tf('wiz_plan_topic', id=thread_id)}"
+                    elif forum_all_flat:
+                        header_value += f" / {i18n_t('wiz_plan_all_flat')}"
+                    elif forum_all_per_topic:
+                        header_value += f" / {i18n_t('wiz_plan_per_topic')}"
+                console.print(f"[bold]{i18n_t('wiz_plan_label')} ([yellow]{mode}[/]):[/] {header_value}")
+
+                # Body rows: collected as (label, value) pairs and
+                # printed with aligned label widths. The ENRICH row
+                # carries per-kind counts ("voice 8 · video 3 · …")
+                # built from `media_counts` so the user sees the
+                # actual workload before committing.
+                rows: list[tuple[str, str]] = []
+                if mode == "analyze" and preset:
+                    rows.append((i18n_t("wiz_summary_step_preset"), str(preset)))
+                if not run_on_all and not run_on_all_local:
+                    rows.append(
+                        (
+                            i18n_t("wiz_summary_step_period"),
+                            _format_period_for_plan(
+                                period,
+                                custom_since,
+                                custom_until,
+                                custom_from_msg,
+                                period_counts,
+                            ),
                         )
                     )
-                    if chosen_mark_read:
-                        summary_bits.append(i18n_t("wiz_plan_mark_read"))
-                elif not run_on_all_local and chosen_mark_read:
-                    # ask + single-chat scope only: report the toggle.
-                    summary_bits.append(i18n_t("wiz_plan_mark_read"))
-                # Question is supplied by the ask CLI on the side; show it
-                # here so the user sees what they're about to ask.
+                # Enrichment is asked for analyze / dump / ask (all
+                # three walk the enrich step), but not the run-on-all
+                # variants where it's auto.
+                if enrich_kinds is not None and not run_on_all and not run_on_all_local:
+                    rows.append(
+                        (
+                            i18n_t("wiz_summary_step_enrich"),
+                            _format_enrich_for_plan(enrich_kinds, media_counts),
+                        )
+                    )
+                # Output row: not shown for ask (no save step).
+                if mode != "ask":
+                    if chosen_console_out:
+                        output_value = i18n_t("wiz_plan_console")
+                    elif chosen_output_path:
+                        output_value = str(chosen_output_path)
+                    else:
+                        output_value = i18n_t("wiz_plan_save_reports")
+                    rows.append((i18n_t("wiz_summary_step_output"), output_value))
+                # mark-read row: shown for analyze / dump and for ask
+                # in single-chat scope. ALL_LOCAL ask hides it because
+                # there's no single chat to mark.
+                show_mark_read = chosen_mark_read and (mode != "ask" or not run_on_all_local)
+                if show_mark_read:
+                    rows.append(
+                        (
+                            i18n_t("wiz_summary_step_mark_read"),
+                            i18n_t("wiz_summary_yes"),
+                        )
+                    )
+                # Question (ask mode only): shown last so it reads as
+                # the natural-language tail of the plan.
                 if mode == "ask" and question:
-                    summary_bits.append(question)
-                # Lead with the action (analyze / dump / …) so the confirm
-                # line is unambiguous on its own — the user shouldn't have to
-                # scroll up to remember which command they invoked.
-                console.print(
-                    f"[bold]{i18n_t('wiz_plan_label')} ([yellow]{mode}[/]):[/] " + " / ".join(summary_bits)
-                )
+                    rows.append((i18n_t("wiz_plan_question_label"), str(question)))
+
+                if rows:
+                    label_w = max(len(label) for label, _ in rows)
+                    for label, value in rows:
+                        # `+ 1` for the trailing colon; we ljust the
+                        # plain text so Rich's render width math isn't
+                        # confused by markup inside `value`.
+                        padded = f"{label}:".ljust(label_w + 1)
+                        console.print(f"  [grey70]{padded}[/] {value}")
 
                 # Only show a cost estimate for the analyze flow (dump
                 # doesn't hit OpenAI for chat completion) and when we have
                 # a concrete count.
                 if mode == "analyze" and not run_on_all and preset is not None:
-                    n_msgs = _count_for_period(period, period_counts)
+                    n_channel = _count_for_period(period, period_counts)
+                    # When comments are on, fold the linked-chat estimate
+                    # into the messages tally so the cost estimate covers
+                    # the full workload — both the channel posts and the
+                    # discussion replies are sent through the analyzer.
+                    if n_channel is not None and with_comments and comments_count_est is not None:
+                        n_msgs = n_channel + comments_count_est
+                    else:
+                        n_msgs = n_channel
                     if n_msgs is not None and n_msgs > 0:
                         wizard_presets = get_presets(
                             settings.locale.report_language or settings.locale.language or "en"
@@ -1203,24 +1358,41 @@ async def _collect_answers(
                                 preset=chosen_preset,
                                 settings=settings,
                             )
+                        # If comments are folded in, render the breakdown
+                        # so the user sees where the count comes from
+                        # (e.g. "537 + ~5234 comments").
+                        msg_count_str = _format_msg_count_with_comments(
+                            n_channel,
+                            comments_count_est if with_comments else None,
+                        )
                         if cost_lo is None:
                             console.print(
-                                f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                                f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {msg_count_str}  "
                                 f"[grey70]{i18n_t('wiz_plan_pricing_missing')}[/]"
                             )
                         else:
                             console.print(
-                                f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                                f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {msg_count_str}  "
                                 f"[grey70]{i18n_t('wiz_plan_cost_approx')}[/] "
                                 f"{_fmt_cost_range(cost_lo, cost_hi)}  "
                                 f"[grey70]{i18n_t('wiz_plan_analysis_estimate')}[/]"
                             )
                         # The analysis estimate doesn't include enrichment
-                        # costs — we don't know per-message media counts at
-                        # wizard time. Call it out so the user doesn't get
-                        # surprised when `unread stats` shows extra spend.
+                        # costs. When media_counts is populated (topic walk
+                        # or DB breakdown), compute the actual per-kind
+                        # estimate; otherwise fall back to the rate-list
+                        # hint so users still see the order-of-magnitude.
                         extra_kinds = _extra_enrich_kinds(enrich_kinds)
-                        if extra_kinds:
+                        enrich_cost_est = _estimate_enrich_cost(enrich_kinds, media_counts)
+                        if enrich_cost_est is not None and enrich_kinds:
+                            console.print(
+                                f"  [dim yellow]{i18n_t('wiz_plan_enrich_cost_label')}[/] "
+                                f"{_fmt_cost(enrich_cost_est)}  "
+                                f"[grey70]{i18n_t('wiz_plan_enrich_cost_assumptions')}[/] "
+                                "[cyan]unread stats[/]"
+                                f"[grey70]{i18n_t('wiz_plan_extra_enrich_hint_close')}[/]"
+                            )
+                        elif extra_kinds:
                             console.print(
                                 f"  [dim yellow]{i18n_t('wiz_plan_extra_enrich_label')}[/] "
                                 f"[yellow]{', '.join(extra_kinds)}[/] "
@@ -1231,10 +1403,14 @@ async def _collect_answers(
                     elif n_msgs == 0:
                         console.print(f"  [yellow]{i18n_t('wiz_plan_zero_msgs')}[/]")
                 elif mode == "dump" and not run_on_all:
-                    n_msgs = _count_for_period(period, period_counts)
-                    if n_msgs is not None:
+                    n_channel = _count_for_period(period, period_counts)
+                    if n_channel is not None:
+                        msg_count_str = _format_msg_count_with_comments(
+                            n_channel,
+                            comments_count_est if with_comments else None,
+                        )
                         console.print(
-                            f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {n_msgs}  "
+                            f"  [grey70]{i18n_t('wiz_plan_msgs_approx')}[/] {msg_count_str}  "
                             f"[grey70]{i18n_t('wiz_plan_dump_free')}[/]"
                         )
 
@@ -1507,6 +1683,363 @@ async def _count_custom_range(
         return None
 
 
+# Cap on per-topic message walks. Five sequential GetReplies pages at
+# Telethon's default chunk_size of 100 — adds ~1-2s of latency at the
+# period-picker step in the worst case (busy topic). Periods that extend
+# past the oldest walked message are returned as None ("—").
+_TOPIC_COUNT_CAP = 500
+
+
+def _classify_walk_message(msg) -> dict[str, bool]:
+    """Per-message media flags matching `Repo.media_breakdown`'s schema.
+
+    Used by `_fetch_topic_period_counts` to tally voice / videonote /
+    video / photo / doc / links / text counts during the same walk that
+    produces period buckets — so the confirm step can render per-kind
+    enrichment scope without an extra DB round-trip and without
+    requiring the topic to be already synced.
+
+    Key names mirror `media_breakdown`: singulars for media kinds
+    (`voice`, `videonote`, `video`, `photo`, `doc`) and plural `links` /
+    `text`. Mapping at the call site — wizard's enrich kind `image`
+    maps to `photo`, `link` to `links`.
+    """
+    flags: dict[str, bool] = {
+        "voice": False,
+        "videonote": False,
+        "video": False,
+        "photo": False,
+        "doc": False,
+        "links": False,
+        "text": False,
+    }
+    text = getattr(msg, "message", None) or getattr(msg, "text", None) or ""
+    if text:
+        flags["text"] = True
+
+    media = getattr(msg, "media", None)
+    if media is not None:
+        # Lazy-import Telethon types to keep module-load cost off the
+        # CLI's hot path (`unread --help` etc.).
+        from telethon.tl.types import (
+            DocumentAttributeAudio,
+            DocumentAttributeVideo,
+            MessageMediaDocument,
+            MessageMediaPhoto,
+            MessageMediaWebPage,
+        )
+
+        if isinstance(media, MessageMediaPhoto):
+            flags["photo"] = True
+        elif isinstance(media, MessageMediaDocument):
+            doc = getattr(media, "document", None)
+            attrs = getattr(doc, "attributes", []) or []
+            voice = video = round_msg = False
+            for a in attrs:
+                if isinstance(a, DocumentAttributeAudio) and getattr(a, "voice", False):
+                    voice = True
+                elif isinstance(a, DocumentAttributeVideo):
+                    video = True
+                    if getattr(a, "round_message", False):
+                        round_msg = True
+            # Round-message video notes win over plain video; voice over
+            # generic audio. Anything else is a doc.
+            if round_msg:
+                flags["videonote"] = True
+            elif voice:
+                flags["voice"] = True
+            elif video:
+                flags["video"] = True
+            else:
+                flags["doc"] = True
+        elif isinstance(media, MessageMediaWebPage):
+            flags["links"] = True
+
+    if not flags["links"]:
+        entities = getattr(msg, "entities", None) or []
+        if entities:
+            try:
+                from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
+
+                for e in entities:
+                    if isinstance(e, (MessageEntityUrl, MessageEntityTextUrl)):
+                        flags["links"] = True
+                        break
+            except Exception:  # pragma: no cover — defensive only
+                pass
+    # Fallback heuristic — matches `media_breakdown`'s `text LIKE '%http%'`
+    # so that plain-text URLs (no entity, no preview) still register.
+    if not flags["links"] and "http" in text:
+        flags["links"] = True
+
+    return flags
+
+
+async def _fetch_topic_period_counts(
+    client,
+    *,
+    chat_id: int,
+    thread_id: int,
+    topic_unread: int,
+) -> tuple[dict[str, int | None], dict[str, int]]:
+    """Per-period message counts AND per-kind media tally for a topic.
+
+    `_fetch_period_counts`'s msg_id-difference trick (`latest - first + 1`)
+    is chat-wide because Telegram assigns msg_ids sequentially per chat,
+    not per topic — for a topic, the difference counts every message
+    between the topic's bounds *across all topics*, which is wildly
+    wrong (often the chat's whole unread total).
+
+    Workaround: walk the topic's messages once with `iter_messages
+    (reply_to=thread_id)` up to `_TOPIC_COUNT_CAP` and bucket each by
+    date. `topic_unread` is authoritative (from `GetForumTopicsRequest`)
+    and used directly for the "unread" row.
+
+    The same walk also classifies each message's media via
+    `_classify_walk_message`, returning a media tally that the confirm
+    step renders on the `enrich:` row. Saturated walks under-count both
+    period and media tallies — periods detect this via the boundary-vs-
+    oldest-walked check; media counts are reported as a lower bound
+    (the user is already informed by the saturated period buckets).
+
+    Cost: roughly `cap / 100` sequential RPCs at the period-picker step.
+    Periods whose start is older than the oldest walked message are
+    returned as None so the picker shows "—" instead of a guess.
+    """
+    now = datetime.now(UTC)
+    boundaries: list[tuple[str, datetime]] = [
+        ("last24h", now - timedelta(hours=24)),
+        ("last96h", now - timedelta(hours=96)),
+        ("last7", now - timedelta(days=7)),
+        ("last30", now - timedelta(days=30)),
+        ("last90", now - timedelta(days=90)),
+        ("year_start", datetime(now.year, 1, 1, tzinfo=UTC)),
+    ]
+    counts: dict[str, int] = {key: 0 for key, _ in boundaries}
+    media: dict[str, int] = {
+        "voice": 0,
+        "videonote": 0,
+        "video": 0,
+        "photo": 0,
+        "doc": 0,
+        "links": 0,
+        "text": 0,
+        "any_media": 0,
+    }
+    walked = 0
+    oldest: datetime | None = None
+
+    try:
+        async for msg in client.iter_messages(chat_id, reply_to=thread_id, limit=_TOPIC_COUNT_CAP):
+            walked += 1
+            md = getattr(msg, "date", None)
+            if md is None:
+                continue
+            oldest = md
+            for key, boundary in boundaries:
+                if md >= boundary:
+                    counts[key] += 1
+            flags = _classify_walk_message(msg)
+            for key, present in flags.items():
+                if present:
+                    media[key] += 1
+            if any(flags[k] for k in ("voice", "videonote", "video", "photo", "doc")):
+                media["any_media"] += 1
+    except Exception as e:
+        log.debug(
+            "topic_period_counts.error",
+            chat_id=chat_id,
+            thread_id=thread_id,
+            err=str(e)[:200],
+        )
+        out_err: dict[str, int | None] = {key: None for key, _ in boundaries}
+        out_err["full"] = None
+        out_err["unread"] = topic_unread if topic_unread else None
+        # Media counts are best-effort: return whatever we collected
+        # before the error (zeros if the iteration never started).
+        media["total"] = walked
+        return out_err, media
+
+    saturated = walked >= _TOPIC_COUNT_CAP
+    out: dict[str, int | None] = {}
+    for key, boundary in boundaries:
+        if saturated and oldest is not None and oldest > boundary:
+            # We hit the cap before reaching this period's start, so the
+            # bucket is an undercount. Return None instead of misleading.
+            out[key] = None
+        else:
+            out[key] = counts[key]
+    # `full` is the total topic message count; we only know it exactly
+    # when the walk wasn't truncated.
+    out["full"] = None if saturated else walked
+    out["unread"] = topic_unread if topic_unread else None
+    # Mirror `media_breakdown`'s `total` so downstream code can treat
+    # the dict the same way.
+    media["total"] = walked
+    return out, media
+
+
+async def _estimate_comments_count(
+    client,
+    *,
+    channel_chat: dict,
+    linked_chat_id: int,
+    period: str,
+    custom_since: str | None,
+    custom_until: str | None,
+) -> int | None:
+    """Estimate the linked discussion's msg count for the analysis window.
+
+    Comments are pulled at run time by date range — bounded either by
+    the user-picked period (when explicit) or by the date span of the
+    channel's pulled posts (when period == "unread"/"from_msg"/"full"
+    and `since/until` aren't set upstream). This helper mirrors that
+    logic on a best-effort basis so the wizard's confirm step can show
+    `messages ≈ N + ~M comments` instead of hiding the comments work.
+
+    Strategy by period:
+      - canonical date periods (`last24h` … `year_start`, `custom`)
+        → known `since`/`until` → cheap msg-id arithmetic on the
+          linked chat (`_count_custom_range`, two `get_messages` calls).
+      - `unread` → look up the date of the oldest unread channel msg
+        (one extra `get_messages(min_id=read_inbox_max_id, reverse=True)`
+        call), then arithmetic on the linked chat from that date.
+      - `full` → no lower bound; estimate the linked chat's full
+        history.
+      - `from_msg` → would need to resolve the ref to a msg id and
+        then a date; skip (returns None) — uncommon path, the actual
+        run still works, just no estimate on the plan.
+
+    Returns None when the window can't be derived or the lookup fails.
+    """
+    now = datetime.now(UTC)
+    since: datetime | None = None
+    until: datetime | None = None
+
+    if period == "last24h":
+        since = now - timedelta(hours=24)
+    elif period == "last96h":
+        since = now - timedelta(hours=96)
+    elif period == "last7":
+        since = now - timedelta(days=7)
+    elif period == "last30":
+        since = now - timedelta(days=30)
+    elif period == "last90":
+        since = now - timedelta(days=90)
+    elif period == "year_start":
+        since = datetime(now.year, 1, 1, tzinfo=UTC)
+    elif period == "custom":
+        if custom_since:
+            since = datetime.strptime(custom_since, "%Y-%m-%d").replace(tzinfo=UTC)
+        if custom_until:
+            until = datetime.strptime(custom_until, "%Y-%m-%d").replace(tzinfo=UTC)
+    elif period == "unread":
+        # Date of the oldest unread channel msg → comments since then.
+        # Without a read marker (fresh channel sub) we have no
+        # derivable lower bound — better to return None than to
+        # silently estimate the linked chat's full history, which
+        # would be wildly inflated.
+        read_max = int(channel_chat.get("read_inbox_max_id") or 0)
+        if not read_max:
+            return None
+        try:
+            msgs = await client.get_messages(
+                int(channel_chat["chat_id"]),
+                limit=1,
+                min_id=read_max,
+                reverse=True,
+            )
+        except Exception as e:
+            log.debug("comments_estimate.unread_lookup_failed", err=str(e)[:200])
+            return None
+        if not msgs or not getattr(msgs[0], "date", None):
+            # Read marker exists but no msgs after it → nothing unread
+            # → no comments to estimate.
+            return None
+        since = msgs[0].date
+    elif period == "full":
+        pass  # since=None → linked chat's full history
+    else:
+        # `from_msg` and any future periods we haven't taught about
+        # land here — skip rather than guess.
+        return None
+
+    # Telethon's `get_messages(int_chat_id, ...)` only works when the
+    # entity is in the session's `entity_cache`. The cache is populated
+    # by `iter_dialogs` (which the chat picker ran), but a linked
+    # *discussion* group the user has never explicitly opened may not
+    # be there — Telethon then raises `ValueError: Could not find the
+    # input entity for ...`, `_count_custom_range`'s try/except swallows
+    # it, and we get a silent `None`. Resolve the entity once first so
+    # subsequent calls hit the cached value.
+    try:
+        await client.get_input_entity(linked_chat_id)
+    except Exception as e:
+        log.debug(
+            "comments_estimate.entity_resolve_failed",
+            linked_chat_id=linked_chat_id,
+            err=str(e)[:200],
+        )
+        return None
+
+    return await _count_custom_range(
+        client,
+        chat_id=linked_chat_id,
+        thread_id=None,
+        since=since,
+        until=until,
+    )
+
+
+async def _count_custom_range_topic(
+    client,
+    *,
+    chat_id: int,
+    thread_id: int,
+    since: datetime | None,
+    until: datetime | None,
+) -> int | None:
+    """Iteration-based message count for a single topic in [since, until].
+
+    Same reason `_fetch_topic_period_counts` exists: msg_id arithmetic
+    is chat-wide and meaningless for a topic. Walks newest-first from
+    `until` (or latest), stops as soon as `since` is crossed, and caps
+    at `_TOPIC_COUNT_CAP`. Returns None when the cap is hit (the user
+    can still proceed; the confirm step will just show "—").
+    """
+    iter_kwargs: dict = {"reply_to": thread_id, "limit": _TOPIC_COUNT_CAP}
+    if until is not None:
+        iter_kwargs["offset_date"] = until
+
+    walked = 0
+    count = 0
+    try:
+        async for msg in client.iter_messages(chat_id, **iter_kwargs):
+            walked += 1
+            md = getattr(msg, "date", None)
+            if md is None:
+                continue
+            if since is not None and md < since:
+                # Crossed the lower bound — exact count.
+                return count
+            count += 1
+        if walked >= _TOPIC_COUNT_CAP:
+            # Cap hit before reaching `since` (or the topic's start);
+            # we have a lower bound but not the truth.
+            return None
+        return count
+    except Exception as e:
+        log.debug(
+            "custom_count_topic.error",
+            chat_id=chat_id,
+            thread_id=thread_id,
+            since=str(since),
+            until=str(until),
+            err=str(e)[:200],
+        )
+        return None
+
+
 def _estimate_cost(
     *,
     n_messages: int,
@@ -1563,6 +2096,57 @@ def _extra_enrich_kinds(kinds: list[str] | None) -> list[str]:
     return extras
 
 
+# Per-unit enrichment cost estimates. Audio rates assume Whisper at
+# $0.006/min; voice/videonote default to a 30s average duration (most
+# voice notes), video to 60s (typical short clip). These are rough —
+# the real cost is recorded per-call in `usage_log` and surfaced by
+# `unread stats`. See `wiz_plan_enrich_cost_assumptions` (i18n) for
+# the user-facing caveat copy.
+_ENRICH_AVG_VOICE_MIN = 0.5
+_ENRICH_AVG_VIDEONOTE_MIN = 0.5
+_ENRICH_AVG_VIDEO_MIN = 1.0
+_WHISPER_USD_PER_MIN = 0.006
+_VISION_USD_PER_PHOTO = 0.0002
+_LINK_USD_PER_URL = 0.0001
+
+_ENRICH_PER_UNIT_USD: dict[str, float] = {
+    "voice": _ENRICH_AVG_VOICE_MIN * _WHISPER_USD_PER_MIN,
+    "videonote": _ENRICH_AVG_VIDEONOTE_MIN * _WHISPER_USD_PER_MIN,
+    "video": _ENRICH_AVG_VIDEO_MIN * _WHISPER_USD_PER_MIN,
+    "image": _VISION_USD_PER_PHOTO,
+    "link": _LINK_USD_PER_URL,
+    # `doc` extracts text without an LLM call (PDF/DOCX parsing is
+    # local) — no per-unit charge here. The downstream analyzer pays
+    # the usual chat-completion cost on the extracted text, which is
+    # already covered by the messages-based estimate.
+    "doc": 0.0,
+}
+
+
+def _estimate_enrich_cost(
+    enrich_kinds: list[str] | None,
+    media_counts: dict[str, int] | None,
+) -> float | None:
+    """Rough total enrichment cost from per-kind counts × per-unit rates.
+
+    Returns None when there's nothing to estimate (no enrich kinds, or
+    no media counts available — e.g. ALL_LOCAL ask scope where no chat
+    is selected). Returns 0.0 when enrichment is enabled but every
+    enabled kind has zero matching messages.
+
+    Wizard-name → count-key mapping mirrors `_format_enrich_for_plan`
+    (`image` → `photo`, `link` → `links`).
+    """
+    if not enrich_kinds or not media_counts:
+        return None
+    total = 0.0
+    for kind in enrich_kinds:
+        count_key = _ENRICH_KIND_TO_COUNT_KEY.get(kind, kind)
+        n = media_counts.get(count_key, 0)
+        total += n * _ENRICH_PER_UNIT_USD.get(kind, 0.0)
+    return total
+
+
 def _fmt_cost_range(lo: float | None, hi: float | None) -> str:
     """Render a (lo, hi) cost range; collapse to one number if they're close."""
     if lo is None and hi is None:
@@ -1570,6 +2154,91 @@ def _fmt_cost_range(lo: float | None, hi: float | None) -> str:
     if lo is None or hi is None or abs((hi or 0) - (lo or 0)) < 1e-4:
         return _fmt_cost(lo if lo is not None else hi)
     return f"{_fmt_cost(lo)}–{_fmt_cost(hi)}"
+
+
+# Maps the wizard's enrich-kind names to `media_counts` dict keys.
+# `image` → photos in DB / Telethon; `link` → text-link tally. The
+# remaining kinds (`voice`, `videonote`, `video`, `doc`) match by name.
+_ENRICH_KIND_TO_COUNT_KEY: dict[str, str] = {
+    "image": "photo",
+    "link": "links",
+}
+
+
+def _format_enrich_for_plan(
+    enrich_kinds: list[str],
+    media_counts: dict[str, int],
+) -> str:
+    """Render the `enrich:` row value: kinds with their counts.
+
+    Each enabled kind shows as `name N` (e.g. `voice 8`) when
+    `media_counts` has data for it; bare `name` if the count is
+    unknown (no walk + DB miss). Kinds with `0` stay visible so the
+    user can spot enabled-but-empty kinds rather than silently
+    dropping them.
+
+    `_ENRICH_KIND_TO_COUNT_KEY` handles the wizard-name → count-key
+    mismatches (`image` ↔ `photo`, `link` ↔ `links`).
+    """
+    if not enrich_kinds:
+        return i18n_t("wiz_plan_enrich_none_value")
+    parts: list[str] = []
+    for kind in enrich_kinds:
+        count_key = _ENRICH_KIND_TO_COUNT_KEY.get(kind, kind)
+        count = media_counts.get(count_key) if media_counts else None
+        if count is None:
+            parts.append(kind)
+        else:
+            parts.append(f"{kind} {count}")
+    return " · ".join(parts)
+
+
+def _format_msg_count_with_comments(
+    n_channel: int | None,
+    comments_count: int | None,
+) -> str:
+    """Render the messages-line count for the confirm step.
+
+    Plain integer when no comments are folded in; `N + ~M comments`
+    when the wizard has a comments estimate to attach. The `~`
+    indicates that the comments count is an upper-bound msg-id-arithmetic
+    approximation (same as the chat-wide period counts), not an exact
+    fetch — keeps the user from being surprised when the actual run
+    pulls a slightly different number.
+    """
+    if n_channel is None:
+        return "—"
+    if comments_count is None or comments_count <= 0:
+        return str(n_channel)
+    return f"{n_channel} + ~{comments_count} comments"
+
+
+def _format_period_for_plan(
+    period: str | None,
+    custom_since: str | None,
+    custom_until: str | None,
+    custom_from_msg: str | None,
+    period_counts: dict[str, int | None] | None,
+) -> str:
+    """Render the `period:` row value for the multiline confirm step.
+
+    Bare period code for the canonical periods (`unread`, `last7`, …);
+    code + bracketed range for `custom` (with the estimated message
+    count if we have one); code + bracketed message-id ref for
+    `from_msg`. Mirrors the inline-summary logic that used to live
+    in the confirm block before the multiline split.
+    """
+    if not period:
+        return "—"
+    if period == "custom":
+        rng = f"{custom_since or ''}..{custom_until or ''}"
+        n = period_counts.get("custom") if period_counts else None
+        if n is not None:
+            return f"{period} ({rng}; ≈{n})"
+        return f"{period} ({rng})"
+    if period == "from_msg" and custom_from_msg:
+        return f"{period} (from {custom_from_msg})"
+    return period
 
 
 def _fmt_date(dt: datetime | None) -> str:
@@ -1958,7 +2627,14 @@ async def _pick_from_all(
 
 
 async def _pick_thread(client, chat_id: int):
-    """Return (thread_id, all_flat, all_per_topic), BACK, or None (cancelled)."""
+    """Return (thread_id, all_flat, all_per_topic, topic_unread), BACK, or None (cancelled).
+
+    `topic_unread` is the picked topic's unread message count (from
+    GetForumTopicsRequest). It is None when the user picks a forum-mode
+    option (all-flat / per-topic) instead of a single topic — those
+    modes operate over the whole forum, so the chat-level unread count
+    is the right hint at the period step.
+    """
     topics = await list_forum_topics(client, chat_id)
     if not topics:
         console.print(f"[yellow]{i18n_t('no_topics_in_forum')}[/]")
@@ -2017,17 +2693,18 @@ async def _pick_thread(client, chat_id: int):
             f"[bold cyan]?[/] {mode_label}: [bold]{i18n_t('wiz_summary_mode_per_topic')}[/] "
             f"[grey70]{i18n_t('wiz_summary_mode_per_topic_hint')}[/]"
         )
-        return None, False, True
+        return None, False, True, None
     if action == "flat":
         _replace_last_line(
             f"[bold cyan]?[/] {mode_label}: [bold]{i18n_t('wiz_summary_mode_all_flat')}[/] "
             f"[grey70]{i18n_t('wiz_summary_mode_all_flat_hint')}[/]"
         )
-        return None, True, False
+        return None, True, False, None
     picked_topic = next((t for t in topics_sorted if t.topic_id == payload), None)
     label = picked_topic.title if picked_topic else str(payload)
     _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_topic')}: [bold]{label}[/]")
-    return payload, False, False
+    topic_unread = picked_topic.unread_count if picked_topic else None
+    return payload, False, False, topic_unread
 
 
 async def _pick_preset():

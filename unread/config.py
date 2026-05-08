@@ -180,11 +180,14 @@ class AnalyzeCfg(_StrictCfg):
     # at least this many reactions (sum across all kinds) gets the marker
     # so the LLM can lean on it for "what mattered" presets. 0 disables.
     high_impact_reactions: int = 3
-    # Console rendering: when True, transform `[#N](https://t.me/...)`
-    # citations into `#N (https://t.me/...)` so the URL is visible and
-    # copy-pasteable. The saved markdown file is unaffected — keep it
-    # OSC 8-friendly for terminals that support it. Flip on if you're on
-    # macOS Terminal.app or any other terminal without OSC 8 hyperlinks.
+    # Console rendering knob: when True, ALWAYS flatten `[#N](URL)`
+    # citations into `#N (URL)` so the URL is visible and copy-pasteable.
+    # When False (default), we auto-detect — only known OSC 8-friendly
+    # terminals (iTerm2, WezTerm, kitty, ghostty, Tabby, Hyper) keep the
+    # styled clickable form; everywhere else (Cursor / VS Code, macOS
+    # Terminal.app, most Linux terminals) we render plain so the URL
+    # picks up the terminal's plaintext URL detector instead. The saved
+    # markdown file is always unaffected — it keeps `[#N](URL)`.
     plain_citations: bool = False
     # When True, scrub phone numbers / emails / IBANs / Luhn-valid card
     # numbers from the prompt that goes to the LLM. The DB rows and the

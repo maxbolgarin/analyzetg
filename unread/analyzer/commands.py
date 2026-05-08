@@ -1260,6 +1260,11 @@ async def _run_single(
     else:
         effective_enrich = enrich_opts if enrich_opts is not None else _EnrichOpts()
 
+    # `source_language` intentionally NOT passed to `prepare_chat_run`:
+    # the source-language hint is consumed only by `compose_system_prompt`
+    # in the analyzer, not by the prep pipeline (per CLAUDE.md, "not
+    # plumbed into the enricher"). It's threaded through to `run_analysis`
+    # below — that's the right place for it.
     prepared = await prepare_chat_run(
         client=client,
         repo=repo,
@@ -1283,7 +1288,6 @@ async def _run_single(
         with_comments=with_comments,
         language=language,
         report_language=report_language,
-        source_language=source_language,
     )
 
     # --dry-run: print the cost estimate and exit before any LLM call.
@@ -1598,6 +1602,9 @@ async def _run_forum_per_topic(
     chat_slug = _chat_slug(chat_title, chat_id)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
+    # `source_language` is consumed by `compose_system_prompt` later
+    # in `run_analysis`, not here — see the matching note on the
+    # `prepare_chat_run` call earlier in this file.
     async for prepared in prepare_chat_runs_per_topic(
         client=client,
         repo=repo,
@@ -1617,7 +1624,6 @@ async def _run_forum_per_topic(
         yes=yes,
         language=language,
         report_language=report_language,
-        source_language=source_language,
     ):
         try:
             # --dry-run for forum-per-topic: print per-topic count + skip

@@ -313,19 +313,34 @@ async def backfill(
     total = 0
     t0 = asyncio.get_event_loop().time()
 
-    # Try to estimate the upper bound of msgs we're about to pull so the
-    # bar is determinate. For msg-id-anchored forward walks, that's
-    # roughly `latest_msg_id - from_msg_id`. Date-anchored walks: leave
-    # indeterminate (estimating would need an extra round-trip and the
-    # walk is already bounded by the date).
+    # Try to estimate the upper bound of msgs we're about to pull so
+    # the bar is determinate. Two paths:
+    #   - msg-id-anchored forward walks → `latest_msg_id - from_msg_id`.
+    #   - date-anchored forward walks   → `latest_msg_id - first_msg_id_at_since + 1`,
+    #     using the same msg-id-arithmetic trick as the period picker
+    #     (`_fetch_period_counts`). Comments backfill is the big
+    #     beneficiary — without an estimate, an active linked
+    #     discussion looks "stuck" while pulling thousands of messages
+    #     for several minutes.
+    #
+    # For thread-scoped walks (`reply_to=thread_id`), msg_ids are
+    # global per-chat so the difference over-estimates — but the
+    # alternative is no bar at all, which is worse UX. Mark as upper
+    # bound and let the running count tick under it.
     estimated_total: int | None = None
-    if since_date is None and direction == "forward" and from_msg_id is not None:
+    if direction == "forward":
         try:
-            latest = await client.get_messages(
-                chat_id, limit=1, **({"reply_to": thread_id} if thread_id else {})
-            )
+            thread_kw: dict = {"reply_to": thread_id} if thread_id else {}
+            latest = await client.get_messages(chat_id, limit=1, **thread_kw)
             if latest:
-                estimated_total = max(0, int(latest[0].id) - int(from_msg_id))
+                if from_msg_id is not None:
+                    estimated_total = max(0, int(latest[0].id) - int(from_msg_id))
+                elif since_date is not None:
+                    first_in_window = await client.get_messages(
+                        chat_id, limit=1, offset_date=since_date, reverse=True, **thread_kw
+                    )
+                    if first_in_window:
+                        estimated_total = max(0, int(latest[0].id) - int(first_in_window[0].id) + 1)
         except Exception:
             pass  # best-effort
 
@@ -345,7 +360,12 @@ async def backfill(
         TextColumn("[grey70]{task.description}[/]"),
     ]
     if estimated_total:
+        # Determinate: show bar + N/total so the user sees how far we are.
         columns.extend([BarColumn(), MofNCompleteColumn()])
+    else:
+        # Indeterminate: at least show the running pull count so the
+        # user can tell it's making progress instead of frozen.
+        columns.append(TextColumn("[grey70]{task.completed} fetched[/]"))
     columns.append(TimeElapsedColumn())
 
     with Progress(*columns, transient=True, console=_console) as progress:
