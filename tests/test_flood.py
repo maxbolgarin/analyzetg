@@ -57,7 +57,7 @@ async def test_final_attempt_converts_to_runtime_error(monkeypatch):
     telethon exception that bubbles to the user as a stacktrace.
     """
     # Stub asyncio.sleep so the decorator's between-retry backoff
-    # (seconds=42 → ~43s × max_retries) doesn't slow the test.
+    # (seconds=42 → ~43s x max_retries) doesn't slow the test.
     import asyncio as _asyncio
 
     monkeypatch.setattr(_asyncio, "sleep", _no_sleep)

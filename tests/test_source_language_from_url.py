@@ -17,7 +17,6 @@ import pytest
 
 from unread.website.commands import _source_language_from_url
 
-
 # --- Rule 1: leading subdomain ------------------------------------------
 
 

@@ -2724,8 +2724,7 @@ def _migrate_legacy_ai_provider_sync(db_path: Path) -> None:
         return
     try:
         cur = conn.execute(
-            "SELECT key, value FROM app_settings "
-            "WHERE key IN (?, ?, ?, ?, ?)",
+            "SELECT key, value FROM app_settings WHERE key IN (?, ?, ?, ?, ?)",
             (
                 "ai.provider",
                 "ai.chat_provider",

@@ -24,7 +24,6 @@ from unread.website.content import (
     _normalize_lang_tag,
 )
 
-
 # --- _normalize_lang_tag ------------------------------------------------
 
 

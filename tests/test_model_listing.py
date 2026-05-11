@@ -99,9 +99,7 @@ async def test_fetch_models_caches_result(monkeypatch):
 
     # Second call hits the cache; we'd notice if `fake_openai_compat`
     # ran again because the cache key was the same.
-    monkeypatch.setattr(
-        model_listing, "_fetch_openai_compat", lambda *a, **kw: pytest.fail("cache miss")
-    )
+    monkeypatch.setattr(model_listing, "_fetch_openai_compat", lambda *a, **kw: pytest.fail("cache miss"))
     out2 = await model_listing.fetch_models("openai", "chat", s)
     assert out2 == out1
 
