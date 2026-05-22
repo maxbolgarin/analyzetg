@@ -1,6 +1,6 @@
 ---
 name: quotes
-prompt_version: v2
+prompt_version: v1
 description: Памятные цитаты дословно с автором и ссылкой
 needs_reduce: true
 filter_model: gpt-5.4-nano

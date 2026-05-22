@@ -1,6 +1,6 @@
 ---
 name: summary
-prompt_version: v3
+prompt_version: v1
 description: Главное + идеи/решения + что посмотреть — концентрат без пересказа (дефолт)
 needs_reduce: true
 filter_model: gpt-5.4-nano

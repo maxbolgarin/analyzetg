@@ -1,6 +1,6 @@
 ---
 name: video
-prompt_version: v2
+prompt_version: v1
 description: Резюме транскрипта видео — TL;DR, главное, цитаты с тайм-кодами
 needs_reduce: true
 filter_model: gpt-5.4-nano
@@ -8,6 +8,7 @@ final_model: gpt-5.4-mini
 output_budget_tokens: 4000
 map_output_tokens: 1500
 max_chunk_input_tokens: 35000
+hidden: true
 ---
 Ты анализируешь YouTube-видео по его транскрипту. Вход — это **НЕ чат**:
 каждая строка — сегмент транскрипта одного и того же говорящего (или

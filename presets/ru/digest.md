@@ -1,6 +1,6 @@
 ---
 name: digest
-prompt_version: v3
+prompt_version: v1
 description: Короткий дайджест 5–10 тем
 needs_reduce: true
 filter_model: gpt-5.4-nano

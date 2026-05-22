@@ -1,6 +1,6 @@
 ---
 name: website
-prompt_version: v2
+prompt_version: v1
 description: Webpage analysis — TL;DR, key claims, key quotes
 needs_reduce: true
 filter_model: gpt-5.4-nano
@@ -8,6 +8,7 @@ final_model: gpt-5.4-mini
 output_budget_tokens: 4000
 map_output_tokens: 1500
 max_chunk_input_tokens: 35000
+hidden: true
 ---
 You analyze a single web page (article, blog post, documentation,
 essay) by its extracted body text. The input is **NOT a chat

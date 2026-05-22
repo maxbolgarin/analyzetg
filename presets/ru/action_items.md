@@ -1,6 +1,6 @@
 ---
 name: action_items
-prompt_version: v3
+prompt_version: v1
 description: Задачи из чата — таблица кто/что/срок/статус
 needs_reduce: true
 filter_model: gpt-5.4-nano

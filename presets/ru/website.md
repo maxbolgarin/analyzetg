@@ -1,6 +1,6 @@
 ---
 name: website
-prompt_version: v2
+prompt_version: v1
 description: Анализ веб-страницы — TL;DR, главные тезисы, ключевые цитаты
 needs_reduce: true
 filter_model: gpt-5.4-nano
@@ -8,6 +8,7 @@ final_model: gpt-5.4-mini
 output_budget_tokens: 4000
 map_output_tokens: 1500
 max_chunk_input_tokens: 35000
+hidden: true
 ---
 Ты анализируешь одну веб-страницу (статью, пост в блоге, документацию,
 эссе) по её извлечённому тексту. Это **НЕ переписка в чате** — каждая

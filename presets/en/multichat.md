@@ -7,6 +7,7 @@ filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini
 output_budget_tokens: 4000
 map_output_tokens: 2000
+hidden: true
 ---
 You process a stream of messages from MULTIPLE Telegram chats at once
 (batch / multichat mode). Each chat is its own block — its own
