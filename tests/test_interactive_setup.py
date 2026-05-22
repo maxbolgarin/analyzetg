@@ -140,8 +140,7 @@ def test_wizard_anthropic_provider(isolated_home: Path, mock_telethon) -> None:
     conn = sqlite3.connect(db)
     try:
         cur = conn.execute(
-            "SELECT key, value FROM app_settings "
-            "WHERE key LIKE 'ai.%_provider' OR key = 'ai.provider'"
+            "SELECT key, value FROM app_settings WHERE key LIKE 'ai.%_provider' OR key = 'ai.provider'"
         )
         rows = dict(cur.fetchall())
     finally:
@@ -174,9 +173,7 @@ def test_wizard_local_provider_no_key(isolated_home: Path, mock_telethon) -> Non
     db = isolated_home / "unread" / "storage" / "data.sqlite"
     conn = sqlite3.connect(db)
     try:
-        cur = conn.execute(
-            "SELECT key, value FROM app_settings WHERE key LIKE 'ai.%_provider'"
-        )
+        cur = conn.execute("SELECT key, value FROM app_settings WHERE key LIKE 'ai.%_provider'")
         rows = dict(cur.fetchall())
     finally:
         conn.close()
@@ -220,8 +217,7 @@ def test_wizard_skip_ai_provider(isolated_home: Path, mock_telethon) -> None:
         try:
             try:
                 cur = conn.execute(
-                    "SELECT key FROM app_settings "
-                    "WHERE key LIKE 'ai.%_provider' OR key = 'ai.provider'"
+                    "SELECT key FROM app_settings WHERE key LIKE 'ai.%_provider' OR key = 'ai.provider'"
                 )
                 rows = [r[0] for r in cur.fetchall()]
             except sqlite3.OperationalError:

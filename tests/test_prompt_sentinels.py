@@ -106,9 +106,11 @@ def test_link_summary_url_prefix_outside_sentinels() -> None:
     assert last_close > last_open, "url prefix was rendered inside a sentinel pair"
 
 
-def test_base_version_anchored_at_v8() -> None:
-    """Cache-bust intent: bumping BASE_VERSION rekeys every analysis_cache
-    row so cached results from earlier prompt revisions (v6 sentinels,
-    v7 untrusted-content discipline, v8 three-axis language split) get
-    re-run with the latest base prompt."""
-    assert prompts.BASE_VERSION == "v8"
+def test_base_version_is_set() -> None:
+    """`BASE_VERSION` rekeys every `analysis_cache` row when it changes —
+    pin only that it's a non-empty string. Reset to "v1" at pre-release;
+    bump on any structural change to `_base.md` / `_reduce.md` / forum
+    addendum (sentinels, untrusted-content discipline, language axes)
+    after the first public release."""
+    assert isinstance(prompts.BASE_VERSION, str)
+    assert prompts.BASE_VERSION

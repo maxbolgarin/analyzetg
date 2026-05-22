@@ -62,10 +62,15 @@ def test_help_overview_lists_visible_commands() -> None:
     """Every non-hidden registered command appears in the overview.
 
     Telegram-only verbs are flattened under the Telegram panel as
-    `tg login`, `tg describe`, `tg sync`, `tg chats`, `tg logout`. The
-    bare `tg` row is intentionally absent — the panel header itself
-    plus the `<ref> can be` row already document the bare-`unread tg`
-    picker shortcut.
+    `tg login`, `tg describe`, `tg logout`. The bare `tg` row is
+    intentionally absent — the panel header itself plus the
+    `<ref> can be` row already document the bare-`unread tg` picker
+    shortcut.
+
+    `tg sync` and `tg chats` are temporarily hidden while the
+    subscription-management rework is in flight (`hidden=True` in
+    `cli.py`); they're checked separately in
+    `test_tg_sync_and_chats_are_currently_hidden_from_help`.
     """
     out = _invoke("help")
     # Cross-panel sample (Main + Maintenance) — these stay at top level.
@@ -83,7 +88,7 @@ def test_help_overview_lists_visible_commands() -> None:
     ):
         assert name in out, f"`{name}` missing from overview"
     # Telegram-namespaced verbs are listed flat, prefixed with `tg`.
-    for name in ("tg login", "tg logout", "tg describe", "tg sync", "tg chats"):
+    for name in ("tg login", "tg logout", "tg describe"):
         assert name in out, f"`{name}` missing from overview"
     # The bare `tg` row should NOT appear as a Commands-table entry —
     # the Telegram panel header already covers it. Scope the check to
@@ -96,6 +101,39 @@ def test_help_overview_lists_visible_commands() -> None:
     assert not re.search(r"^\s*tg\s+[A-Z]", commands_section, re.MULTILINE), (
         "bare `tg` row should be hidden — children are listed flat as `tg <verb>`"
     )
+
+
+def test_tg_sync_and_chats_are_currently_hidden_from_help() -> None:
+    """`tg sync` and `tg chats` are intentionally hidden from the help
+    overview while the subscription-management rework is in flight.
+
+    The commands themselves remain reachable
+    (`unread tg sync --help` / `unread tg chats --help` still work) —
+    only the advertising on `unread help` and `unread tg --help` is
+    suppressed via `hidden=True` in `cli.py`. When the rework lands,
+    drop the `hidden=True` flags AND delete this test (the previous
+    `test_help_overview_lists_visible_commands` should grow `tg sync`
+    / `tg chats` back into its assertion list).
+    """
+    overview = _invoke("help")
+    import re
+
+    # Neither verb should appear as its own row in the Commands table.
+    # We anchor on `re.MULTILINE` so an unrelated mention in usage text
+    # (e.g. a `<ref>` example) wouldn't trip the assertion.
+    assert not re.search(r"^\s*tg\s+sync\b", overview, re.MULTILINE), (
+        "`tg sync` row should be hidden from help while rework is in flight"
+    )
+    assert not re.search(r"^\s*tg\s+chats\b", overview, re.MULTILINE), (
+        "`tg chats` row should be hidden from help while rework is in flight"
+    )
+
+    # But each command must still respond to its own --help, so power
+    # users / scripts can keep invoking them while hidden.
+    sync_help = _invoke("tg", "sync", "--help")
+    assert "Usage" in sync_help and "sync" in sync_help, "tg sync --help must still render"
+    chats_help = _invoke("tg", "chats", "--help")
+    assert "Usage" in chats_help and "chats" in chats_help, "tg chats --help must still render"
 
 
 def test_help_overview_lists_every_ref_form() -> None:
@@ -271,29 +309,26 @@ def test_help_lists_telegram_setup_commands() -> None:
 
 
 def test_help_sync_and_chats_flag_telegram_dependency() -> None:
-    """The strict-TG commands surface a `Telegram` cue in their one-liners.
+    """The strict-TG commands surface a `Telegram` cue in their one-liners
+    (when they're visible in the overview).
 
     Per the plan: only `sync` and the `chats` group strictly need a
     Telegram session, so they get the inline marker. `ask` / `dump`
     are deliberately left untagged — they're conceptually multi-source
     (local archive Q&A, future YouTube / web-page exports) and tagging
     them as Telegram-only would mislead users.
-    """
-    overview = _invoke("help")
-    # Match the row that *starts* with the namespaced command path so we
-    # don't false-positive on unrelated rows that mention "chat" / "sync".
-    import re
 
-    sync_line = next(
-        (ln for ln in overview.splitlines() if re.match(r"^\s*tg sync\b", ln)),
-        "",
-    )
-    chats_line = next(
-        (ln for ln in overview.splitlines() if re.match(r"^\s*tg chats\b", ln)),
-        "",
-    )
-    assert "Telegram" in sync_line, f"`tg sync` line missing Telegram cue: {sync_line!r}"
-    assert "Telegram" in chats_line, f"`tg chats` line missing Telegram cue: {chats_line!r}"
+    NOTE: `tg sync` and `tg chats` are currently hidden from the help
+    overview while the subscription-management rework is in flight
+    (see `test_tg_sync_and_chats_are_currently_hidden_from_help`).
+    Until they're un-hidden, this test inspects the per-command
+    `--help` text instead of the overview, so the Telegram-cue
+    invariant is still enforced where users see it.
+    """
+    sync_help = _invoke("tg", "sync", "--help")
+    chats_help = _invoke("tg", "chats", "--help")
+    assert "Telegram" in sync_help, "`tg sync --help` must surface its Telegram dependency"
+    assert "Telegram" in chats_help, "`tg chats --help` must surface its Telegram dependency"
 
 
 def test_ask_and_dump_help_do_not_claim_telegram_only() -> None:

@@ -98,13 +98,20 @@ def test_summary_preset_has_adequate_budget() -> None:
     )
 
 
-def test_broad_preset_preserves_original_summary_scope() -> None:
-    # The old `summary` moved to `broad` — it's the structured recap with
-    # Top-3 themes + bullet points + tone + key messages and wants a fatter
-    # budget. Tests pin it so a future tidy-up doesn't quietly shrink it.
-    p = PRESETS["broad"]
-    assert p.output_budget_tokens >= 4000
-    assert p.map_output_tokens >= 2000
+def test_tldr_preset_is_compact_single_paragraph() -> None:
+    # `tldr` is the absolute-shortest read — 2-3 sentences, single
+    # paragraph. Pin tight token budgets so future tidy-up doesn't
+    # quietly inflate it into "summary lite". The system prompt must
+    # also forbid headers / bullets / citations, which are the markers
+    # of structured output.
+    p = PRESETS["tldr"]
+    assert p.output_budget_tokens <= 600, (
+        f"tldr output_budget_tokens={p.output_budget_tokens} is too generous — "
+        "the preset is meant to be one paragraph."
+    )
+    assert "no headers" in p.system.lower() or "no structure" in p.system.lower(), (
+        "tldr system prompt should explicitly forbid structured output"
+    )
 
 
 def test_custom_preset_from_file(tmp_path: Path) -> None:

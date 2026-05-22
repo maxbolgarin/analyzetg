@@ -153,15 +153,17 @@ def testchat_pricing_for_returns_none_for_audio_model():
 def test_picker_provider_routing_ai_keys_follow_active_provider():
     """Per-slot routing — each slot has its own provider+model. The
     compound picker uses `_SLOT_PROVIDERS` to constrain provider
-    options (audio excludes anthropic + google) and `_SLOT_ROLE` to
+    options (audio is openai/local only — anthropic/google have no
+    audio API and openrouter rejects multipart) and `_SLOT_ROLE` to
     pick the catalog filter.
     """
     from unread.settings.commands import _SLOT_PROVIDERS, _SLOT_ROLE
 
-    # Audio slot is restricted to Whisper-shape providers.
+    # Audio slot is restricted to SDK-compatible Whisper-shape providers.
     assert "anthropic" not in _SLOT_PROVIDERS["audio"]
     assert "google" not in _SLOT_PROVIDERS["audio"]
-    assert set(_SLOT_PROVIDERS["audio"]) == {"openai", "openrouter", "local"}
+    assert "openrouter" not in _SLOT_PROVIDERS["audio"]
+    assert set(_SLOT_PROVIDERS["audio"]) == {"openai", "local"}
     # Chat / filter / vision accept all five providers.
     for slot in ("chat", "filter", "vision"):
         assert set(_SLOT_PROVIDERS[slot]) == {"openai", "openrouter", "anthropic", "google", "local"}
@@ -176,6 +178,6 @@ def test_per_slot_routing_picks_correct_catalog():
     # Anthropic vision: claude-* models must show up.
     anth_vision = {m.id for m in models_for_provider("anthropic", role="vision")}
     assert any(mid.startswith("claude-") for mid in anth_vision), anth_vision
-    # OpenRouter audio: at least one Whisper alias.
-    or_audio = {m.id for m in models_for_provider("openrouter", role="audio")}
-    assert any("whisper" in mid for mid in or_audio), or_audio
+    # OpenAI audio: at least one Whisper-class model must show up.
+    oa_audio = {m.id for m in models_for_provider("openai", role="audio")}
+    assert any("whisper" in mid or "transcribe" in mid for mid in oa_audio), oa_audio

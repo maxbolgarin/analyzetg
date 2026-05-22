@@ -41,11 +41,16 @@ def test_top_level_has_five_api_key_rows():
     }
 
 
-def test_audio_slot_excludes_anthropic_and_google():
-    """Capability filter — only Whisper-shape providers can be picked for audio."""
+def test_audio_slot_excludes_non_whisper_providers():
+    """Capability filter — only providers whose audio API is on-the-wire
+    compatible with the OpenAI SDK's multipart upload can be picked for
+    audio. anthropic / google have no audio endpoint at all; openrouter
+    advertises one but rejects multipart with a JSON 400. See
+    `unread.ai.providers._AUDIO_PROVIDERS`."""
     assert "anthropic" not in _SLOT_PROVIDERS["audio"]
     assert "google" not in _SLOT_PROVIDERS["audio"]
-    assert set(_SLOT_PROVIDERS["audio"]) == {"openai", "openrouter", "local"}
+    assert "openrouter" not in _SLOT_PROVIDERS["audio"]
+    assert set(_SLOT_PROVIDERS["audio"]) == {"openai", "local"}
 
 
 def test_chat_filter_vision_slots_accept_all_providers():

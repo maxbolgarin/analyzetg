@@ -165,9 +165,11 @@ def test_options_payload_emits_source_language_only_when_set():
     assert no_hint != with_hint
 
 
-def test_base_version_bumped_for_three_axis_split():
-    """Three-axis split is a structural prompt change (`_base.md` rewrite
-    + new optional source-language line) — BASE_VERSION must advance so
-    legacy cache rows are not served."""
-    # v8 is the bump that introduced the new wording + source_language kwarg.
-    assert prompts.BASE_VERSION >= "v8"
+def test_base_version_is_set():
+    """`BASE_VERSION` is part of every preset's `analysis_cache` key — it
+    must be a non-empty string. Reset to "v1" at pre-release; bump on any
+    structural change to `_base.md` / `_reduce.md` / forum addendum
+    (including the three-language-axis wording + the optional
+    `source_language` kwarg) after the first public release."""
+    assert isinstance(prompts.BASE_VERSION, str)
+    assert prompts.BASE_VERSION

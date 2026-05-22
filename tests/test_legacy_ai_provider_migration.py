@@ -21,8 +21,7 @@ def _seed_legacy_row(db_path: Path, value: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS app_settings("
-            "key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
+            "CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
         )
         conn.execute(
             "INSERT OR REPLACE INTO app_settings(key, value, updated_at) VALUES (?, ?, ?)",
@@ -144,9 +143,7 @@ def test_no_legacy_row_is_noop(tmp_path: Path):
     db = tmp_path / "data.sqlite"
     conn = sqlite3.connect(db)
     try:
-        conn.execute(
-            "CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
-        )
+        conn.execute("CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
         conn.commit()
     finally:
         conn.close()
@@ -155,9 +152,11 @@ def test_no_legacy_row_is_noop(tmp_path: Path):
     assert _read_provider_rows(db) == {}
 
 
-@pytest.mark.parametrize("provider", ("anthropic", "google"))
+@pytest.mark.parametrize("provider", ("anthropic", "google", "openrouter"))
 def test_audio_snap_per_provider(tmp_path: Path, provider: str):
-    """anthropic / google → audio slot gets openai; rest get the picked value."""
+    """anthropic / google / openrouter → audio slot gets openai; the
+    other slots get the picked value verbatim. OpenRouter advertises an
+    audio endpoint but rejects multipart, so it's snapped here too."""
     from unread.db.repo import _migrate_legacy_ai_provider_sync
 
     db = tmp_path / "data.sqlite"

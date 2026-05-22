@@ -9,11 +9,31 @@ def test_get_presets_reads_each_language_directory():
     en = prompts.get_presets("en")
     ru = prompts.get_presets("ru")
     # Both ship the foundation set so existing flows work in either language.
-    for name in ("summary", "broad", "digest", "action_items", "decisions"):
+    for name in ("summary", "tldr", "digest", "action_items", "decisions"):
         assert name in en, f"{name} missing in EN preset tree"
         assert name in ru, f"{name} missing in RU preset tree"
     # Same `prompt_version` is fine but bodies differ — pin one obvious diff.
     assert en["summary"].system != ru["summary"].system
+
+
+def test_hidden_presets_are_loaded_but_marked():
+    """The `hidden: true` frontmatter is a wizard-picker filter, not a
+    catalog filter — `get_presets` returns hidden presets so the CLI's
+    `--preset` flag and routing logic (single-message detection,
+    `runner.py` → `multichat`, YouTube/website adapters) can still
+    look them up by name. The wizard reads `Preset.hidden` and skips
+    them at render time."""
+    en = prompts.get_presets("en")
+    ru = prompts.get_presets("ru")
+    expected_hidden = {"single_msg", "multichat", "video", "website"}
+    for tree, label in ((en, "en"), (ru, "ru")):
+        # All four routing-targeted presets exist in the catalog.
+        for name in expected_hidden:
+            assert name in tree, f"{name} missing in {label} preset tree"
+            assert tree[name].hidden, f"{label}/{name} should have hidden=true"
+        # The user-facing presets stay visible.
+        for name in ("summary", "tldr", "digest", "highlights"):
+            assert tree[name].hidden is False, f"{label}/{name} must not be hidden"
 
 
 def test_get_presets_unknown_language_falls_back_to_en():
@@ -60,10 +80,13 @@ def test_compose_uses_language_to_pick_preset_directory():
     assert "потока сообщений" not in composed_en
 
 
-def test_base_version_is_v4_or_higher():
-    """The locale rollout bumped `BASE_VERSION` from v3 → v4 to bust pre-
-    locale cached rows. Tests pin it so a careless revert can't sneak through."""
-    assert prompts.BASE_VERSION >= "v4"
+def test_base_version_is_set():
+    """`BASE_VERSION` is part of every preset's `analysis_cache` key — it
+    must be a non-empty string. Reset to "v1" at pre-release; bump on any
+    structural change to `_base.md` / `_reduce.md` / forum addendum after
+    the first public release."""
+    assert isinstance(prompts.BASE_VERSION, str)
+    assert prompts.BASE_VERSION
 
 
 def test_clear_preset_cache_forces_reload():

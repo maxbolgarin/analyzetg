@@ -3,7 +3,8 @@
 Covers:
   - Default fallback chain (no override → resolver picks "openai" + class default).
   - Explicit per-slot overrides win.
-  - Audio capability snap (anthropic / google → openai).
+  - Audio capability snap (anthropic / google / openrouter → openai;
+    only openai + local speak SDK-compatible Whisper).
   - Legacy `ai.provider` mirroring still seeds slot fields via
     `_apply_one_override` for back-compat with old DB rows.
 """
@@ -72,11 +73,22 @@ def test_audio_snaps_google_to_openai():
     assert provider == "openai"
 
 
-def test_audio_keeps_openrouter_and_local():
-    """openrouter / local both speak Whisper-shape audio — keep them."""
-    for whisper_provider in ("openrouter", "local"):
-        s = _settings_with(audio_provider=whisper_provider)
-        assert resolve_audio(s)[0] == whisper_provider
+def test_audio_snaps_openrouter_to_openai():
+    """OpenRouter advertises `/audio/transcriptions` but rejects multipart
+    with a JSON-parse 400 — its endpoint expects a JSON body shaped
+    `{"input_audio": {"data": "<b64>", "format": "..."}}` that the
+    OpenAI Python SDK doesn't emit. Resolver snaps to openai so an
+    upstream OPENAI_API_KEY can do the transcription instead."""
+    s = _settings_with(audio_provider="openrouter")
+    provider, _model = resolve_audio(s)
+    assert provider == "openai"
+
+
+def test_audio_keeps_local():
+    """Local servers (Ollama / whisper.cpp / etc.) speak the multipart
+    Whisper API verbatim — leave them alone."""
+    s = _settings_with(audio_provider="local")
+    assert resolve_audio(s)[0] == "local"
 
 
 def test_legacy_provider_seeds_all_slots_via_apply_override():
@@ -106,6 +118,21 @@ def test_legacy_provider_does_not_overwrite_explicit_slot():
     assert s.ai.filter_provider == "anthropic"  # mirrored
 
 
+def test_legacy_openrouter_snaps_audio_to_openai_via_apply_override():
+    """OpenRouter advertises a Whisper endpoint but rejects multipart;
+    `_AUDIO_PROVIDERS = {openai, local}` is the source of truth.
+    `_apply_one_override("ai.provider", "openrouter")` must mirror to
+    chat/filter/vision verbatim and snap audio to openai."""
+    from unread.db.repo import _apply_one_override
+
+    s = Settings()
+    _apply_one_override(s, "ai.provider", "openrouter")
+    assert s.ai.chat_provider == "openrouter"
+    assert s.ai.filter_provider == "openrouter"
+    assert s.ai.vision_provider == "openrouter"
+    assert s.ai.audio_provider == "openai"  # capability snap
+
+
 def test_legacy_openai_audio_default_only_when_provider_is_openai():
     """`settings.openai.audio_model_default` should only seed
     `resolve_audio`'s model when the audio slot routes to openai."""
@@ -113,8 +140,8 @@ def test_legacy_openai_audio_default_only_when_provider_is_openai():
     s.openai.audio_model_default = "gpt-4o-transcribe"
     assert resolve_audio(s) == ("openai", "gpt-4o-transcribe")
     # Different audio provider → legacy openai default is ignored.
-    s2 = _settings_with(audio_provider="openrouter")
+    s2 = _settings_with(audio_provider="local")
     s2.openai.audio_model_default = "gpt-4o-transcribe"
     provider, model = resolve_audio(s2)
-    assert provider == "openrouter"
+    assert provider == "local"
     assert model != "gpt-4o-transcribe"
