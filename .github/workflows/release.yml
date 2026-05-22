@@ -89,7 +89,7 @@ jobs:
 
       - name: Setup uv (PyPI publish)
         if: steps.semantic.outputs.new_release_published == 'true'
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
 
