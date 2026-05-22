@@ -43,7 +43,7 @@ analysis pipeline routes inputs to them automatically. The CLI's
 | Preset | Selected by | Purpose |
 |---|---|---|
 | `single_msg` | `unread analyze https://t.me/.../<msg_id>` for one voice note / video-circle / long post | Tight summary of one message |
-| `multichat` | `unread chats run` (batch) and the `unread @group --dry-run` flow | Cross-chat synthesis: per-chat short answer in one report |
+| `multichat` | `unread tg chats run` (batch) and the `unread @group --dry-run` flow | Cross-chat synthesis: per-chat short answer in one report |
 | `video` | YouTube URL — `unread <youtube-url>` | Transcript summary with time-stamped citations |
 | `website` | Article / blog / docs URL — `unread <web-url>` | Page summary: TL;DR + key claims + key quotes |
 
