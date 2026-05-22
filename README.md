@@ -1014,17 +1014,19 @@ What kind of analysis do you want? Pick a preset with `--preset`:
 | Preset | What it produces |
 |---|---|
 | `summary` (default) | Concentrated signal — key insights, concrete ideas/decisions, 3–5 pointer messages. No recap prose. |
-| `broad` | Full overview: top-3 themes + 5–10 bullet points + tone + key messages. |
-| `digest` | Short numbered list of topics, 1–2 lines each. |
-| `action_items` | Markdown table: *Who / What / Deadline / Status / Link*. |
-| `decisions` | Markdown table: *Decision / Who / When / Rationale / Link*. |
-| `highlights` | 5–15 most valuable messages, sorted by importance. |
-| `questions` | Open questions table: *unanswered / partial / no consensus*. |
+| `tldr` | Two or three sentences in one paragraph — phone-screen scan, no structure. |
+| `digest` | 5–10 most important themes, 1–2 lines each. |
+| `highlights` | Top 5–15 most valuable messages, sorted by importance. |
 | `quotes` | Verbatim memorable quotes with author and link. |
 | `links` | External URLs grouped by topic (auto-enables link enrichment). |
+| `action_items` | Markdown table: *Who / What / Deadline / Status / Link*. |
+| `decisions` | Markdown table: *Decision / Who / When / Rationale / Link*. |
+| `questions` | Open questions table: *unanswered / partial / no consensus*. |
 | `reactions` | Top-reacted messages grouped by reaction kind (👍 / 🔥 / 🤔 / 👎). |
 | `single_msg` | Picked automatically when `<ref>` is a `t.me/.../<msg_id>` link. |
-| `multichat` | Cross-chat synthesis. With no `<ref>` (batch / folder), aggregates messages across chats into ONE report instead of per-chat. |
+| `multichat` | Picked automatically for batch / folder analysis: aggregates across chats into ONE report instead of per-chat. |
+| `video` | Picked automatically for YouTube URLs — transcript summary with time-stamped citations. |
+| `website` | Picked automatically for article / blog / docs URLs — TL;DR + key claims + key quotes. |
 | `custom --prompt-file path.md` | Your own one-off prompt; same frontmatter format as the bundled ones. |
 
 Prompts live in [`presets/<lang>/*.md`](presets/) — `presets/en/` for
