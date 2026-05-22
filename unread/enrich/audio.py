@@ -3,10 +3,11 @@
 Downloads the media via existing `media.download` utilities, transcodes to
 OpenAI-compatible mp3 (for video/videonote) via ffmpeg, and transcribes via
 the audio slot's resolved provider (`settings.ai.audio_provider` —
-openai / openrouter / local; capability filter snaps anthropic + google
-back to openai). Results cache in `media_enrichments(kind='transcript')`
-keyed by Telegram's `document_id` so the same audio forwarded across chats
-is transcribed once.
+openai / local; capability filter snaps anthropic / google / openrouter
+back to openai, see `unread.ai.providers._AUDIO_PROVIDERS`). Results cache
+in `media_enrichments(kind='transcript')` keyed by Telegram's
+`document_id` so the same audio forwarded across chats is transcribed
+once.
 """
 
 from __future__ import annotations
@@ -159,13 +160,11 @@ async def enrich_audio(
         produced.append(downloaded)
         # gpt-4o-mini-transcribe / gpt-4o-transcribe / whisper-1 reject
         # opus voice files; force the transcoder to re-encode them as
-        # mp3 first. The OpenRouter `openai/whisper-1` alias goes
-        # through the same OpenAI Whisper backend, so it's covered too.
+        # mp3 first.
         prefer_mp3 = used_model in {
             "gpt-4o-mini-transcribe",
             "gpt-4o-transcribe",
             "whisper-1",
-            "openai/whisper-1",
         }
         try:
             parts = await transcode_for_openai(downloaded, msg.media_type, tmp_dir, prefer_mp3=prefer_mp3)

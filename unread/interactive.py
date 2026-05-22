@@ -88,6 +88,17 @@ ALL_UNREAD = object()
 # zero TG round-trips, retrieval reads every synced chat.
 ALL_LOCAL = object()
 
+
+@dataclass(slots=True, frozen=True)
+class _PickedFolder:
+    """Returned by `_pick_chat` when the user picks "Run on a folder…"
+    and selects a folder. Carries the folder title so the wizard can
+    forward it to `run_all_unread_*(folder=...)`.
+    """
+
+    name: str
+
+
 # Rough token estimate per formatted message line (sender + timestamp + body).
 # Used only for up-front cost previews; the real pipeline counts exactly via
 # tiktoken. Cyrillic runs ~1.5x the English rate — this is a middle ground.
@@ -242,8 +253,18 @@ class InteractiveAnswers:
     console_out: bool
     mark_read: bool
     output_path: Path | None = None
+    # When True (only valid alongside `console_out=True` and
+    # `output_path=None`): render the report to the terminal AND save a
+    # copy to the default reports/ directory. New wizard default for dump
+    # so users see the rendered output without losing the saved file.
+    also_save_default: bool = False
     run_on_all_unread: bool = False  # User picked "Run on ALL N unread chats"
     run_on_all_local: bool = False  # ask mode: "🌐 ALL synced chats" picked
+    # Folder name when the user picked "Run on a folder…". When set,
+    # `run_on_all_unread` is also True (the underlying batch flow is
+    # the same; the folder name narrows the scope to chats in that
+    # Telegram folder).
+    run_on_folder: str | None = None
     # None = "use defaults" (config.toml + preset); [] = "disable everything";
     # non-empty list = "enable exactly these kinds" (unioned with preset.enrich_kinds
     # by cmd_analyze via --enrich=<csv>).
@@ -418,6 +439,7 @@ def build_dump_args(
         "with_transcribe": with_transcribe,
         "include_transcripts": include_transcripts,
         "console_out": answers.console_out,
+        "also_save_default": answers.also_save_default,
         "save_default": False,
         "mark_read": answers.mark_read,
         "all_flat": answers.forum_all_flat,
@@ -473,6 +495,7 @@ async def run_interactive_analyze(
             console_out=answers.console_out,
             mark_read=answers.mark_read,
             yes=True,  # wizard already confirmed the plan, no second prompt
+            folder=answers.run_on_folder,
             language=language,
             report_language=report_language,
             source_language=source_language,
@@ -531,8 +554,10 @@ async def run_interactive_dump(
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=answers.console_out,
+            also_save_default=answers.also_save_default,
             mark_read=answers.mark_read,
             yes=True,
+            folder=answers.run_on_folder,
             language=language,
             report_language=report_language,
             source_language=source_language,
@@ -836,6 +861,10 @@ async def _collect_answers(
         # overrides when present, otherwise get set by the wizard steps.
         chosen_console_out = bool(console_out)
         chosen_output_path: Path | None = output
+        # Tracks the "save reports/ + console" wizard option (new dump
+        # default). Only ever True alongside `chosen_console_out=True` and
+        # `chosen_output_path=None` — see `_pick_output` for the trios.
+        chosen_also_save_default = False
         # Default mark-read to True in the wizard for analyze/dump: if the
         # user ran analyze on unread messages they've effectively "seen"
         # them now, so advancing Telegram's read marker matches intent.
@@ -858,6 +887,10 @@ async def _collect_answers(
 
         run_on_all = False
         run_on_all_local = False
+        # When the user picked "Run on a folder…" in the chat step,
+        # carries the folder title. Threaded through to InteractiveAnswers
+        # so the analyze/dump dispatch can call `run_all_unread_*(folder=...)`.
+        run_on_folder_name: str | None = None
         step = "chat"
         while True:
             if step == "chat":
@@ -868,6 +901,7 @@ async def _collect_answers(
                 # corrupt the returned answers.
                 run_on_all = False
                 run_on_all_local = False
+                run_on_folder_name = None
                 chat = None
                 linked_chat_id = None
                 # Topic-scoped state from a prior thread step, plus any
@@ -895,6 +929,19 @@ async def _collect_answers(
                     # Still let the user pick a preset for analyze; skip
                     # everything else (thread/period/custom-range) — batch
                     # is always "each chat's own unread".
+                    step = (
+                        "preset"
+                        if mode == "analyze"
+                        else _next_step_after_mark_read(output_forced, mark_read_forced)
+                    )
+                    continue
+                if isinstance(result, _PickedFolder):
+                    # Folder batch: same downstream flow as ALL_UNREAD,
+                    # narrowed to chats in `result.name`. The folder
+                    # name flows into InteractiveAnswers and on to
+                    # `run_all_unread_*(folder=...)`.
+                    run_on_all = True
+                    run_on_folder_name = result.name
                     step = (
                         "preset"
                         if mode == "analyze"
@@ -942,13 +989,10 @@ async def _collect_answers(
                     step = "comments"
                 elif mode == "analyze":
                     step = "preset"
-                elif mode == "ask":
-                    # Ask mode skips preset/enrich/output/mark_read.
-                    step = "period"
                 else:
-                    # Dump: skip preset (no preset for dump), go straight
-                    # to enrich since media enrichment applies here too.
-                    step = "enrich"
+                    # Ask and dump: no preset step. Go to period so the
+                    # user can pick a date range before enrich/confirm.
+                    step = "period"
 
             elif step == "comments":
                 # Channel-only step: include the linked discussion group's
@@ -974,7 +1018,7 @@ async def _collect_answers(
                     console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
                 with_comments = bool(result)
-                step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
+                step = "preset" if mode == "analyze" else "period"
 
             elif step == "thread":
                 result = await _pick_thread(client, chat["chat_id"])
@@ -989,7 +1033,7 @@ async def _collect_answers(
                 # Force a refetch on the next period / enrich step.
                 period_counts = {}
                 media_counts = {}
-                step = "preset" if mode == "analyze" else "period" if mode == "ask" else "enrich"
+                step = "preset" if mode == "analyze" else "period"
 
             elif step == "preset":
                 # Only runs for analyze mode.
@@ -1055,7 +1099,12 @@ async def _collect_answers(
                         step = "preset"
                     elif chat and chat["kind"] == "forum":
                         step = "thread"
-                    elif mode == "ask" and chat and chat["kind"] == "channel" and linked_chat_id is not None:
+                    elif (
+                        mode in ("ask", "dump")
+                        and chat
+                        and chat["kind"] == "channel"
+                        and linked_chat_id is not None
+                    ):
                         step = "comments"
                     else:
                         # Includes ask + ALL_LOCAL (run_on_all_local) and
@@ -1210,7 +1259,7 @@ async def _collect_answers(
                 if result is None:
                     console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
-                chosen_console_out, chosen_output_path = result
+                chosen_console_out, chosen_output_path, chosen_also_save_default = result
                 step = "confirm" if mark_read_forced else "mark_read"
 
             elif step == "mark_read":
@@ -1247,7 +1296,10 @@ async def _collect_answers(
                 # the action (analyze / dump / ask) so the user doesn't
                 # have to scroll up to remember which command they ran.
                 if run_on_all:
-                    header_value = i18n_t("wiz_plan_all_unread_chats")
+                    if run_on_folder_name:
+                        header_value = i18n_tf("wiz_plan_folder_chats", folder=run_on_folder_name)
+                    else:
+                        header_value = i18n_t("wiz_plan_all_unread_chats")
                 elif run_on_all_local:
                     # Ask mode "search ALL synced chats" path. Re-uses
                     # the picker label for consistency with the chat-
@@ -1296,7 +1348,9 @@ async def _collect_answers(
                     )
                 # Output row: not shown for ask (no save step).
                 if mode != "ask":
-                    if chosen_console_out:
+                    if chosen_console_out and chosen_also_save_default:
+                        output_value = i18n_t("wiz_plan_save_reports_and_console")
+                    elif chosen_console_out:
                         output_value = i18n_t("wiz_plan_console")
                     elif chosen_output_path:
                         output_value = str(chosen_output_path)
@@ -1475,8 +1529,10 @@ async def _collect_answers(
             console_out=chosen_console_out,
             mark_read=chosen_mark_read,
             output_path=chosen_output_path,
+            also_save_default=chosen_also_save_default,
             run_on_all_unread=run_on_all,
             run_on_all_local=run_on_all_local,
+            run_on_folder=run_on_folder_name,
             enrich_kinds=enrich_kinds,
             custom_from_msg=custom_from_msg,
             with_comments=with_comments,
@@ -2374,6 +2430,7 @@ async def _pick_chat(
     Returns one of:
       - dict (picked chat) — a resolved entry
       - ALL_UNREAD — user picked "Run on all N unread chats" (if offer_all_unread)
+      - _PickedFolder(name=...) — user picked "Run on a folder…" and a folder (if offer_all_unread)
       - ALL_LOCAL — user picked "Search ALL synced chats" (if offer_all_local)
       - None — cancelled
     """
@@ -2424,29 +2481,45 @@ async def _pick_chat(
                 value=("all_unread", None),
             )
         )
-    choices.append(questionary.Separator())
-    choices.append(questionary.Separator(_chat_header_row()))
-    for d in unread:
+        # Folder batch sits right under "Run on ALL" — same family of
+        # whole-batch actions, just narrower scope. Only meaningful for
+        # analyze/dump (offer_all_unread=True), not ask mode.
         choices.append(
             questionary.Choice(
-                title=_chat_row(
-                    unread=d.unread_count,
-                    kind=d.kind,
-                    last_msg_date=d.last_msg_date,
-                    title=d.title or d.chat_id,
-                    folders=folder_idx.get(d.chat_id),
-                    subscribed=d.chat_id in sub_set,
-                ),
-                value=("pick", d),
+                title=i18n_t("wiz_run_on_folder"),
+                value=("folder", None),
             )
         )
+    choices.append(questionary.Separator())
+    choices.append(questionary.Separator(_chat_header_row()))
+    first_chat_choice: questionary.Choice | None = None
+    for d in unread:
+        c = questionary.Choice(
+            title=_chat_row(
+                unread=d.unread_count,
+                kind=d.kind,
+                last_msg_date=d.last_msg_date,
+                title=d.title or d.chat_id,
+                folders=folder_idx.get(d.chat_id),
+                subscribed=d.chat_id in sub_set,
+            ),
+            value=("pick", d),
+        )
+        choices.append(c)
+        if first_chat_choice is None:
+            first_chat_choice = c
     # No "Back" on the first step — there's nowhere to go back to.
     # Ctrl-C cancels the whole wizard.
 
+    # Default highlight on the first chat row (not the search button) so
+    # Enter immediately drills into the top-unread chat — the most common
+    # action. The search/run-all/folder buttons stay above for fast access
+    # via arrow-up.
     result = await _bind_escape(
         questionary.select(
             i18n_tf("wiz_pick_chat_n_unread", n=len(unread)),
             choices=choices,
+            default=first_chat_choice,
             use_search_filter=True,
             use_jk_keys=False,
             instruction=i18n_t("wiz_filter_instruction"),
@@ -2473,6 +2546,23 @@ async def _pick_chat(
             f"[bold]{i18n_t('wiz_summary_chat_all_unread')}[/]"
         )
         return ALL_UNREAD
+    if action == "folder":
+        picked_name = await _pick_folder(client)
+        if picked_name is None:
+            # Folder picker cancelled (or no folders exist) — fall back
+            # to the chat picker so the user can pick something else
+            # without restarting the wizard.
+            return await _pick_chat(
+                client,
+                offer_all_unread=offer_all_unread,
+                offer_all_local=offer_all_local,
+                subscribed_ids=sub_set,
+            )
+        _replace_last_line(
+            f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: "
+            f"[bold]{i18n_tf('wiz_plan_folder_chats', folder=picked_name)}[/]"
+        )
+        return _PickedFolder(name=picked_name)
     if action == "all":
         _replace_last_line(
             f"[bold cyan]?[/] {i18n_t('wiz_summary_step_chat')}: "
@@ -2491,6 +2581,74 @@ async def _pick_chat(
         "read_inbox_max_id": d.read_inbox_max_id,
         "unread": d.unread_count,
     }
+
+
+async def _pick_folder(client) -> str | None:
+    """Show the user's Telegram folders and return the picked folder title.
+
+    Returns None on cancel or when the account has no folders. The
+    caller (`_pick_chat`) re-opens the chat picker on None so users
+    don't get stuck in a dead end. We compute per-folder unread / chat
+    counts from the same dialog snapshot used by the chat picker so
+    the user sees how much work each folder represents before picking.
+    """
+    from unread.tg.dialogs import list_unread_dialogs
+    from unread.tg.folders import list_folders
+
+    try:
+        folders = await list_folders(client)
+    except Exception as e:
+        log.warning("interactive.list_folders_failed", err=str(e)[:200])
+        folders = []
+    if not folders:
+        console.print(f"[yellow]{i18n_t('wiz_no_folders')}[/]")
+        return None
+
+    # Per-folder unread tally from the unread-dialogs snapshot.
+    # `list_unread_dialogs` only returns dialogs with unread > 0, which
+    # is exactly what `--folder` batches over. Total chats = explicit
+    # include count from the folder definition (may include read chats);
+    # unread is what `run_all_unread_analyze` will actually process.
+    try:
+        unread_dialogs = await list_unread_dialogs(client)
+    except Exception as e:
+        log.debug("interactive.list_unread_for_folders_failed", err=str(e)[:200])
+        unread_dialogs = []
+    unread_by_chat = {d.chat_id: d.unread_count for d in unread_dialogs}
+
+    choices: list[Any] = []
+    for f in folders:
+        unread_in_folder = sum(unread_by_chat.get(cid, 0) for cid in f.include_chat_ids)
+        emoji = (f.emoticon + " ") if f.emoticon else ""
+        meta = i18n_tf(
+            "wiz_folder_unread_chats",
+            unread=unread_in_folder,
+            total=len(f.include_chat_ids),
+        )
+        choices.append(
+            questionary.Choice(
+                title=f"{emoji}{f.title}  ({meta})",
+                value=f.title,
+            )
+        )
+    choices.append(questionary.Separator())
+    choices.append(questionary.Choice(title=i18n_t("wiz_back"), value=BACK))
+
+    result = await _bind_escape(
+        questionary.select(
+            i18n_tf("wiz_pick_folder_q", n=len(folders)),
+            choices=choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+            instruction=i18n_t("wiz_filter_instruction"),
+            style=LIST_STYLE,
+        ),
+        BACK,
+    ).ask_async()
+
+    if result is None or result is BACK:
+        return None
+    return str(result)
 
 
 async def _pick_from_all(
@@ -2714,26 +2872,35 @@ async def _pick_preset():
     `description` frontmatter field is shown next to its name; new
     presets are picked up automatically (drop a `.md` into the language
     directory with `description:` set).
+
+    Presets with `hidden: true` in frontmatter are filtered out — those
+    are auto-selected by routing logic (`single_msg`, `multichat`,
+    `video`, `website`) and showing them in the picker would be noise.
+    The CLI's `--preset` flag still accepts them by name.
+
+    The `preferred` list orders the visible presets by popularity (the
+    sequence a typical user reaches for first); user-authored custom
+    presets land after, sorted alphabetically.
     """
     from unread.config import get_settings
 
     locale = get_settings().locale
     active_lang = (locale.report_language or locale.language or "en").lower()
-    presets_for_lang = get_presets(active_lang)
+    presets_for_lang = {
+        name: preset for name, preset in get_presets(active_lang).items() if not preset.hidden
+    }
 
     preferred = [
         "summary",
-        "broad",
+        "tldr",
         "digest",
         "highlights",
+        "quotes",
+        "links",
         "action_items",
         "decisions",
         "questions",
-        "quotes",
-        "links",
         "reactions",
-        "single_msg",
-        "multichat",
     ]
     names = [p for p in preferred if p in presets_for_lang]
     names += [n for n in sorted(presets_for_lang.keys()) if n not in preferred]
@@ -2768,12 +2935,17 @@ async def _pick_preset():
 
 
 async def _pick_output(*, default_path: Path | None):
-    """Returns (console_out, output_path), BACK, or None (cancel).
+    """Returns (console_out, output_path, also_save_default), BACK, or None.
 
     `default_path` seeds the custom-path prompt so the user can edit an
     already-provided value instead of retyping it.
+
+    `also_save_default=True` only goes with `console_out=True` and
+    `output_path=None` — it signals "render to terminal AND save to default
+    reports/", the new wizard default for dump.
     """
     choices = [
+        questionary.Choice(i18n_t("wiz_output_save_and_console"), value=("both", None)),
         questionary.Choice(i18n_t("wiz_output_save_default"), value=("file", None)),
         questionary.Choice(i18n_t("wiz_output_save_custom"), value=("custom", None)),
         questionary.Choice(i18n_t("wiz_output_console"), value=("console", None)),
@@ -2796,15 +2968,20 @@ async def _pick_output(*, default_path: Path | None):
         _replace_last_line(f"[grey70]{i18n_t('wiz_back')}[/]")
         return BACK
     out_label = i18n_t("wiz_summary_step_output")
+    if action == "both":
+        _replace_last_line(
+            f"[bold cyan]?[/] {out_label}: [bold]{i18n_t('wiz_plan_save_reports_and_console')}[/]"
+        )
+        return True, None, True
     if action == "console":
         _replace_last_line(f"[bold cyan]?[/] {out_label}: [bold]{i18n_t('wiz_summary_step_console')}[/]")
-        return True, None
+        return True, None, False
     if action == "file":
         _replace_last_line(
             f"[bold cyan]?[/] {out_label}: [bold]{i18n_t('wiz_summary_step_reports_dir')}[/] "
             f"[grey70]{i18n_t('wiz_summary_step_auto_named')}[/]"
         )
-        return False, None
+        return False, None, False
     # Custom path — prompt for the exact path.
     seed = str(default_path) if default_path else ""
     raw = await questionary.text(
@@ -2820,7 +2997,7 @@ async def _pick_output(*, default_path: Path | None):
         return await _pick_output(default_path=default_path)
     path = Path(raw).expanduser()
     _replace_last_line(f"[bold cyan]?[/] {out_label}: [bold]{path}[/]")
-    return False, path
+    return False, path, False
 
 
 async def _pick_enrich(*, media_counts: dict[str, int] | None = None) -> list[str] | None | object:

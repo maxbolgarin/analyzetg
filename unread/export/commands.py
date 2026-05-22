@@ -200,6 +200,7 @@ async def cmd_dump(
     with_transcribe: bool,
     include_transcripts: bool,
     console_out: bool = False,
+    also_save_default: bool = False,
     save_default: bool = False,
     mark_read: bool | None = None,
     all_flat: bool = False,
@@ -259,6 +260,7 @@ async def cmd_dump(
             fmt=fmt,
             output=output,
             console_out=console_out,
+            also_save_default=also_save_default,
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             mark_read=mark_read,
@@ -494,6 +496,7 @@ async def cmd_dump(
                 with_transcribe=with_transcribe,
                 include_transcripts=include_transcripts,
                 console_out=console_out,
+                also_save_default=also_save_default,
                 mark_read=mark_read_bool,
                 enrich_opts=enrich_opts,
                 save_media=save_media,
@@ -580,6 +583,7 @@ async def cmd_dump(
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=console_out,
+            also_save_default=also_save_default,
             mark_read=mark_read_bool,
             enrich_opts=enrich_opts,
             topic_titles=topic_titles,
@@ -610,6 +614,7 @@ async def _dump_single(
     with_transcribe: bool,
     include_transcripts: bool,
     console_out: bool,
+    also_save_default: bool = False,
     mark_read: bool,
     enrich_opts=None,
     thread_title: str | None = None,
@@ -678,10 +683,17 @@ async def _dump_single(
     msgs = prepared.messages
     if console_out:
         _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
+        save_target: Path | None
         if output is not None:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            _write(msgs, fmt=fmt, output=output, title=title, language=language)
-            console.print(f"[green]{_tf('also_saved', path=output)}[/]")
+            save_target = output
+        elif also_save_default:
+            save_target = _default_output_path(title, fmt)
+        else:
+            save_target = None
+        if save_target is not None:
+            save_target.parent.mkdir(parents=True, exist_ok=True)
+            _write(msgs, fmt=fmt, output=save_target, title=title, language=language)
+            console.print(f"[green]{_tf('also_saved', path=save_target)}[/]")
     else:
         target = output if output is not None else _default_output_path(title, fmt)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -710,6 +722,7 @@ async def _dump_forum_per_topic(
     with_transcribe: bool,
     include_transcripts: bool,
     console_out: bool,
+    also_save_default: bool = False,
     mark_read: bool,
     enrich_opts=None,
     save_media: bool = False,
@@ -733,7 +746,10 @@ async def _dump_forum_per_topic(
     if with_transcribe and not effective_enrich.any_enabled():
         effective_enrich = EnrichOpts(voice=True, videonote=True, video=True)
 
-    if console_out:
+    # Save target: same per-topic layout used for non-console mode. The
+    # `also_save_default` flag turns "console only" into "console + save",
+    # using the default reports root when no explicit output is given.
+    if console_out and not also_save_default and output is None:
         base_dir: Path | None = None
     else:
         if output is not None and output.exists() and output.is_dir():
@@ -793,6 +809,7 @@ async def _dump_forum_per_topic(
                 if per_file is not None:
                     per_file.parent.mkdir(parents=True, exist_ok=True)
                     _write(msgs, fmt=fmt, output=per_file, title=prepared.chat_title, language=language)
+                    console.print(f"[green]{_tf('also_saved', path=per_file)}[/]")
             else:
                 target = per_file if per_file else _default_output_path(prepared.chat_title, fmt)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -925,6 +942,7 @@ async def run_all_unread_dump(
     with_transcribe: bool = False,
     include_transcripts: bool = True,
     console_out: bool = False,
+    also_save_default: bool = False,
     mark_read: bool | None = False,
     enrich: str | None = None,
     enrich_all: bool = False,
@@ -957,6 +975,7 @@ async def run_all_unread_dump(
             with_transcribe=with_transcribe,
             include_transcripts=include_transcripts,
             console_out=console_out,
+            also_save_default=also_save_default,
             mark_read=mark_read,
             enrich=enrich,
             enrich_all=enrich_all,
@@ -980,6 +999,7 @@ async def _dump_no_ref(
     with_transcribe: bool,
     include_transcripts: bool,
     console_out: bool,
+    also_save_default: bool = False,
     mark_read: bool | None,
     enrich: str | None,
     enrich_all: bool,
@@ -1009,7 +1029,9 @@ async def _dump_no_ref(
     else:
         mark_read_effective = mark_read
 
-    if console_out:
+    # `console_out=True` without `also_save_default` means console-only;
+    # all other combinations write per-chat files in `out_dir`.
+    if console_out and not also_save_default:
         out_dir = None
     else:
         out_dir = _resolve_output_dir(output, 2) if output is not None else _reports_dir()
@@ -1063,9 +1085,9 @@ async def _dump_no_ref(
                     limit=None,
                     overwrite=False,
                 )
-            if out_dir is None:
+            if console_out:
                 _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
-            else:
+            if out_dir is not None:
                 chat_out = out_dir / _slugify(title or str(prepared.chat_id)) / "dump"
                 chat_out.mkdir(parents=True, exist_ok=True)
                 path = chat_out / f"dump-{stamp}.{ext}"

@@ -435,13 +435,18 @@ async def _run_provider_step() -> None:
 
     async with open_repo(settings.storage.data_path) as repo:
         # Seed all four per-slot provider keys with the picked value.
-        # Audio snaps to openai when the user picked anthropic/google
-        # (no Whisper-shape API there). The legacy `ai.provider` row
-        # is no longer written; `_migrate_legacy_ai_provider_sync`
-        # cleans up any leftover row at the next bootstrap.
+        # Audio snaps to openai when the picked provider isn't in the
+        # Whisper-compatible set (anthropic + google have no audio API;
+        # openrouter advertises one but its endpoint rejects multipart
+        # — see `unread.ai.providers._AUDIO_PROVIDERS`). The legacy
+        # `ai.provider` row is no longer written;
+        # `_migrate_legacy_ai_provider_sync` cleans up any leftover row
+        # at the next bootstrap.
+        from unread.ai.providers import _AUDIO_PROVIDERS
+
         for slot in ("chat", "filter", "audio", "vision"):
             value = provider_name
-            if slot == "audio" and value not in {"openai", "openrouter", "local"}:
+            if slot == "audio" and value not in _AUDIO_PROVIDERS:
                 value = "openai"
             await repo.set_app_setting(f"ai.{slot}_provider", value)
         if provider_name == "local":

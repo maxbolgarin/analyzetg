@@ -445,8 +445,9 @@ async def _transcribe_audio(
 ) -> tuple[str, str, float, int]:
     """Whisper path: download audio → segment → transcribe → return text+model+cost+seconds.
 
-    Resolves the audio slot's provider (openai / openrouter / local —
-    capability snap excludes anthropic/google). Raises a focused error
+    Resolves the audio slot's provider (openai / local — capability
+    snap excludes anthropic / google / openrouter; see
+    `unread.ai.providers._AUDIO_PROVIDERS`). Raises a focused error
     when the resolved provider has no key configured, instead of
     letting the SDK throw a 401 mid-download.
     """

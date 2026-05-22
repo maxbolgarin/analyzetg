@@ -240,7 +240,11 @@ app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 app.add_typer(backup_app, name="backup", rich_help_panel=PANEL_MAINT)
 # `chats` lives under `tg` (Telegram subscriptions). The previous
 # top-level registration is gone — tests / scripts now use `tg chats`.
-tg_app.add_typer(chats_app, name="chats")
+# Hidden from help: subscription management is being reworked; the
+# subgroup stays reachable (`unread tg chats add` etc.) but isn't
+# advertised on `unread --help` / `unread tg --help` for now. Drop
+# `hidden=True` once the rework lands.
+tg_app.add_typer(chats_app, name="chats", hidden=True)
 
 
 @tg_app.callback(invoke_without_command=True)
@@ -1013,7 +1017,9 @@ def _print_config_status() -> None:
     if authorized:
         tg_line = f"  [bold]Telegram:[/] {_mark(True)} session linked"
     elif creds_present:
-        tg_line = "  [bold]Telegram:[/] [yellow]creds set, not logged in[/]  [grey70](run `unread login`)[/]"
+        tg_line = (
+            "  [bold]Telegram:[/] [yellow]creds set, not logged in[/]  [grey70](run `unread tg login`)[/]"
+        )
     else:
         tg_line = f"  [bold]Telegram:[/] {_mark(False)} not configured"
     rows.append(tg_line)
@@ -1889,7 +1895,10 @@ async def _list_folders() -> None:
 # ================================================================ 5.3 Sync
 
 
-@tg_app.command(help=_t("cmd_sync"))
+# Hidden from help in the same wave as `tg chats` — sync still runs
+# (`unread tg sync --chat ...`), it's just not advertised until the
+# subscription-management rework lands.
+@tg_app.command(help=_t("cmd_sync"), hidden=True)
 def sync(
     chat: int | None = typer.Option(
         None,
@@ -2387,9 +2396,10 @@ def _root(
     the forum as one chat (needs `--last-days` / `--full-history`),
     `--all-per-topic` runs one analysis per topic.
 
-    For Telegram-only setup, use `unread login` (or `unread tg login --force`
-    to re-link). The interactive chat picker is `unread tg` — `tg` is a
-    magic ref token, not a command.
+    For Telegram-only setup, use `unread tg login` (add `--force` to
+    re-link from scratch). The interactive chat picker is `unread tg` —
+    bare `tg` is a magic ref token that opens the picker; the verbs
+    `tg login` / `tg describe` / `tg logout` are subcommands.
     """
     setup_logging(verbose=verbose)
     if ctx.invoked_subcommand is not None:
@@ -4791,7 +4801,7 @@ def backup_up(
                     keychain, which the backup can't see. Restoring on the same
                     machine still works (keychain is local). Restoring on a
                     different machine boots into a "no credentials" state and
-                    you must re-run `unread login` to add keys.
+                    you must re-run `unread init` to add keys.
       • pass      — backup includes ciphertext + the install salt + the
                     encrypted Telegram session. Restoring anywhere is fine, but
                     you'll need the passphrase to use it.
@@ -4834,7 +4844,7 @@ async def _backup(output: Path | None, overwrite: bool) -> None:
         console.print(
             "[yellow]Note:[/] API keys live in your OS keychain — this backup does NOT "
             "include them. Restoring on a different machine will need "
-            "[cyan]unread login[/] to re-add credentials."
+            "[cyan]unread init[/] to re-add credentials."
         )
     elif backend == BACKEND_PASSPHRASE:
         console.print(
@@ -5266,7 +5276,7 @@ def init_cmd(
     Each step short-circuits when the value is already configured —
     re-running is safe and only prompts for what's missing. To re-pick
     the install folder, delete `~/.unread/install.toml` first. Use
-    `unread login` to re-link Telegram without touching the AI step.
+    `unread tg login` to re-link Telegram without touching the AI step.
     """
     from unread.tg.commands import cmd_init
 
@@ -5305,31 +5315,113 @@ def login_cmd(
 
 @tg_app.command(
     name="logout",
-    help="Clear the local Telegram session without touching credentials.",
+    help="Clear the local Telegram session (with confirmation).",
 )
-def logout_cmd() -> None:
-    """Clear the local Telegram session without touching credentials.
+def logout_cmd(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip both confirmation prompts (session clear + credential wipe).",
+    ),
+    purge_credentials: bool = typer.Option(
+        False,
+        "--purge-credentials",
+        help="Also delete persisted Telegram api_id / api_hash without asking. "
+        "Implies --yes for the credentials prompt.",
+    ),
+) -> None:
+    """Clear the local Telegram session, with a confirm prompt; optionally
+    also wipe persisted Telegram api_id / api_hash.
 
-    Wipes the on-disk session file (or the encrypted `session_string`
-    in the secrets table for the passphrase backend) so the next
-    `unread tg login` starts a fresh login. Telegram api_id / api_hash
-    stay in place — use `unread security clear` for those.
+    Two prompts in TTY mode (skip both with `--yes`):
+      1. Confirm clearing the local session (the destructive bit). Wipes
+         the on-disk session file or the encrypted `session_string` in
+         the secrets table for the passphrase backend.
+      2. After the session is cleared, if api_id / api_hash are still
+         persisted, ask whether to also delete them. Pass
+         `--purge-credentials` to skip the question and always delete.
 
-    Equivalent to `unread tg login --force` minus the immediate re-login
-    prompt: useful when you want to deauthorize this device and not
-    re-link right away.
+    Telegram-needing commands (`describe`, `dump`, `sync`, `chats`,
+    plus the Telegram phase of `analyze`) gate on the credentials —
+    deleting them means the next run will offer the auto-init prompt
+    or require `unread init` / `unread tg login --force`.
+
+    Non-TTY runs (CI / pipes) skip the prompts: session is cleared
+    unconditionally; credentials are kept unless `--purge-credentials`
+    is passed. Use `--yes` to also bypass the session-clear prompt in
+    TTY mode (e.g. one-line scripted logout).
     """
     from unread.tg.client import _wipe_local_session
     from unread.tg.session_state import is_session_authorized_sync
+    from unread.util.prompt import _can_interact
+    from unread.util.prompt import confirm as _confirm
 
     s = get_settings()
     had_session = is_session_authorized_sync(s) or _session_exists()
+
+    interactive = _can_interact()
+    # Prompt 1: confirm the session clear. Skip in non-TTY (the historic
+    # behavior — scripted logouts shouldn't hang on a confirm) and when
+    # `--yes` is passed. If there's nothing to clear we also skip — the
+    # confirm would be misleading ("clear what?").
+    if (
+        had_session
+        and interactive
+        and not yes
+        and not _confirm(
+            "Clear the local Telegram session? You'll need to re-link to use TG-needing commands.",
+            default=False,
+        )
+    ):
+        console.print("[grey70]Logout cancelled. Session left in place.[/]")
+        raise typer.Exit(0)
+
     _wipe_local_session()
     if had_session:
         console.print("[green]Local Telegram session cleared.[/]")
     else:
         console.print("[grey70]No active session to clear.[/]")
+
+    # Prompt 2: optionally purge credentials. Only meaningful when at
+    # least one of api_id / api_hash is still persisted — if both are
+    # already gone, there's nothing to delete and the question would
+    # only confuse.
+    from unread.secrets import read_secrets
+
+    persisted = read_secrets(s)
+    has_creds = bool(persisted.get("telegram.api_id") or persisted.get("telegram.api_hash"))
+
+    if has_creds:
+        do_purge = purge_credentials
+        if not do_purge and interactive and not yes:
+            do_purge = _confirm(
+                "Also delete persisted Telegram api_id / api_hash? "
+                "(You'll need to re-enter them in `unread tg login` to use TG again.)",
+                default=False,
+            )
+        if do_purge:
+            _run(_delete_telegram_credentials(s))
+            console.print("[green]Telegram api_id / api_hash deleted.[/]")
+        else:
+            console.print("[grey70]Telegram credentials kept (re-link with `unread tg login`).[/]")
+
     console.print("[grey70]Run `unread tg login` to log in again.[/]")
+
+
+async def _delete_telegram_credentials(settings) -> None:
+    """Delete `telegram.api_id` + `telegram.api_hash` from the active
+    secrets backend. Tolerates either key being absent — `delete_secret`
+    returns False for missing rows, no error needed."""
+    from unread.secrets import delete_secret as _delete_secret
+    from unread.util.logging import get_logger
+
+    log = get_logger(__name__)
+    for key in ("telegram.api_id", "telegram.api_hash"):
+        try:
+            await _delete_secret(settings, key)
+        except Exception as e:
+            log.warning("logout.credential_delete_failed", key=key, err=str(e)[:200])
 
 
 # =============================================================== migrate command

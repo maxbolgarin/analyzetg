@@ -253,12 +253,14 @@ _TUNING_SETTINGS: tuple[SettingDef, ...] = (
 
 
 # Per-slot capability filter for the provider half of the compound
-# picker. Audio is restricted to providers with a Whisper-shape API.
-# Chat / filter / vision accept all five providers.
+# picker. Audio is restricted to providers with an SDK-compatible
+# Whisper-shape API (see `unread.ai.providers._AUDIO_PROVIDERS` for
+# why openrouter is excluded — its endpoint rejects multipart). Chat /
+# filter / vision accept all five providers.
 _SLOT_PROVIDERS: dict[str, tuple[str, ...]] = {
     "chat": ("openai", "openrouter", "anthropic", "google", "local"),
     "filter": ("openai", "openrouter", "anthropic", "google", "local"),
-    "audio": ("openai", "openrouter", "local"),
+    "audio": ("openai", "local"),
     "vision": ("openai", "openrouter", "anthropic", "google", "local"),
 }
 

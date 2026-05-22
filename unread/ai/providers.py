@@ -101,6 +101,18 @@ class ChatProvider(Protocol):
         """One-shot chat call. No retries — the orchestrator handles those."""
 
 
+_AUDIO_PROVIDERS: frozenset[str] = frozenset({"openai", "local"})
+"""Providers whose audio API is on-the-wire compatible with the OpenAI
+Python SDK's multipart `audio.transcriptions.create(...)` upload.
+
+OpenRouter advertises `/audio/transcriptions` but rejects multipart with
+a JSON-parse 400; their endpoint requires a JSON body shaped
+`{"model": "...", "input_audio": {"data": "<b64>", "format": "..."}}`,
+which the SDK doesn't emit. So OpenRouter is treated like anthropic /
+google here — the audio slot snaps to openai, and capability gates use
+this set to filter the picker."""
+
+
 def _resolve_provider_name(settings, slot: str) -> str:  # type: ignore[no-untyped-def]
     """Return the effective provider name for a slot (`chat`/`filter`/`audio`/`vision`).
 
@@ -108,12 +120,12 @@ def _resolve_provider_name(settings, slot: str) -> str:  # type: ignore[no-untyp
     back to the deprecated umbrella `ai.provider` (transitional;
     `_migrate_legacy_ai_provider_sync` rewrites it on first read), then
     to `"openai"`. The audio slot snaps back to `openai` if the
-    resolved provider has no Whisper-shape API.
+    resolved provider has no Whisper-shape API (see `_AUDIO_PROVIDERS`).
     """
     direct = (getattr(settings.ai, f"{slot}_provider", "") or "").strip().lower()
     legacy = (getattr(settings.ai, "provider", "") or "").strip().lower()
     name = direct or legacy or "openai"
-    if slot == "audio" and name not in {"openai", "openrouter", "local"}:
+    if slot == "audio" and name not in _AUDIO_PROVIDERS:
         name = "openai"
     return name
 
@@ -216,12 +228,11 @@ def resolve_filter(settings) -> tuple[str, str]:  # type: ignore[no-untyped-def]
     return provider, model
 
 
-# Per-provider default audio model. Only providers that speak the
-# OpenAI-shape `audio.transcriptions` API are listed; resolve_audio()
-# enforces this set as a capability filter.
+# Per-provider default audio model. Only providers in `_AUDIO_PROVIDERS`
+# speak the OpenAI-shape `audio.transcriptions` API; the resolver snaps
+# everything else to openai before this lookup.
 _DEFAULT_AUDIO_MODEL: dict[str, str] = {
     "openai": "gpt-4o-mini-transcribe",
-    "openrouter": "openai/whisper-1",
     "local": "whisper",
 }
 
@@ -241,10 +252,14 @@ _DEFAULT_VISION_MODEL: dict[str, str] = {
 def resolve_audio(settings) -> tuple[str, str]:  # type: ignore[no-untyped-def]
     """Resolve `(provider, model)` for the audio transcription slot.
 
-    Capability snap: anthropic / google have no Whisper-shape API,
-    so `audio_provider` set to either silently snaps back to openai
-    here. The settings UI prevents the bad pick at write time; this
-    is defense-in-depth for hand-edited configs.
+    Capability snap: anthropic / google / openrouter have no
+    SDK-compatible Whisper-shape API (anthropic + google don't expose
+    one at all; openrouter advertises one but rejects multipart with a
+    JSON 400 — see `_AUDIO_PROVIDERS`). `audio_provider` set to any of
+    these silently snaps back to openai here. The settings UI prevents
+    the bad pick at write time; this is defense-in-depth for hand-edited
+    configs and existing rows from older releases that still tolerated
+    `audio_provider=openrouter`.
 
     Model source order: `ai.audio_model` → legacy
     `openai.audio_model_default` (when provider == openai) →
@@ -311,9 +326,9 @@ def provider_default_model(provider: str, role: str) -> str:
 def make_audio_client(provider: str, settings):  # type: ignore[no-untyped-def]
     """Return an :class:`openai.AsyncOpenAI` configured for `provider`.
 
-    All three audio-capable providers (openai / openrouter / local)
-    speak the same `audio.transcriptions.create` API — the only
-    difference is `base_url` + `api_key`. Returns the constructed
+    Both audio-capable providers in `_AUDIO_PROVIDERS` (openai / local)
+    speak the same multipart `audio.transcriptions.create` API — the
+    only difference is `base_url` + `api_key`. Returns the constructed
     client; the caller dispatches the actual transcription call.
 
     Raises :class:`ProviderUnavailableError` when the provider isn't
@@ -329,20 +344,6 @@ def make_audio_client(provider: str, settings):  # type: ignore[no-untyped-def]
                 "audio provider 'openai' has no API key — set OPENAI_API_KEY or run `unread settings`."
             )
         return AsyncOpenAI(api_key=settings.openai.api_key, timeout=timeout)
-    if name == "openrouter":
-        if not settings.openrouter.api_key:
-            raise ProviderUnavailableError(
-                "audio provider 'openrouter' has no API key — set OPENROUTER_API_KEY or "
-                "run `unread settings`."
-            )
-        from unread.ai.openai_provider import OPENROUTER_APP_HEADERS
-
-        return AsyncOpenAI(
-            api_key=settings.openrouter.api_key,
-            base_url=settings.openrouter.base_url,
-            timeout=timeout,
-            default_headers=OPENROUTER_APP_HEADERS,
-        )
     if name == "local":
         return AsyncOpenAI(
             api_key=settings.local.api_key or "local-no-key",
@@ -350,5 +351,5 @@ def make_audio_client(provider: str, settings):  # type: ignore[no-untyped-def]
             timeout=timeout,
         )
     raise ProviderUnavailableError(
-        f"audio provider {name!r} is not Whisper-compatible. Pick openai / openrouter / local."
+        f"audio provider {name!r} is not Whisper-compatible. Pick openai or local."
     )

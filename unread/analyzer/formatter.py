@@ -290,6 +290,7 @@ def format_messages(
     chat_groups: dict[int, dict] | None = None,
     language: str = "en",
     source_kind: str = "chat",
+    blank_line_between_messages: bool = False,
 ) -> str:
     """Dense text format for a list of messages.
 
@@ -354,10 +355,15 @@ def format_messages(
             if ctmpl:
                 lines.append(f"{msg_link_lbl}: {ctmpl}")
             lines.append("")
+            seen_msg = False
             for m in groups_by_cid[cid]:
                 line = _emit_msg_line(m, idx, date_fmt)
-                if line is not None:
-                    lines.append(line)
+                if line is None:
+                    continue
+                if seen_msg and blank_line_between_messages:
+                    lines.append("")
+                lines.append(line)
+                seen_msg = True
         return "\n".join(lines)
 
     if topic_titles:
@@ -375,16 +381,26 @@ def format_messages(
             header = _topic_header(tid, topic_titles, language=language)
             if header:
                 lines.append(header)
+            seen_msg = False
             for m in groups[tid]:
                 line = _emit_msg_line(m, idx, date_fmt)
-                if line is not None:
-                    lines.append(line)
+                if line is None:
+                    continue
+                if seen_msg and blank_line_between_messages:
+                    lines.append("")
+                lines.append(line)
+                seen_msg = True
         return "\n".join(lines)
 
+    seen_msg = False
     for m in msgs:
         line = _emit_msg_line(m, idx, date_fmt)
-        if line is not None:
-            lines.append(line)
+        if line is None:
+            continue
+        if seen_msg and blank_line_between_messages:
+            lines.append("")
+        lines.append(line)
+        seen_msg = True
     return "\n".join(lines)
 
 

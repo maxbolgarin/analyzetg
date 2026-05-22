@@ -27,12 +27,24 @@ def _csv_safe(value: Any) -> Any:
 
 
 def render_md(msgs: list[Message], *, title: str | None, language: str = "en") -> str:
-    """Build the markdown string without writing anything."""
+    """Build the markdown string without writing anything.
+
+    Uses `blank_line_between_messages=True` so consecutive posts get a
+    visible paragraph break — both for human readers of the saved `.md`
+    and for Rich's CommonMark renderer in `--output console` mode, which
+    would otherwise collapse adjacent lines into a single paragraph.
+    """
     period: tuple[datetime | None, datetime | None] = (
         msgs[0].date if msgs else None,
         msgs[-1].date if msgs else None,
     )
-    return format_messages(msgs, period=period, title=title, language=language)
+    return format_messages(
+        msgs,
+        period=period,
+        title=title,
+        language=language,
+        blank_line_between_messages=True,
+    )
 
 
 def export_md(msgs: list[Message], *, title: str | None, output: Path, language: str = "en") -> None:

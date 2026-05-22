@@ -2667,12 +2667,14 @@ def _apply_one_override(settings, key: str, value: str) -> None:
     # older binary) by mirroring it onto every slot that's still empty.
     if key == "ai.provider":
         if value:
+            from unread.ai.providers import _AUDIO_PROVIDERS
+
             settings.ai.provider = value
             for slot in ("chat", "filter", "audio", "vision"):
                 attr = f"{slot}_provider"
                 if not getattr(settings.ai, attr, ""):
                     snap = value
-                    if slot == "audio" and snap not in {"openai", "openrouter", "local"}:
+                    if slot == "audio" and snap not in _AUDIO_PROVIDERS:
                         snap = "openai"
                     setattr(settings.ai, attr, snap)
         return
@@ -2710,10 +2712,14 @@ def _migrate_legacy_ai_provider_sync(db_path: Path) -> None:
     `_apply_one_override("ai.provider", ...)` mirroring it onto empty
     slot fields each bootstrap (correct, just less tidy).
 
-    Audio capability snap: anthropic / google → openai (those providers
-    have no Whisper-shape API).
+    Audio capability snap: anthropic / google / openrouter → openai
+    (anthropic + google have no Whisper-shape API; openrouter advertises
+    one but rejects multipart with a JSON 400 — see
+    `unread.ai.providers._AUDIO_PROVIDERS`).
     """
     import sqlite3
+
+    from unread.ai.providers import _AUDIO_PROVIDERS
 
     if not db_path.is_file():
         return
@@ -2724,8 +2730,7 @@ def _migrate_legacy_ai_provider_sync(db_path: Path) -> None:
         return
     try:
         cur = conn.execute(
-            "SELECT key, value FROM app_settings "
-            "WHERE key IN (?, ?, ?, ?, ?)",
+            "SELECT key, value FROM app_settings WHERE key IN (?, ?, ?, ?, ?)",
             (
                 "ai.provider",
                 "ai.chat_provider",
@@ -2749,7 +2754,7 @@ def _migrate_legacy_ai_provider_sync(db_path: Path) -> None:
             if rows.get(target_key, ""):
                 continue
             value = legacy
-            if slot == "audio" and value not in {"openai", "openrouter", "local"}:
+            if slot == "audio" and value not in _AUDIO_PROVIDERS:
                 value = "openai"
             now_iso = _utcnow()
             conn.execute(

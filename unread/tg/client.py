@@ -103,7 +103,7 @@ def exit_session_expired() -> None:
     keep reading the stale-but-non-empty file and report "session
     linked" on the very next `unread help` invocation, contradicting
     the banner we just showed. The user has to re-auth anyway, so
-    pre-clearing matches what `unread login --force` would do.
+    pre-clearing matches what `unread tg login --force` would do.
     """
     import typer
     from rich.console import Console
@@ -118,7 +118,7 @@ def exit_session_expired() -> None:
 
 
 async def offer_inline_tg_init(reason: str) -> bool:
-    """Offer to run `unread login` inline when a TG-needing command is blocked.
+    """Offer to run `unread tg login` inline when a TG-needing command is blocked.
 
     Returns ``True`` iff init ran to completion (caller should retry the
     failing operation). Returns ``False`` iff the user declined; the
@@ -142,7 +142,7 @@ async def offer_inline_tg_init(reason: str) -> bool:
     1. Wipes the local session for ``"session_expired"`` (init's
        "session already valid" short-circuit would skip re-auth otherwise).
     2. Runs ``cmd_init(scope="telegram_only")`` — same wizard
-       ``unread login`` uses, so persistence is identical.
+       ``unread tg login`` uses, so persistence is identical.
     3. Drops the settings singleton so the caller's retry picks up
        freshly-written api_id / api_hash / session.
 
@@ -162,7 +162,7 @@ async def offer_inline_tg_init(reason: str) -> bool:
         from unread.util.prompt import confirm
 
         console.print("[yellow]Telegram session expired or invalid.[/]")
-        if not confirm("Run `unread login` now and continue?", default=True):
+        if not confirm("Run `unread tg login` now and continue?", default=True):
             return False
 
     # Deferred import to break the tg.client ↔ tg.commands cycle —
@@ -284,7 +284,7 @@ async def tg_client(
 
     Auto-init: in interactive shells, the first time we hit a missing
     credentials / unauthorized session per command invocation we offer
-    to run ``unread login`` inline. If the user accepts and init
+    to run ``unread tg login`` inline. If the user accepts and init
     succeeds, we retry the connection once with the freshly written
     creds / session. Non-TTY environments skip the offer and behave
     exactly as before — see :func:`offer_inline_tg_init`.
@@ -319,7 +319,7 @@ async def tg_client(
                 await client.disconnect()
                 client = None
                 raise TelegramSessionExpired(
-                    "Telegram session is not authorized. Run `unread login --force`."
+                    "Telegram session is not authorized. Run `unread tg login --force`."
                 )
             break  # success
         except TelegramSessionExpired:

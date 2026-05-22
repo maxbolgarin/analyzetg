@@ -72,9 +72,13 @@ class AICfg(_StrictCfg):
     / `vision_provider` directly.
 
     Audio capability filter: `audio_provider` snaps to `openai` when
-    set to a provider with no Whisper-shape API (anthropic, google) —
-    the UI prevents the bad pick, but defense-in-depth at the resolver
-    means a hand-edited config still works.
+    set to a provider whose audio API isn't on-the-wire compatible with
+    the OpenAI Python SDK's multipart upload — anthropic / google have
+    no audio endpoint at all, openrouter advertises one but rejects
+    multipart with a JSON 400 (see
+    `unread.ai.providers._AUDIO_PROVIDERS`). The UI prevents the bad
+    pick, but defense-in-depth at the resolver means a hand-edited
+    config still works.
 
     `base_url` is a generic OpenAI-compatible-endpoint override.
     `base_url_trusted` gates the cleartext-key safety check at send

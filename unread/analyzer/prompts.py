@@ -43,36 +43,12 @@ USER_MARKER = "---USER---"
 # `options_payload` in analyzer/pipeline.py so a base-rule change busts
 # EVERY preset's cache without per-preset prompt_version bumps.
 #
-# v5: split language vs content_language semantics. Now `content_language`
-# drives which presets/<lang>/ tree the loader reads (and thus the
-# language of prompts and LLM output); `language` only drives user-facing
-# UI / report headings. The compose_system_prompt signature dropped its
-# old `content_language` informational hint (redundant now that prompts
-# are natively in content_language). Cached rows from v4 used the old
-# meaning and must be re-run.
-# v6: _base.md generalized from "Telegram chats" to "chat OR video
-# transcript" — adds a video addendum block and timestamp-aware citation
-# guidance. compose_system_prompt now takes `source_kind`. Cached rows
-# from v5 are still semantically valid for chats but get re-keyed.
-# v7: untrusted-content sentinels. The formatter now wraps every
-# third-party body (message text, transcripts, image / doc excerpts,
-# fetched link summaries) in `<<<UNTRUSTED_CONTENT id=…>>> /
-# <<<END_UNTRUSTED>>>` markers; `_base.md` instructs the model to treat
-# anything inside those blocks as data, never as instructions. v6
-# results were generated against the un-wrapped prompt and must be
-# re-run so the new sentinel discipline takes effect.
-# v8: three language axes split. `_base.md` no longer says "write in X
-# (or the source's language if it's clearly something else)" — the
-# old "follow source if different" clause caused mixed-language reports
-# (e.g., Russian section headings on a Chinese-source analysis). Now
-# the base rules unconditionally instruct "write the analysis in
-# {report-language}; quote source spans in their original language".
-# `compose_system_prompt` also gained an optional `source_language`
-# kwarg that injects a one-line Whisper-style hint when the user sets
-# `locale.content_language`. The hint is part of the cache key under a
-# new `source_language` payload field (only emitted when set, so users
-# who don't opt in keep their existing cache rows).
-BASE_VERSION = "v8"
+# Reset to v1 at pre-release. Earlier history (v2..v8) tracked the
+# evolution of `_base.md` through language-axis splits, untrusted-content
+# sentinels, and forum-mode rules; pre-release means cached rows are
+# throwaway, so the version space restarts here. Bump on every
+# structural change to base prompts after the first public release.
+BASE_VERSION = "v1"
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +249,12 @@ class Preset:
     # CLI / config toggles — see enrich.EnrichOpts and analyzer.commands.
     # Names match EnrichOpts fields: voice, videonote, video, image, doc, link.
     enrich_kinds: list[str] = field(default_factory=list)
+    # Hide from the wizard's preset picker. Set on presets that are
+    # auto-selected by routing logic (single-message detection,
+    # `runner.py` → `multichat`, YouTube/website adapters → their
+    # dedicated preset). The CLI's `--preset` flag still accepts hidden
+    # names — `hidden` only affects user-facing menus.
+    hidden: bool = False
 
     def render_user(self, **kw: object) -> str:
         return self.user_template.format(**kw)
@@ -368,6 +350,7 @@ def _load_preset_file(path: Path, *, language: str = "en") -> Preset:
         max_chunk_input_tokens=max_chunk_input_tokens,
         description=meta.get("description") or None,
         enrich_kinds=_coerce_list(meta.get("enrich", "")),
+        hidden=_coerce_bool(meta.get("hidden", "false")),
     )
 
 
@@ -595,6 +578,7 @@ def load_custom_preset(prompt_file: Path, *, language: str = "en") -> Preset:
         max_chunk_input_tokens=custom_max_chunk,
         description=meta.get("description") or None,
         enrich_kinds=_coerce_list(meta.get("enrich", "")),
+        hidden=_coerce_bool(meta.get("hidden", "false")),
     )
 
 

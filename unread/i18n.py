@@ -1404,6 +1404,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "🚀  Run on ALL {n} unread chats ({total} total messages)",
         "ru": "🚀  Запустить на ВСЕХ {n} непрочитанных чатах (всего сообщений: {total})",
     },
+    "wiz_run_on_folder": {
+        "en": "📁  Run on a folder…",
+        "ru": "📁  Запустить по папке…",
+    },
+    "wiz_pick_folder_q": {
+        "en": "Pick a folder ({n} available)",
+        "ru": "Выберите папку (доступно: {n})",
+    },
+    "wiz_no_folders": {
+        "en": "You don't have any Telegram folders. Create one in your Telegram client first.",
+        "ru": "У вас нет папок Telegram. Сначала создайте папку в клиенте Telegram.",
+    },
+    "wiz_folder_unread_chats": {
+        "en": "{unread} unread / {total} chats",
+        "ru": "непрочит.: {unread} / чатов: {total}",
+    },
     "wiz_ask_all_local": {
         "en": "🌐 Search ALL synced chats (local DB)",
         "ru": "🌐 Поиск по всем локальным чатам (без Telegram)",
@@ -1419,17 +1435,21 @@ _STRINGS: dict[str, dict[str, str]] = {
     "wiz_col_title": {"en": "title", "ru": "название"},
     "wiz_pick_preset_q": {"en": "Pick a preset", "ru": "Выберите пресет"},
     "wiz_output_q": {"en": "Where do you want the output?", "ru": "Куда сохранить результат?"},
+    "wiz_output_save_and_console": {
+        "en": "📺 Save to reports/ + print to terminal (default)",
+        "ru": "📺 Сохранить в reports/ + вывести в терминал (по умолчанию)",
+    },
     "wiz_output_save_default": {
-        "en": "📁 Save to reports/ (default, auto-named)",
-        "ru": "📁 Сохранить в reports/ (по умолчанию, авто-имя)",
+        "en": "📁 Save to reports/ only (auto-named)",
+        "ru": "📁 Только сохранить в reports/ (авто-имя)",
     },
     "wiz_output_save_custom": {
         "en": "📝 Save to custom path…",
         "ru": "📝 Сохранить по своему пути…",
     },
     "wiz_output_console": {
-        "en": "🖥  Print to terminal (rendered markdown)",
-        "ru": "🖥  Вывести в терминал (как markdown)",
+        "en": "🖥  Print to terminal only (rendered markdown)",
+        "ru": "🖥  Только вывести в терминал (как markdown)",
     },
     "wiz_output_custom_prompt": {
         "en": "Custom output path (file or directory; blank = cancel)",
@@ -1555,6 +1575,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "ALL unread chats (batch)",
         "ru": "ВСЕ непрочитанные чаты (пакет)",
     },
+    "wiz_plan_folder_chats": {
+        "en": "Folder '{folder}' — unread chats (batch)",
+        "ru": "Папка '{folder}' — непрочитанные чаты (пакет)",
+    },
     "wiz_plan_topic": {"en": "topic {id}", "ru": "топик {id}"},
     "wiz_plan_all_flat": {"en": "all-flat", "ru": "все-вместе"},
     "wiz_plan_per_topic": {"en": "per-topic", "ru": "по-топикам"},
@@ -1576,6 +1600,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "wiz_plan_console": {"en": "console", "ru": "консоль"},
     "wiz_plan_file_kv": {"en": "file={path}", "ru": "файл={path}"},
     "wiz_plan_save_reports": {"en": "save to reports/", "ru": "сохранить в reports/"},
+    "wiz_plan_save_reports_and_console": {
+        "en": "save to reports/ + console",
+        "ru": "сохранить в reports/ + консоль",
+    },
     "wiz_plan_mark_read": {"en": "mark-read", "ru": "пометить прочит."},
     "wiz_plan_for_period_synced": {
         "en": "→ For the chosen period: {total} message(s) already synced{extras}. Backfill at run time may add more.",
