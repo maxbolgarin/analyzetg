@@ -115,6 +115,51 @@ def test_export_md_writes_to_disk_with_tightened_perms(tmp_path: Path):
     assert "payload" in output.read_text(encoding="utf-8")
 
 
+def test_render_md_injects_chat_id_topic_id_and_link_when_provided():
+    """Dump output mirrors the analyze meta block: when the caller passes
+    chat_id / thread_id / chat_link, those lines appear right under the
+    `=== Chat: <title> ===` header."""
+    out = render_md(
+        [_msg(text="hello")],
+        title="Медуза — LIVE",
+        chat_id=-100_1234567890,
+        thread_id=42,
+        chat_link="https://t.me/c/1234567890/42",
+    )
+    lines = out.splitlines()
+    assert lines[0].startswith("===")
+    assert "Медуза — LIVE" in lines[0]
+    # Order: Chat ID → Topic ID → Chat link, then the rest of the format_messages preamble
+    assert lines[1] == "Chat ID: -1001234567890"
+    assert lines[2] == "Topic ID: 42"
+    assert lines[3] == "Chat link: https://t.me/c/1234567890/42"
+
+
+def test_render_md_skips_meta_lines_when_caller_omits_them():
+    """Backwards-compat: tests / callers that don't pass the new args get
+    byte-identical output to the pre-feature behavior — no orphan blank
+    line, no leftover labels."""
+    out = render_md([_msg(text="hello")], title="X")
+    # No new labels appear when chat_id/thread_id/chat_link aren't passed.
+    assert "Chat ID:" not in out
+    assert "Topic ID:" not in out
+    assert "Chat link:" not in out
+
+
+def test_render_md_omits_topic_id_when_thread_is_falsy():
+    """thread_id=0 (flat / non-forum) should not produce a Topic ID row."""
+    out = render_md(
+        [_msg(text="hello")],
+        title="X",
+        chat_id=-100_1234567890,
+        thread_id=0,
+        chat_link="https://t.me/c/1234567890",
+    )
+    assert "Chat ID: -1001234567890" in out
+    assert "Topic ID:" not in out
+    assert "Chat link: https://t.me/c/1234567890" in out
+
+
 # ---- export_jsonl ------------------------------------------------------
 
 

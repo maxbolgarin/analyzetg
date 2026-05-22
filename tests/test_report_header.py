@@ -70,12 +70,35 @@ def test_header_no_enrichment_shows_single_cost():
 
 def test_header_omits_thread_when_zero():
     h = _render_report_header(_result(thread_id=0), title="x")
-    assert "**Thread:**" not in h
+    assert "**Topic ID:**" not in h
 
 
 def test_header_includes_thread_when_set():
     h = _render_report_header(_result(thread_id=2), title="x")
-    assert "**Thread:** 2" in h
+    assert "**Topic ID:** 2" in h
+
+
+def test_header_chat_id_and_link_for_telegram_source():
+    """When chat_username / chat_internal_id are populated (TG source),
+    the meta block carries Chat ID + a clickable t.me link. Non-TG runs
+    leave both fields None and the rows are suppressed."""
+    h_tg = _render_report_header(
+        _result(chat_username="medusalive", chat_internal_id=1234567890),
+        title="Медуза — LIVE",
+    )
+    assert "**Chat ID:** -100123" in h_tg
+    assert "**Link:** https://t.me/medusalive" in h_tg
+
+    h_tg_topic = _render_report_header(
+        _result(thread_id=42, chat_internal_id=1234567890),
+        title="forum",
+    )
+    assert "**Topic ID:** 42" in h_tg_topic
+    assert "**Link:** https://t.me/c/1234567890/42" in h_tg_topic
+
+    h_nontg = _render_report_header(_result(), title="x")  # chat_username + chat_internal_id default None
+    assert "**Chat ID:**" not in h_nontg
+    assert "**Link:**" not in h_nontg
 
 
 def test_header_shows_map_model_only_with_reduce():

@@ -69,7 +69,9 @@ def test_file_path_set_writes_event_to_file(isolated_home: Path) -> None:
 
     from unread.util.logging import get_logger, setup_logging
 
-    setup_logging()
+    # Verbose so the INFO event below propagates through the level
+    # filter to the file handler. Default `normal` is WARNING-only.
+    setup_logging(mode="verbose")
     log = get_logger("test")
     log.info("hello-from-test", marker="abc-123-needle")
 
@@ -94,7 +96,7 @@ def test_file_handler_rotates_when_size_exceeded(isolated_home: Path) -> None:
 
     from unread.util.logging import get_logger, setup_logging
 
-    setup_logging()
+    setup_logging(mode="verbose")
     log = get_logger("test")
     # Each call writes a long line; with maxBytes=200 the second/third
     # event should force at least one rotation.
@@ -150,7 +152,7 @@ def test_file_handler_path_with_tilde(isolated_home: Path, monkeypatch) -> None:
 
     from unread.util.logging import get_logger, setup_logging
 
-    setup_logging()
+    setup_logging(mode="verbose")
     log = get_logger("test")
     log.info("home-expansion", marker="tilde-ok")
 

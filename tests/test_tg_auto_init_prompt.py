@@ -2,7 +2,7 @@
 
 When a TG-needing command hits a missing/expired session in an
 interactive shell, `tg_client` calls `offer_inline_tg_init()` to ask
-the user "Run `unread login` now and continue?". This pins:
+the user "Run `unread tg login` now and continue?". This pins:
 
   1. **Non-TTY** (the test default — `_can_interact` is False under
      pytest because stdin/stdout aren't a real terminal): the original
@@ -244,7 +244,7 @@ async def test_offer_inline_tg_init_missing_creds_does_not_wipe_session() -> Non
 
 @pytest.mark.asyncio
 async def test_offer_inline_tg_init_missing_creds_skips_confirm_and_runs_init() -> None:
-    """`missing_creds` skips the inline "Run unread login now and continue?"
+    """`missing_creds` skips the inline "Run unread tg login now and continue?"
     confirm — `cmd_init`'s own "Set up Telegram login now?" step is the
     single decline gate. Asking twice is the bug we explicitly fixed."""
     from unread.tg import client as client_mod
