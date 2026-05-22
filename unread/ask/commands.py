@@ -858,7 +858,7 @@ async def _run_single_turn(
             console.print(f"[grey70]{_t('ask_no_matches_reusing')}[/]")
         else:
             console.print(
-                "[yellow]No matching messages.[/] Try `unread sync <chat>` first if "
+                "[yellow]No matching messages.[/] Try `unread tg sync <chat>` first if "
                 "the chat hasn't been backfilled, or broaden your scope."
             )
             raise typer.Exit(0)

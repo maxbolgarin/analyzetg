@@ -55,9 +55,20 @@ def _write(
     output: Path,
     title: str | None,
     language: str = "en",
+    chat_id: int | None = None,
+    thread_id: int | None = None,
+    chat_link: str | None = None,
 ) -> None:
     if fmt == "md":
-        export_md(msgs, title=title, output=output, language=language)
+        export_md(
+            msgs,
+            title=title,
+            output=output,
+            language=language,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            chat_link=chat_link,
+        )
     elif fmt == "jsonl":
         export_jsonl(msgs, output)
     elif fmt == "csv":
@@ -681,6 +692,13 @@ async def _dump_single(
         )
 
     msgs = prepared.messages
+    from unread.analyzer.formatter import build_chat_link as _build_chat_link
+
+    chat_link = _build_chat_link(
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
+        thread_id=thread_id,
+    )
     if console_out:
         _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
         save_target: Path | None
@@ -692,12 +710,30 @@ async def _dump_single(
             save_target = None
         if save_target is not None:
             save_target.parent.mkdir(parents=True, exist_ok=True)
-            _write(msgs, fmt=fmt, output=save_target, title=title, language=language)
+            _write(
+                msgs,
+                fmt=fmt,
+                output=save_target,
+                title=title,
+                language=language,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                chat_link=chat_link,
+            )
             console.print(f"[green]{_tf('also_saved', path=save_target)}[/]")
     else:
         target = output if output is not None else _default_output_path(title, fmt)
         target.parent.mkdir(parents=True, exist_ok=True)
-        _write(msgs, fmt=fmt, output=target, title=title, language=language)
+        _write(
+            msgs,
+            fmt=fmt,
+            output=target,
+            title=title,
+            language=language,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            chat_link=chat_link,
+        )
         console.print(f"[green]{_tf('wrote_msgs_to', n=len(msgs), path=target)}[/]")
 
     if prepared.mark_read_fn and msgs:
@@ -804,16 +840,41 @@ async def _dump_forum_per_topic(
                 per_file = base_dir / chat_slug_str / topic_slug_str / "dump" / f"dump-{stamp}.{ext}"
 
             msgs = prepared.messages
+            from unread.analyzer.formatter import build_chat_link as _build_chat_link
+
+            per_topic_link = _build_chat_link(
+                chat_username=chat_username,
+                chat_internal_id=chat_internal_id,
+                thread_id=prepared.thread_id,
+            )
             if console_out:
                 _print_console(msgs, title=prepared.chat_title, fmt=fmt, count=len(msgs))
                 if per_file is not None:
                     per_file.parent.mkdir(parents=True, exist_ok=True)
-                    _write(msgs, fmt=fmt, output=per_file, title=prepared.chat_title, language=language)
+                    _write(
+                        msgs,
+                        fmt=fmt,
+                        output=per_file,
+                        title=prepared.chat_title,
+                        language=language,
+                        chat_id=chat_id,
+                        thread_id=prepared.thread_id,
+                        chat_link=per_topic_link,
+                    )
                     console.print(f"[green]{_tf('also_saved', path=per_file)}[/]")
             else:
                 target = per_file if per_file else _default_output_path(prepared.chat_title, fmt)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _write(msgs, fmt=fmt, output=target, title=prepared.chat_title, language=language)
+                _write(
+                    msgs,
+                    fmt=fmt,
+                    output=target,
+                    title=prepared.chat_title,
+                    language=language,
+                    chat_id=chat_id,
+                    thread_id=prepared.thread_id,
+                    chat_link=per_topic_link,
+                )
                 console.print(f"[green]{_tf('wrote_msgs_to', n=len(msgs), path=target)}[/]")
 
             if prepared.mark_read_fn and msgs:
@@ -1088,10 +1149,26 @@ async def _dump_no_ref(
             if console_out:
                 _print_console(msgs, title=title, fmt=fmt, count=len(msgs))
             if out_dir is not None:
+                from unread.analyzer.formatter import build_chat_link as _build_chat_link
+
+                folder_chat_link = _build_chat_link(
+                    chat_username=prepared.chat_username,
+                    chat_internal_id=prepared.chat_internal_id,
+                    thread_id=prepared.thread_id,
+                )
                 chat_out = out_dir / _slugify(title or str(prepared.chat_id)) / "dump"
                 chat_out.mkdir(parents=True, exist_ok=True)
                 path = chat_out / f"dump-{stamp}.{ext}"
-                _write(msgs, fmt=fmt, output=path, title=title, language=language)
+                _write(
+                    msgs,
+                    fmt=fmt,
+                    output=path,
+                    title=title,
+                    language=language,
+                    chat_id=prepared.chat_id,
+                    thread_id=prepared.thread_id,
+                    chat_link=folder_chat_link,
+                )
                 console.print(f"[green]{_tf('wrote_msgs_to', n=len(msgs), path=path)}[/]")
             if prepared.mark_read_fn and msgs:
                 try:

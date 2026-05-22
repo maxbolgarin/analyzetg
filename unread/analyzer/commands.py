@@ -39,10 +39,20 @@ from unread.i18n import tf as _tf
 from unread.tg.client import tg_client
 from unread.tg.resolver import resolve
 from unread.tg.topics import ForumTopic, list_forum_topics
-from unread.util.logging import get_logger
+from unread.util.logging import get_logger, is_silent
 
 console = Console()
 log = get_logger(__name__)
+
+
+def _status(*args: object, **kwargs: object) -> None:
+    """Status / progress line: suppressed in `silent` mode. The analyze
+    pipeline emits a lot of these (`→ Resolving …`, `→ Filtered …`,
+    cost-estimate notes, etc.). Errors and warnings still flow through
+    `console.print` directly so the user can't miss them."""
+    if is_silent():
+        return
+    console.print(*args, **kwargs)
 
 
 _ENRICH_KINDS = ("voice", "videonote", "video", "image", "doc", "link")
@@ -64,6 +74,98 @@ def _flatten_citations(text: str) -> str:
     but don't make them clickable (e.g. macOS Terminal.app).
     """
     return _CITATION_RE.sub(lambda m: f"#{m.group(1)} ({m.group(2)})", text)
+
+
+# Trailing citation cluster: optional separator (em-dash, en-dash, hyphen)
+# followed by one `[#N](url)` and any number of `, [#N](url)` continuations.
+# `[ \t]*` (not `\s*`) on the boundaries so we don't accidentally chew
+# across line breaks when a citation sits at end-of-line.
+_STRIP_CITATIONS_RE = __import__("re").compile(
+    r"[ \t]*(?:[—–\-][ \t]*)?\[#\d+\]\([^)]+\)(?:[ \t]*,[ \t]*\[#\d+\]\([^)]+\))*"
+)
+
+# Markdown ATX heading detector. Captures group(1) = heading text. The
+# `{1,6}` bound matches HTML's h1..h6 — anything deeper isn't a heading.
+_HEADING_RE = __import__("re").compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$")
+
+
+# Section headings where the citation list IS the content, not decorative
+# grounding. When `analyze.no_citations` is set, strip applies everywhere
+# EXCEPT inside these sections — the user wants pure prose for the body
+# but keeps the curated index of "messages worth opening next" cues.
+# Case-insensitive exact match against the heading text (after the `## `
+# prefix). When a new heading is encountered the state resets, so the
+# next prose section gets stripped as usual.
+_PRESERVE_CITATIONS_HEADINGS: frozenset[str] = frozenset(
+    {
+        # `summary` preset's curated "messages worth opening" index.
+        "worth checking",
+        "стоит посмотреть",
+        # `highlights` preset's main body — numbered link-anchored insights.
+        "key insights",
+        "основные инсайты",
+        # `links` preset: resource list where the trailing `, [#N](link)`
+        # is the author-attribution citation.
+        "links",
+        "ссылки",
+        # `reactions` preset groups high-reaction messages by emoji.
+        "top reactions",
+        "топ реакций",
+        # `video` preset's `[HH:MM:SS](url?t=Ns)` jump-point list. The
+        # regex above doesn't match timestamp links (requires `[#\d+]`)
+        # so this entry is defensive — keeps the section intact if a
+        # future preset version sneaks a `[#N]` reference in.
+        "watch",
+    }
+)
+
+
+def _strip_citations(text: str) -> str:
+    """Remove `[#N](url)` markdown citations from the LLM output —
+    except inside sections whose entire purpose IS the citation list.
+
+    Strip behavior per line: eats any preceding em-dash / en-dash /
+    hyphen separator and follow-on `, [#N](url)` repeats so a
+    "Foo bar. — [#5521](url), [#6318](url)" line collapses cleanly to
+    "Foo bar." with no dangling " — ," debris.
+
+    Section behavior: walks line by line, and tracks the active section
+    by detecting markdown ATX headings (`## Foo`, `### Bar`). When the
+    heading text matches :data:`_PRESERVE_CITATIONS_HEADINGS`, citations
+    inside that section are left untouched — that index of "messages
+    worth opening next" is the whole point of the section. The state
+    resets at the next heading, so a `## TL;DR` that follows
+    `## Worth checking` is stripped as normal.
+
+    Used by `_print_and_write` when ``analyze.no_citations`` is set
+    (CLI flag `--no-citations` or persisted setting). The cached LLM
+    output is unaffected — only the rendered + saved copy is
+    transformed, so toggling this knob doesn't bust the analysis cache.
+    """
+    out_lines: list[str] = []
+    # Depth (1..6) at which the preserved section started; None when not
+    # inside one. We track the level so a deeper subheading (e.g.
+    # `### Theme` inside `## Links`) inherits the preserved state, and
+    # only a sibling-or-higher heading ends the preserved section.
+    preserved_level: int | None = None
+    for line in text.splitlines():
+        heading_match = _HEADING_RE.match(line)
+        if heading_match is not None:
+            level = len(heading_match.group(1))
+            heading_text = heading_match.group(2).strip().lower()
+            if heading_text in _PRESERVE_CITATIONS_HEADINGS:
+                preserved_level = level
+            elif preserved_level is not None and level <= preserved_level:
+                # Sibling-or-higher heading closes the preserved section.
+                preserved_level = None
+            # else: deeper subheading inside a preserved section — keep state.
+            out_lines.append(line.rstrip())
+            continue
+        if preserved_level is not None:
+            out_lines.append(line.rstrip())
+        else:
+            out_lines.append(_STRIP_CITATIONS_RE.sub("", line).rstrip())
+    return "\n".join(out_lines)
 
 
 _VERIFY_SYSTEM: dict[str, str] = {
@@ -546,7 +648,7 @@ async def cmd_analyze(
         msg_parsed = _parse_link(msg)
         if msg_parsed.chat_id is not None or msg_parsed.username:
             if ref and ref != msg:
-                console.print(f"[grey70]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
+                _status(f"[grey70]{_tf('using_chat_from_msg_link', ref=ref)}[/]")
             effective_ref = msg
 
     # File / stdin branch: detect first so paths and the explicit stdin
@@ -755,12 +857,12 @@ async def cmd_analyze(
         return
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
-        console.print(f"[grey70]{_tf('resolving', ref=effective_ref)}[/]")
+        _status(f"[grey70]{_tf('resolving', ref=effective_ref)}[/]")
         resolved = await resolve(client, repo, effective_ref)
         chat_id = resolved.chat_id
         thread_id = thread if thread is not None else (resolved.thread_id or 0)
         title = resolved.title
-        console.print(
+        _status(
             f"[grey70]→ Resolved[/] {title or chat_id} "
             f"[grey70](id={chat_id}, kind={resolved.kind}"
             f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
@@ -779,7 +881,7 @@ async def cmd_analyze(
                     "Run `unread analyze <ref>` once normally first."
                 )
                 raise typer.Exit(0)
-            console.print(f"[grey70]{_tf('repeating_last_run', ts=saved.get('__updated_at'))}[/]")
+            _status(f"[grey70]{_tf('repeating_last_run', ts=saved.get('__updated_at'))}[/]")
             # Map saved keys → local vars (only fill defaults).
             if not preset and saved.get("preset"):
                 effective_preset = saved["preset"]
@@ -837,13 +939,13 @@ async def cmd_analyze(
                     "Use --thread <id> --last-msgs N for a single topic instead."
                 )
             thread_kw: dict = {"reply_to": thread_id} if thread_id and thread_id > 0 else {}
-            console.print(f"[grey70]{_tf('looking_up_last_n_msgs', n=last_msgs)}[/]")
+            _status(f"[grey70]{_tf('looking_up_last_n_msgs', n=last_msgs)}[/]")
             recent = await client.get_messages(chat_id, limit=last_msgs, **thread_kw)
             if not recent:
                 console.print(f"[yellow]{_tf('no_msgs_in_chat', chat_id=chat_id)}[/]")
                 raise typer.Exit(0)
             from_msg_id = min(int(m.id) for m in recent)
-            console.print(f"[grey70]{_tf('using_last_n_msgs', n=len(recent), msg_id=from_msg_id)}[/]")
+            _status(f"[grey70]{_tf('using_last_n_msgs', n=len(recent), msg_id=from_msg_id)}[/]")
 
         # A link like /group/100/5000 carries a msg_id. When no other period
         # flags were given, default to single-msg mode. Pass --from-msg /
@@ -949,7 +1051,7 @@ async def cmd_analyze(
             # API call used by _run_forum_per_topic.
             from unread.tg.topics import list_forum_topics
 
-            console.print(f"[grey70]{_t('listing_forum_topics_for_flat')}[/]")
+            _status(f"[grey70]{_t('listing_forum_topics_for_flat')}[/]")
             topics_for_flat = await list_forum_topics(client, chat_id)
             topic_titles = {t.topic_id: t.title for t in topics_for_flat if t.title}
             topic_markers = {t.topic_id: int(t.read_inbox_max_id or 0) for t in topics_for_flat}
@@ -969,7 +1071,7 @@ async def cmd_analyze(
                 if non_zero:
                     from_msg_id = min(non_zero)
                     unread_across = sum(t.unread_count for t in topics_for_flat)
-                    console.print(
+                    _status(
                         f"[grey70]→ Forum unread: {unread_across} across "
                         f"{len(topic_markers)} topics "
                         f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
@@ -989,7 +1091,7 @@ async def cmd_analyze(
 
             unread_default = not _has_explicit_period(since_dt, until_dt, from_msg_id, full_history)
             if unread_default:
-                console.print(f"[grey70]{_t('looking_up_topic_marker')}[/]")
+                _status(f"[grey70]{_t('looking_up_topic_marker')}[/]")
             topics = await list_forum_topics(client, chat_id)
             matched = next((t for t in topics if t.topic_id == thread_id), None)
             if matched is None:
@@ -1004,7 +1106,7 @@ async def cmd_analyze(
                     )
                     raise typer.Exit(0)
                 from_msg_id = matched.read_inbox_max_id + 1
-                console.print(
+                _status(
                     f"[grey70]→ {matched.unread_count} unread in '{matched.title}' "
                     f"after msg_id={matched.read_inbox_max_id}[/]"
                 )
@@ -1095,7 +1197,7 @@ async def _run_single_msg(
         m async for m in repo.iter_messages(chat_id, thread_id=None, min_msg_id=msg_id - 1, max_msg_id=msg_id)
     ]
     if not existing:
-        console.print(f"[grey70]{_tf('fetching_message', msg_id=msg_id)}[/]")
+        _status(f"[grey70]{_tf('fetching_message', msg_id=msg_id)}[/]")
         tel_msg = await client.get_messages(chat_id, ids=msg_id)
         if tel_msg is None:
             console.print(f"[red]{_tf('msg_not_found_in_chat', msg_id=msg_id, chat_id=chat_id)}[/]")
@@ -1153,7 +1255,7 @@ async def _run_single_msg(
         console.print(f"[yellow]{_tf('nothing_to_analyze_for_msg', msg_id=msg_id, hint=hint)}[/]")
         raise typer.Exit(0)
 
-    console.print(f"[grey70]{_t('running_analysis')}[/]")
+    _status(f"[grey70]{_t('running_analysis')}[/]")
     # When the single message is a video / videonote, mark the run as
     # `source_kind="video"` so the formatter renders `=== Video: <title> ===`
     # and the base prompt's video framing applies. Voice messages stay
@@ -1164,7 +1266,7 @@ async def _run_single_msg(
     if inferred_source_kind == "video" and preset == "single_msg":
         # Tiny UX touch — surface the auto-detected reframing so users
         # know why the report looks like a video summary.
-        console.print(f"[grey70]{_tf('analyze_detected_video_reframing', kind=loaded.media_type)}[/]")
+        _status(f"[grey70]{_tf('analyze_detected_video_reframing', kind=loaded.media_type)}[/]")
     opts = AnalysisOptions(
         preset=preset,
         prompt_file=prompt_file,
@@ -1318,7 +1420,7 @@ async def _run_single(
         )
         if hi is not None:
             console.print("  [bold]" + _tf("estimated_cost_band", lo=lo, hi=hi) + "[/]")
-            console.print(f"  [grey70]{_t('estimate_enrich_note')}[/]")
+            _status(f"  [grey70]{_t('estimate_enrich_note')}[/]")
         else:
             console.print(f"  [yellow]{_t('estimate_unavailable')}[/]")
         return
@@ -1382,7 +1484,7 @@ async def _run_single(
                         console.print(f"[red]{_t('max_cost_pricing_missing_abort')}[/]")
                         raise typer.Exit(2)
 
-    console.print(f"[grey70]{_t('running_analysis')}[/]")
+    _status(f"[grey70]{_t('running_analysis')}[/]")
     sender_id_arg = int(by) if by and by.lstrip("-").isdigit() else None
     sender_substring_arg = by if by and sender_id_arg is None else None
     opts = AnalysisOptions(
@@ -1463,7 +1565,10 @@ async def _run_single(
             failure_line = _t("verification_failed", language).format(err=verification_err)
             result.final_result = result.final_result.rstrip() + f"\n\n## {heading}\n\n" + failure_line
 
-    if cite_context > 0 and result.final_result:
+    if cite_context > 0 and result.final_result and not get_settings().analyze.no_citations:
+        # `--no-citations` strips the `[#N](url)` markers, so a Sources
+        # section that expands them has nothing to anchor to — skip the
+        # extra call and the cheap-model spend.
         result.final_result = await _expand_citations(
             result.final_result,
             chat_id=chat_id,
@@ -1629,9 +1734,7 @@ async def _run_forum_per_topic(
             # --dry-run for forum-per-topic: print per-topic count + skip
             # the LLM analyse step. Enrichment was already zeroed above.
             if dry_run:
-                console.print(
-                    f"[grey70]→ {prepared.thread_title or '(topic)'} ({len(prepared.messages)} msgs)[/]"
-                )
+                _status(f"[grey70]→ {prepared.thread_title or '(topic)'} ({len(prepared.messages)} msgs)[/]")
                 continue
             opts = AnalysisOptions(
                 preset=preset,
@@ -1688,7 +1791,7 @@ async def _run_forum_per_topic(
 
 async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
     """Interactively pick a forum mode. Returns (all_flat, all_per_topic, thread_id)."""
-    console.print(f"[grey70]{_t('listing_forum_topics')}[/]")
+    _status(f"[grey70]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     if not topics:
         console.print(f"[yellow]{_t('no_topics_in_forum')}[/]")
@@ -1722,7 +1825,7 @@ async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tupl
     choices.append(_Choice(value="__quit__", label="Quit"))
     picked = _select("Forum mode", choices=choices, default_value="__per_topic__")
     if picked is None or picked == "__quit__":
-        console.print(f"[grey70]{_t('aborted')}[/]")
+        _status(f"[grey70]{_t('aborted')}[/]")
         raise typer.Exit(0)
     if picked == "__all_flat__":
         return True, False, 0
@@ -1993,10 +2096,10 @@ async def _run_multichat_batch(
             mark_fns.append(prepared.mark_read_fn)
 
     if not all_messages:
-        console.print(f"[grey70]{_t('no_unread_across_chats')}[/]")
+        _status(f"[grey70]{_t('no_unread_across_chats')}[/]")
         return
 
-    console.print(
+    _status(
         f"[grey70]→ Cross-chat synthesis over {len(all_messages)} message(s) "
         f"from {len(chat_groups)} chat(s)...[/]"
     )
@@ -2159,10 +2262,23 @@ def _analyze_meta_rows(result: AnalysisResult, *, title: str | None) -> list[tup
     `unread/util/report_render.py`. Labels arrive `**bold**` so the
     saved file renders bold; the Rich grid strips the wrapper.
     """
+    from unread.analyzer.formatter import build_chat_link
+
     rows: list[tuple[str, str]] = []
     rows.append((_t("report_meta_chat"), str(title or result.chat_id)))
+    is_tg = result.chat_username is not None or result.chat_internal_id is not None
+    if is_tg:
+        rows.append((_t("report_meta_chat_id"), str(result.chat_id)))
     if result.thread_id:
-        rows.append((_t("report_meta_thread"), str(result.thread_id)))
+        rows.append((_t("report_meta_thread_id"), str(result.thread_id)))
+    if is_tg:
+        chat_link = build_chat_link(
+            chat_username=result.chat_username,
+            chat_internal_id=result.chat_internal_id,
+            thread_id=result.thread_id or None,
+        )
+        if chat_link:
+            rows.append((_t("report_meta_link"), chat_link))
     rows.append((_t("report_meta_period"), _fmt_period_header(result.period)))
 
     msg_value = str(result.msg_count)
@@ -2301,16 +2417,20 @@ def _print_and_write(
         preset=result.preset,
     )
 
+    body_md = _with_truncation_banner(result)
+    settings = get_settings()
+    if settings.analyze.no_citations:
+        body_md = _strip_citations(body_md)
     print_report_shell(
         summary_line=summary_line,
         title=title,
         meta_rows=_analyze_meta_rows(result, title=title),
-        body_md=_with_truncation_banner(result),
+        body_md=body_md,
         output=output,
         default_path=default_path,
         no_console=not console_out,
         no_save=no_save,
-        plain_citations=get_settings().analyze.plain_citations,
+        plain_citations=settings.analyze.plain_citations,
     )
 
 

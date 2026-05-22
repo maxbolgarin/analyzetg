@@ -6,7 +6,7 @@ import contextlib
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -193,6 +193,16 @@ class AnalyzeCfg(_StrictCfg):
     # picks up the terminal's plaintext URL detector instead. The saved
     # markdown file is always unaffected — it keeps `[#N](URL)`.
     plain_citations: bool = False
+    # When True, strip `[#<msg_id>](<link>)` citations from the rendered
+    # AND saved report entirely — the user gets pure prose without the
+    # em-dash citation cluster the LLM appends to every claim. The
+    # cached LLM output is unaffected (citations are still emitted by
+    # the model and stored in the cache), so toggling this setting
+    # doesn't bust the cache — only the displayed + saved copy changes.
+    # Side effect: `--cite-context N` is a no-op when this is on (no
+    # citations to expand into a Sources section).
+    # CLI: `--no-citations`. Persist via `unread settings`.
+    no_citations: bool = False
     # When True, scrub phone numbers / emails / IBANs / Luhn-valid card
     # numbers from the prompt that goes to the LLM. The DB rows and the
     # saved Markdown report keep the originals — only the API payload
@@ -313,6 +323,17 @@ class LoggingCfg(_StrictCfg):
     file_path: Path | None = None
     file_max_bytes: int = 10_000_000  # 10 MB before rotation
     file_backup_count: int = 3
+    # Console verbosity. `silent` shows only errors + the final report;
+    # `normal` (the default) adds the high-level `→ Resolving …` status
+    # arrows, progress bars, warnings, and the cost summary; `verbose`
+    # adds per-API-call INFO events (`ai.chat`, `audio.transcribe`,
+    # `backfill.done`); `debug` is `verbose` + DEBUG events + Rich
+    # tracebacks. Rich tracebacks render local-variable values on
+    # unhandled exceptions, which can include API keys — gated to
+    # `debug` ONLY so a user reaching for `verbose` doesn't pay that
+    # security cost unexpectedly. Override at runtime with
+    # `--quiet/-q`, `--verbose/-v`, `--debug`, or `UNREAD_LOG_MODE=…`.
+    mode: Literal["silent", "normal", "verbose", "debug"] = "normal"
 
 
 class LocaleCfg(_StrictCfg):

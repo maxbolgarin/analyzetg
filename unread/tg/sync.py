@@ -308,6 +308,18 @@ async def backfill(
         iter_kwargs["reverse"] = True
 
     settings = get_settings()
+    log.debug(
+        "backfill.start",
+        chat_id=chat_id,
+        thread_id=thread_id,
+        direction=direction,
+        from_msg_id=from_msg_id,
+        since_date=str(since_date) if since_date else None,
+        reverse=iter_kwargs.get("reverse"),
+        min_id=iter_kwargs.get("min_id"),
+        offset_id=iter_kwargs.get("offset_id"),
+        offset_date=str(iter_kwargs.get("offset_date")) if iter_kwargs.get("offset_date") else None,
+    )
     limiter = RateLimiter(settings.telegram.max_msgs_per_minute)
     batch: list[Message] = []
     total = 0
@@ -341,8 +353,14 @@ async def backfill(
                     )
                     if first_in_window:
                         estimated_total = max(0, int(latest[0].id) - int(first_in_window[0].id) + 1)
-        except Exception:
-            pass  # best-effort
+        except Exception as e:
+            log.debug("backfill.estimate_failed", chat_id=chat_id, err=str(e)[:100])
+    log.debug(
+        "backfill.estimate",
+        chat_id=chat_id,
+        thread_id=thread_id,
+        estimated_total=estimated_total,
+    )
 
     from rich.console import Console
     from rich.progress import (
@@ -368,7 +386,9 @@ async def backfill(
         columns.append(TextColumn("[grey70]{task.completed} fetched[/]"))
     columns.append(TimeElapsedColumn())
 
-    with Progress(*columns, transient=True, console=_console) as progress:
+    from unread.util.logging import is_silent as _is_silent
+
+    with Progress(*columns, transient=True, console=_console, disable=_is_silent()) as progress:
         task = progress.add_task("Fetching from Telegram", total=estimated_total)
         async for msg in client.iter_messages(**iter_kwargs):  # type: ignore[arg-type]
             await limiter.acquire()

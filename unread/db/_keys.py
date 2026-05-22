@@ -88,6 +88,7 @@ OVERRIDE_KEYS: tuple[str, ...] = (
     "analyze.dedupe_forwards",
     "analyze.min_msg_chars",
     "analyze.plain_citations",
+    "analyze.no_citations",
     # Internal — DB schema version stamp written by `Repo.open` so a
     # downgrade can detect a future-version DB and refuse cleanly
     # rather than crashing with obscure column-mismatch errors.
@@ -102,4 +103,8 @@ OVERRIDE_KEYS: tuple[str, ...] = (
     # salt being secret. Lets `unread security unlock` derive the key
     # without first reading any ciphertext.
     "security.kdf_salt",
+    # Console verbosity. See :class:`unread.config.LoggingCfg.mode`.
+    # Persisted choice is overridden at runtime by `UNREAD_LOG_MODE=…`
+    # or the CLI flags (`-q`, `-v`, `--debug`).
+    "logging.mode",
 )

@@ -235,6 +235,8 @@ async def save_raw_media(
     sem = asyncio.Semaphore(settings.media.download_concurrency)
     stats = {"done": 0, "skipped": 0, "failed": 0, "no_media": 0}
 
+    from unread.util.logging import is_silent as _is_silent
+
     with Progress(
         SpinnerColumn(),
         TextColumn("{task.description}"),
@@ -243,6 +245,7 @@ async def save_raw_media(
         TextColumn("{task.fields[label]}"),
         TimeElapsedColumn(),
         console=console,
+        disable=_is_silent(),
     ) as progress:
         task = progress.add_task("downloading", total=len(candidates), label="")
 

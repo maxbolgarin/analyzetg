@@ -66,6 +66,30 @@ async def enrich_messages(
             "Pass client=... into run_analysis or disable media-based enrichers."
         )
 
+    # Per-kind dispatch plan: how many candidate messages match each
+    # enabled kind. Lets the user see at a glance whether a kind enabled
+    # via flag actually has any candidates in this batch.
+    plan: dict[str, int] = {}
+    if opts.voice:
+        plan["voice"] = sum(1 for m in msgs if m.media_type == "voice")
+    if opts.videonote:
+        plan["videonote"] = sum(1 for m in msgs if m.media_type == "videonote")
+    if opts.video:
+        plan["video"] = sum(1 for m in msgs if m.media_type == "video")
+    if opts.image:
+        plan["image"] = sum(1 for m in msgs if m.media_type == "photo")
+    if opts.doc:
+        plan["doc"] = sum(1 for m in msgs if m.media_type == "doc")
+    if opts.link:
+        plan["link_candidate_msgs"] = sum(1 for m in msgs if m.text)
+    log.debug(
+        "enrich.plan",
+        total_msgs=len(msgs),
+        plan=plan,
+        caps={"image": opts.max_images_per_run, "link": opts.max_link_fetches_per_run},
+        concurrency=opts.concurrency,
+    )
+
     settings = get_settings()
     # Image / link enricher prompts go to the LLM → use the **report
     # language** so descriptions come back in the same language the
@@ -132,6 +156,12 @@ async def enrich_messages(
                     stats.record("video", res)
             elif mt == "photo" and opts.image:
                 if counted["image"] >= caps["image"]:
+                    log.debug(
+                        "enrich.cap_skip",
+                        kind="image",
+                        cap=caps["image"],
+                        msg_id=msg.msg_id,
+                    )
                     stats.record_skip("image")
                 else:
                     counted["image"] += 1
@@ -175,6 +205,13 @@ async def enrich_messages(
                     else:
                         counted["link"] += 1
                         proceed = True
+                if not proceed:
+                    log.debug(
+                        "enrich.cap_skip",
+                        kind="link",
+                        cap=caps["link"],
+                        msg_id=msg.msg_id,
+                    )
                 if proceed:
                     async with sem:
                         pairs = await enrich_message_links(
@@ -210,6 +247,8 @@ async def enrich_messages(
         TimeElapsedColumn,
     )
 
+    from unread.util.logging import is_silent as _is_silent
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[grey70]{task.description}[/]"),
@@ -218,6 +257,7 @@ async def enrich_messages(
         TimeElapsedColumn(),
         transient=False,
         console=Console(),
+        disable=_is_silent(),
     ) as progress:
         task_id = progress.add_task("Enriching media", total=len(msgs))
 
@@ -244,4 +284,12 @@ async def enrich_messages(
                 progress.advance(task_id)
 
         await asyncio.gather(*(handle_with_progress(m) for m in msgs))
+    log.debug(
+        "enrich.done",
+        counts=dict(stats.counts),
+        cache_hits=dict(stats.cache_hits),
+        skipped=dict(stats.skipped),
+        errors=dict(stats.errors),
+        cost_usd=round(float(stats.total_cost_usd), 6),
+    )
     return stats

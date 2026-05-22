@@ -249,6 +249,24 @@ _TUNING_SETTINGS: tuple[SettingDef, ...] = (
         "set_label_plain_citations",
         "set_desc_plain_citations",
     ),
+    SettingDef(
+        "analyze.no_citations",
+        "settings_cat_analyze",
+        "bool",
+        "set_label_no_citations",
+        "set_desc_no_citations",
+    ),
+    # Output verbosity — `silent` / `normal` / `verbose` / `debug`.
+    # Editor is a 4-way enum picker; persisted as `logging.mode` in
+    # `app_settings` (and read at every `setup_logging` call via the
+    # `resolve_log_mode` precedence chain).
+    SettingDef(
+        "logging.mode",
+        "settings_cat_output",
+        "log_mode",
+        "set_label_log_mode",
+        "set_desc_log_mode",
+    ),
 )
 
 
@@ -487,6 +505,12 @@ async def _run_menu_loop(repo, *, pool: tuple[SettingDef, ...], mode: str) -> bo
             report_lang = (overrides.get("locale.report_language") or "").strip()
             if not report_lang:
                 console.print(f"[grey70]{_tf('lang_axes_hint', lang=new_value)}[/]")
+        # Apply the new log mode for the rest of this settings session so
+        # the user sees silent-mode quiet immediately, not just after exit.
+        if sdef.key == "logging.mode" and new_value:
+            from unread.util.logging import setup_logging
+
+            setup_logging(mode=new_value)
         saved_anything = True
     return saved_anything
 
@@ -664,6 +688,10 @@ def _current_display(sd: SettingDef, overrides: dict[str, str], s: Any) -> str:
     if sd.kind == "int":
         section, attr = sd.key.split(".", 1)
         return str(getattr(getattr(s, section), attr))
+    if sd.kind == "log_mode":
+        # The persisted enum string itself — same vocab the user reads
+        # on the picker, so what they pick is what they see in the row.
+        return str(s.logging.mode or "normal")
     if sd.kind in {"provider", "string"}:
         section, attr = sd.key.split(".", 1)
         cur = getattr(getattr(s, section), attr)
@@ -744,6 +772,9 @@ async def _edit_one(sd: SettingDef, overrides: dict[str, str], s: Any, *, repo) 
     if sd.kind == "int":
         cur_int = int(_read_attr(s, sd.key))
         return await _pick_int(sd, cur_int)
+    if sd.kind == "log_mode":
+        cur_mode = str(s.logging.mode or "normal")
+        return await _pick_log_mode(sd, cur_mode)
     if sd.kind == "string":
         cur = str(overrides.get(sd.key) or _read_attr(s, sd.key) or "")
         return await _pick_string(sd, cur)
@@ -1081,6 +1112,48 @@ async def _pick_model_for_slot(
         if not raw:
             return None
         return raw.strip()
+    return picked
+
+
+async def _pick_log_mode(sd: SettingDef, current: str) -> str | None:
+    """4-way picker for `logging.mode`: silent / normal / verbose / debug.
+
+    Each row shows `<name> — <hint>` so the user gets both the value
+    they'd pass on the CLI (`-q` etc.) and a one-line description of
+    what it changes. The current value gets a `★` so the user sees
+    the active choice without scrolling away to compare.
+    """
+    from unread.util.prompt import Choice
+    from unread.util.prompt import select as _select
+    from unread.util.prompt import separator as _sep
+
+    modes = ("silent", "normal", "verbose", "debug")
+    items: list[Any] = []
+    for m in modes:
+        name = _t(f"set_log_mode_{m}")
+        hint = _t(f"set_log_mode_{m}_hint")
+        marker = "  ★" if m == current else ""
+        items.append(Choice(value=m, label=f"{name} — {hint}{marker}"))
+    items.append(_sep())
+    items.append(Choice(value=_SENTINEL_KEEP, label=_t("settings_keep_current")))
+    items.append(Choice(value=_SENTINEL_EXIT, label=_t("settings_exit_row")))
+
+    try:
+        picked = _select(
+            sd.label,
+            choices=items,
+            default_value=current if current in modes else "normal",
+            instruction=_compose_instruction(sd.desc),
+            erase=True,
+        )
+    except KeyboardInterrupt:
+        return None
+    if picked is None or picked == _SENTINEL_KEEP:
+        return None
+    if picked == _SENTINEL_EXIT:
+        return _SENTINEL_EXIT
+    if picked == current:
+        return None
     return picked
 
 

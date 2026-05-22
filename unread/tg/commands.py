@@ -45,7 +45,7 @@ async def cmd_init(*, scope: str = "full") -> None:
 
     Runs as a pipeline of four conditional steps. Each step gates on
     "is this thing already configured?" so re-running `unread init`
-    (or `unread login`) is always safe and only prompts for what's
+    (or `unread tg login`) is always safe and only prompts for what's
     missing:
 
       1. **Folder pick** — runs iff `~/.unread/install.toml` is absent.
@@ -63,7 +63,7 @@ async def cmd_init(*, scope: str = "full") -> None:
 
     `scope` selects which steps fire. `"full"` (the default, used by
     `unread init`) runs every step. `"telegram_only"` (used by
-    `unread login`) skips the AI-provider step — convenient when
+    `unread tg login`) skips the AI-provider step — convenient when
     the user just wants to (re-)link a Telegram account without
     revisiting credential prompts.
 
@@ -131,7 +131,7 @@ async def cmd_init(*, scope: str = "full") -> None:
     # Step 4: Telethon auth (only if credentials are populated). On `unread
     # init` (full scope) we ask before launching the phone-number prompt —
     # re-running the full wizard shouldn't auto-jump into Telegram login.
-    # `unread login` (telegram_only) is the explicit "log me in" path; that
+    # `unread tg login` (telegram_only) is the explicit "log me in" path; that
     # one proceeds unconditionally. The confirm is delegated into the auth
     # helper because it can only be surfaced AFTER we connect and see the
     # session is unauthorized — a session file may exist on disk but the
@@ -527,7 +527,7 @@ async def _smoke_test_openai(api_key: str) -> None:
     except Exception as e:
         console.print(
             f"[yellow]OpenAI smoke test failed: {e}.[/] "
-            "[grey70]Saved anyway — you can re-run `unread login` to update.[/]"
+            "[grey70]Saved anyway — you can re-run `unread init` to update.[/]"
         )
 
 
@@ -543,7 +543,7 @@ async def _run_telegram_creds_step() -> bool:
     if not confirm("Set up Telegram login now?", default=False):
         console.print(
             "[grey70]Skipped — Telegram-based commands (describe, dump, sync, …) "
-            "won't be available. Re-run `unread init` (or `unread login`) to add credentials later.[/]"
+            "won't be available. Re-run `unread init` (or `unread tg login`) to add credentials later.[/]"
         )
         return False
 
@@ -681,7 +681,7 @@ async def _run_telethon_auth_step(settings, *, confirm_login: bool = False) -> N
     `confirm_login` gates the phone-number prompt behind a yes/no confirm —
     used by the full-scope `unread init` wizard so re-runs don't auto-launch
     a Telegram login when the saved session is expired/revoked. The
-    `unread login` path leaves it False (the user invoked the explicit
+    `unread tg login` path leaves it False (the user invoked the explicit
     "log me in" entry point and we should just go).
     """
     from unread.util.prompt import ask_text as _ask_text
@@ -715,7 +715,7 @@ async def _run_telethon_auth_step(settings, *, confirm_login: bool = False) -> N
                 "Logging in will prompt for phone, code, and (if set) 2FA password.[/]\n"
             )
             if not confirm("Log in to Telegram now?", default=False):
-                console.print("[grey70]Skipped — run `unread login` later to log in.[/]")
+                console.print("[grey70]Skipped — run `unread tg login` later to log in.[/]")
                 return
         await client.start(phone=_phone, code_callback=_code, password=_password)
         console.print(f"[green]{_t('doctor_logged_in')}[/]")
@@ -829,18 +829,19 @@ async def cmd_doctor() -> None:
     _line(ok, "secrets backend", _BACKEND_LABEL.get(backend, backend))
 
     # Hint copy depends on where the values would land. On `keystore`
-    # the user re-runs `unread login` (which writes through the
+    # the user re-runs the wizard (which writes through the
     # backend). On the plain DB / fresh install they can also drop
-    # values into `.env`.
+    # values into `.env`. Telegram-only re-link is `unread tg login`;
+    # AI-provider changes flow through the full `unread init` wizard.
     _setup_hint = (
-        "run `unread login`"
+        "run `unread tg login`"
         if backend in (BACKEND_KEYCHAIN, BACKEND_PASSPHRASE)
-        else ("run `unread login` (or set TELEGRAM_API_ID / TELEGRAM_API_HASH in ~/.unread/.env)")
+        else ("run `unread tg login` (or set TELEGRAM_API_ID / TELEGRAM_API_HASH in ~/.unread/.env)")
     )
     _openai_hint = (
-        "run `unread login`"
+        "run `unread init`"
         if backend in (BACKEND_KEYCHAIN, BACKEND_PASSPHRASE)
-        else ("run `unread login` (or set OPENAI_API_KEY in ~/.unread/.env)")
+        else ("run `unread init` (or set OPENAI_API_KEY in ~/.unread/.env)")
     )
 
     # Ciphertext leak: a `$u1$…` value in `settings.<svc>.api_key`
@@ -1054,7 +1055,7 @@ async def cmd_doctor() -> None:
         if hits:
             advice = (
                 f"under {', '.join(hits)} — plaintext secrets and chat cache will be replicated. "
-                "Move the install (`unread login` lets you pick a folder) "
+                "Move the install (`unread init` lets you pick a folder) "
                 "or exclude it from the sync app."
             )
             if sys.platform == "darwin":

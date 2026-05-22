@@ -498,3 +498,26 @@ def build_link_template(
     if thread_id:
         return f"{base}/{thread_id}/{{msg_id}}"
     return f"{base}/{{msg_id}}"
+
+
+def build_chat_link(
+    *,
+    chat_username: str | None,
+    chat_internal_id: int | None,
+    thread_id: int | None = None,
+) -> str | None:
+    """Build a chat-level (or topic-level) `https://t.me/...` URL.
+
+    Sibling of `build_link_template` for use in report headers — same
+    inputs, but no `{msg_id}` placeholder. Returns None if neither a
+    username nor an internal id is available.
+    """
+    if chat_username:
+        base = f"https://t.me/{chat_username}"
+    elif chat_internal_id is not None:
+        base = f"https://t.me/c/{chat_internal_id}"
+    else:
+        return None
+    if thread_id:
+        return f"{base}/{thread_id}"
+    return base

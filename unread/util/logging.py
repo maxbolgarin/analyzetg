@@ -17,6 +17,98 @@ from rich.logging import RichHandler
 console = Console()
 
 
+# Allowed values for `[logging] mode` / `UNREAD_LOG_MODE`. Order matters
+# for noise level (silent < normal < verbose < debug).
+LOG_MODES: tuple[str, ...] = ("silent", "normal", "verbose", "debug")
+
+_MODE_TO_LEVEL: dict[str, int] = {
+    "silent": logging.ERROR,
+    "normal": logging.WARNING,
+    "verbose": logging.INFO,
+    "debug": logging.DEBUG,
+}
+
+# Module-level mode that `status_print` / `is_silent` consult. Mutated by
+# `setup_logging` and `set_log_mode` (the latter is mainly for tests).
+_active_mode: str = "normal"
+
+
+def is_silent() -> bool:
+    """True when the current mode suppresses status-arrow output.
+
+    The arrow-line `console.print(...)` call sites in pipelines route
+    through `status_print` and check this. The Rich `Progress` instances
+    pass `disable=is_silent()` at construction so they're hidden too.
+    """
+    return _active_mode == "silent"
+
+
+def get_log_mode() -> str:
+    """Return the current mode — useful for tests and for code that wants
+    to branch on mode without going through `is_silent()`."""
+    return _active_mode
+
+
+def set_log_mode(mode: str) -> None:
+    """Set the active mode without re-running `setup_logging` (which
+    would also rebuild handlers). Used by tests; production code should
+    call `setup_logging(mode=...)` instead so the structlog level updates
+    in lockstep."""
+    global _active_mode
+    if mode not in LOG_MODES:
+        raise ValueError(f"invalid log mode {mode!r}; expected one of {LOG_MODES}")
+    _active_mode = mode
+
+
+def status_print(*args: Any, **kwargs: Any) -> None:
+    """Print a high-level status arrow / progress line, unless the
+    current mode is `silent`. Delegates to the shared Rich `console`
+    so markup, color, and Rich object rendering all work as before."""
+    if is_silent():
+        return
+    console.print(*args, **kwargs)
+
+
+def resolve_cli_log_mode(*, quiet: bool, verbose: bool, debug: bool) -> str | None:
+    """Map the three CLI booleans onto a mode name, or `None` when no
+    flag was passed (so the caller falls through to env / config).
+
+    Conflict policy:
+      * `-q` with `-v` or `--debug` → reject (ambiguous).
+      * `-v` with `--debug` → take `debug` (both mean 'more', debug is
+        the superset, so this is a forgiving merge rather than a bug).
+    """
+    if quiet and (verbose or debug):
+        raise ValueError("cannot combine --quiet with --verbose / --debug")
+    if debug:
+        return "debug"
+    if verbose:
+        return "verbose"
+    if quiet:
+        return "silent"
+    return None
+
+
+def resolve_log_mode(*, cli_flag: str | None, settings_mode: str) -> str:
+    """Resolve the effective log mode using the precedence chain:
+    CLI flag > `UNREAD_LOG_MODE` env > config setting > `"normal"`.
+
+    Invalid CLI flag → raises (caller error).
+    Invalid env value → silently ignored (env vars come from arbitrary
+    shells; raising would brick every command).
+    """
+    if cli_flag is not None:
+        if cli_flag not in LOG_MODES:
+            raise ValueError(f"invalid CLI log mode {cli_flag!r}; expected one of {LOG_MODES}")
+        return cli_flag
+    env_value = os.environ.get("UNREAD_LOG_MODE", "").strip().lower()
+    if env_value in LOG_MODES:
+        return env_value
+    if settings_mode in LOG_MODES:
+        return settings_mode
+    return "normal"
+
+
 # Regex shapes for common secret-bearing strings. Any value in a
 # log event matching one of these gets masked before rendering.
 # Tuned for false-negatives on harmless strings, false-positives are
@@ -202,31 +294,34 @@ def _resolve_file_handler(level: int) -> logging.handlers.RotatingFileHandler | 
     return new_handler
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(mode: str = "normal") -> None:
     """Configure structlog + stdlib logging. Idempotent.
 
-    Also exports ``UNREAD_VERBOSE=1`` into the environment when called
-    with ``verbose=True`` so other modules (notably ``cli._run``'s
-    top-level error handler) can decide whether to render a Rich
-    traceback or a friendly one-liner without re-plumbing the flag
-    through every command body.
+    ``mode`` is one of ``silent`` / ``normal`` / ``verbose`` / ``debug``;
+    see :class:`unread.config.LoggingCfg` for the matrix. Also exports
+    ``UNREAD_DEBUG=1`` into the environment when ``mode == "debug"`` so
+    other modules (notably ``cli._run``'s top-level error handler) can
+    decide whether to render a Rich traceback or a friendly one-liner
+    without re-plumbing the flag through every command body.
 
     When ``settings.logging.file_path`` is set, attaches a
     ``RotatingFileHandler`` so structlog events ALSO land in that file
     (plain text, same redactor pipeline). Rotation is governed by
     ``settings.logging.file_max_bytes`` and ``file_backup_count``.
     """
-    if verbose:
-        os.environ["UNREAD_VERBOSE"] = "1"
-    level = logging.DEBUG if verbose or os.environ.get("UNREAD_DEBUG") else logging.INFO
+    if mode not in LOG_MODES:
+        raise ValueError(f"invalid log mode {mode!r}; expected one of {LOG_MODES}")
+    global _active_mode
+    _active_mode = mode
 
-    # Rich tracebacks render local variables — including any passphrase
-    # / API key still on the stack — to the terminal on any unhandled
-    # exception. The structlog redactor only walks top-level event-dict
-    # keys, so a Rich traceback bypasses it. Gate the feature behind
-    # `verbose=True` (or `UNREAD_VERBOSE=1`) so production runs default
-    # to the safe boring traceback that doesn't print locals.
-    rich_tracebacks_enabled = bool(verbose or os.environ.get("UNREAD_VERBOSE"))
+    level = _MODE_TO_LEVEL[mode]
+    # `verbose` and below intentionally do NOT set UNREAD_DEBUG — Rich
+    # tracebacks expose local-variable values (including API keys) and
+    # must be opt-in via `--debug` so a user reaching for `verbose`
+    # doesn't pay that security cost unexpectedly.
+    if mode == "debug":
+        os.environ["UNREAD_DEBUG"] = "1"
+    rich_tracebacks_enabled = mode == "debug"
     handler = RichHandler(
         console=console,
         show_time=True,
@@ -239,8 +334,21 @@ def setup_logging(verbose: bool = False) -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
-    # Mute chatty libraries
-    for noisy in ("telethon", "httpx", "openai", "aiosqlite"):
+    # Mute chatty libraries. markdown_it floods DEBUG with per-token
+    # `entering <rule>:` lines whenever Rich renders a report; httpcore /
+    # urllib3 / asyncio / PIL are the usual suspects behind the rest of
+    # the DEBUG noise from third-party packages.
+    for noisy in (
+        "telethon",
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "openai",
+        "aiosqlite",
+        "asyncio",
+        "markdown_it",
+        "PIL",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     file_handler = _resolve_file_handler(level)

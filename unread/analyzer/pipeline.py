@@ -184,12 +184,15 @@ async def _progress_single(*, label: str, coro):
     """
     from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+    from unread.util.logging import is_silent as _is_silent
+
     with Progress(
         SpinnerColumn(),
         TextColumn(f"[grey70]{label}[/]"),
         TimeElapsedColumn(),
         transient=True,
         console=_pipeline_console(),
+        disable=_is_silent(),
     ) as p:
         p.add_task("call", total=None)
         return await coro
@@ -241,6 +244,13 @@ class AnalysisResult:
     # English in the cited quotes if the wrong track was picked).
     transcript_lang: str = ""
     transcript_lang_kind: str = ""
+    # Identifiers used to build a clickable chat link in the report
+    # header. `chat_username` is set for public chats / channels;
+    # `chat_internal_id` is the t.me/c/<id>/ form (chat_id stripped of
+    # the -100 prefix). Either is enough to construct a t.me URL;
+    # `chat_username` wins when both are set.
+    chat_username: str | None = None
+    chat_internal_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -432,8 +442,17 @@ async def _call_cached(
     if use_cache:
         hit = await repo.cache_get(bhash)
         if hit and not hit.get("truncated"):
-            log.debug("cache.hit", batch=bhash[:10])
+            log.debug("cache.hit", batch=bhash[:10], phase=run_context.get("phase"))
             return hit["result"], 0.0, True, False
+        log.debug(
+            "cache.miss",
+            batch=bhash[:10],
+            phase=run_context.get("phase"),
+            model=model,
+            stale_truncated=bool(hit and hit.get("truncated")),
+        )
+    else:
+        log.debug("cache.bypass", batch=bhash[:10], phase=run_context.get("phase"), model=model)
     messages = build_messages(system, static_ctx, dynamic)
     res = await chat_complete(
         oai,
@@ -523,6 +542,21 @@ async def run_analysis(
     filter_model = opts.filter_model_override or preset.filter_model or settings.openai.filter_model_default
 
     thread_param = thread_id if thread_id is not None else 0
+    log.debug(
+        "analyze.start",
+        chat_id=chat_id,
+        thread_id=thread_param,
+        preset=preset.name,
+        prompt_version=preset.prompt_version,
+        final_model=final_model,
+        filter_model=filter_model,
+        report_language=report_language,
+        source_language=source_language or None,
+        source_kind=opts.source_kind,
+        messages_passed=len(messages) if messages is not None else None,
+        with_comments=opts.with_comments,
+        use_cache=opts.use_cache,
+    )
 
     if messages is not None:
         # Consumer (cmd_analyze via prepare_chat_run) has already done
@@ -620,6 +654,8 @@ async def run_analysis(
             enrich_cost_usd=enrich_cost,
             enrich_summary=enrich_summary_str,
             raw_msg_count=raw_count,
+            chat_username=chat_username,
+            chat_internal_id=chat_internal_id,
         )
 
     period = (opts.since, opts.until)
@@ -825,6 +861,8 @@ async def run_analysis(
             media_counts=media_counts,
             link_count=link_count,
             redact_counts=dict(redact_stats),
+            chat_username=chat_username,
+            chat_internal_id=chat_internal_id,
         )
 
     # --- Map-reduce branch
@@ -839,6 +877,8 @@ async def run_analysis(
 
     map_sem = asyncio.Semaphore(settings.analyze.map_concurrency)
 
+    from unread.util.logging import is_silent as _is_silent
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[grey70]Analyzing chunks ({task.fields[model]})[/]"),
@@ -847,6 +887,7 @@ async def run_analysis(
         TimeElapsedColumn(),
         transient=True,
         console=_pipeline_console(),
+        disable=_is_silent(),
     ) as _map_progress:
         _map_task = _map_progress.add_task("map", total=len(chunks), model=filter_model)
 
@@ -901,11 +942,21 @@ async def run_analysis(
         map_results = await asyncio.gather(*[_map(c) for c in chunks])
     map_hashes = [mh for mh, _, _, _, _ in map_results]
     batch_hashes.extend(map_hashes)
+    map_hit_count = 0
     for _, _, cost, hit, tr in map_results:
         total_cost += cost
         cache_hits += int(hit)
         cache_misses += int(not hit)
+        map_hit_count += int(hit)
         any_truncated = any_truncated or tr
+    log.debug(
+        "analyze.map.done",
+        chunks=len(map_results),
+        cache_hits=map_hit_count,
+        cache_misses=len(map_results) - map_hit_count,
+        cost=round(total_cost, 6),
+        any_truncated=any_truncated,
+    )
 
     # Reduce stage prompt is fed to the LLM → labels and instructions in
     # the report language so the model sees one coherent language.
@@ -990,6 +1041,8 @@ async def run_analysis(
         media_counts=media_counts,
         link_count=link_count,
         redact_counts=dict(redact_stats),
+        chat_username=chat_username,
+        chat_internal_id=chat_internal_id,
     )
 
 

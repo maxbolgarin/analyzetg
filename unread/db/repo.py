@@ -135,7 +135,7 @@ class Repo:
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA foreign_keys=ON")
         await conn.execute("PRAGMA synchronous=NORMAL")
-        # Concurrent invocations (e.g. `unread sync` in one shell while
+        # Concurrent invocations (e.g. `unread tg sync` in one shell while
         # `unread ask` runs in another — a documented use case) race
         # the writer. Without this pragma the second writer raises
         # "database is locked" after aiosqlite's default 5s wait.
@@ -754,8 +754,17 @@ class Repo:
         chat_id: int,
         thread_id: int | None = None,
         min_msg_id: int | None = None,
+        since_date: datetime | None = None,
     ) -> int | None:
-        """Highest msg_id we already have for this chat/thread above `min_msg_id`.
+        """Highest msg_id we already have for this chat/thread that passes
+        the optional `min_msg_id` (exclusive) and `since_date` (inclusive)
+        floors.
+
+        `since_date` is the time-window cache-aware fast path: when set,
+        only counts rows with `date >= since_date`. Callers use it to
+        decide whether `_pull_history`'s `--last-days N` branch can
+        anchor on `from_msg_id=local_max+1` instead of re-walking the
+        whole window via Telethon's `offset_date`.
 
         Used by analyze/dump to skip refetching messages already in the DB.
         Returns None if no rows match.
@@ -768,6 +777,9 @@ class Repo:
         if min_msg_id is not None:
             sql += " AND msg_id > ?"
             args.append(min_msg_id)
+        if since_date is not None:
+            sql += " AND date >= ?"
+            args.append(since_date)
         cur = await self._conn.execute(sql, args)
         row = await cur.fetchone()
         await cur.close()
@@ -2660,6 +2672,12 @@ def _apply_one_override(settings, key: str, value: str) -> None:
             return
         settings.analyze.plain_citations = b
         return
+    if key == "analyze.no_citations":
+        b = _coerce_bool(value)
+        if b is None:
+            return
+        settings.analyze.no_citations = b
+        return
     # AI per-slot routing. The umbrella `ai.provider` is deprecated —
     # `_migrate_legacy_ai_provider` rewrites the row into the four
     # `*_provider` keys at bootstrap, but for one cycle we still tolerate
@@ -2694,6 +2712,15 @@ def _apply_one_override(settings, key: str, value: str) -> None:
     if key == "local.base_url":
         if value:
             settings.local.base_url = value
+        return
+    # Logging mode — strict enum; ignore garbage so a hand-edited DB
+    # row can't brick startup.
+    if key == "logging.mode":
+        from unread.util.logging import LOG_MODES
+
+        v = value.strip().lower()
+        if v in LOG_MODES:
+            settings.logging.mode = v
         return
 
 

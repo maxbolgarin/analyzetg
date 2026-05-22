@@ -37,6 +37,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "messages_label": {"en": "Messages", "ru": "Сообщений"},
     "messages_in_group": {"en": "Messages in this group", "ru": "Сообщений в этой группе"},
+    "chat_id_label": {"en": "Chat ID", "ru": "ID чата"},
+    "topic_id_label": {"en": "Topic ID", "ru": "ID топика"},
+    "chat_link_label": {"en": "Chat link", "ru": "Ссылка на чат"},
     "topic_label": {"en": "Topic", "ru": "Топик"},
     "no_topic": {"en": "No topic", "ru": "Без топика"},
     "forum_label": {"en": "Forum", "ru": "Форум"},
@@ -601,6 +604,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "settings_cat_provider": {"en": "AI provider", "ru": "AI-провайдер"},
     "settings_cat_enrich": {"en": "Enrichment defaults", "ru": "Обогащение (по умолчанию)"},
     "settings_cat_analyze": {"en": "Analyze tuning", "ru": "Настройка анализа"},
+    "settings_cat_output": {"en": "Output verbosity", "ru": "Подробность вывода"},
     "settings_cat_tuning_ai": {"en": "AI overrides", "ru": "AI: расширенные настройки"},
     # Compound (provider, model) picker — two-step flow.
     "settings_slot_step1_prefix": {
@@ -793,6 +797,48 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Plain-text citation URLs in console",
         "ru": "Цитаты как обычный текст в консоли",
     },
+    "set_label_no_citations": {
+        "en": "Strip citations from the report",
+        "ru": "Удалять цитаты из отчёта",
+    },
+    "set_label_log_mode": {
+        "en": "Console verbosity",
+        "ru": "Подробность логов",
+    },
+    # Per-mode labels for the picker row. Composed by the editor as
+    # `<name> — <hint>` so the user reads both pieces in one glance.
+    "set_log_mode_silent": {
+        "en": "silent",
+        "ru": "тихий",
+    },
+    "set_log_mode_silent_hint": {
+        "en": "only errors + the final report",
+        "ru": "только ошибки и итоговый отчёт",
+    },
+    "set_log_mode_normal": {
+        "en": "normal",
+        "ru": "обычный",
+    },
+    "set_log_mode_normal_hint": {
+        "en": "+ status arrows + progress bars (default)",
+        "ru": "+ статус-стрелки + прогресс-бары (по умолчанию)",
+    },
+    "set_log_mode_verbose": {
+        "en": "verbose",
+        "ru": "подробный",
+    },
+    "set_log_mode_verbose_hint": {
+        "en": "+ per-API-call events (ai.chat, audio.transcribe, …)",
+        "ru": "+ события каждого вызова API (ai.chat, audio.transcribe, …)",
+    },
+    "set_log_mode_debug": {
+        "en": "debug",
+        "ru": "отладка",
+    },
+    "set_log_mode_debug_hint": {
+        "en": "+ DEBUG events + Rich tracebacks (may print API keys on crash)",
+        "ru": "+ DEBUG-события + Rich-трейсбэки (могут показать API-ключи при падении)",
+    },
     # Setting descriptions
     "set_desc_locale_language": {
         "en": "Wizard, settings menu, banners, status messages — UI only.",
@@ -882,6 +928,28 @@ _STRINGS: dict[str, dict[str, str]] = {
             "macOS Terminal.app). Сохранённые markdown-файлы не затрагиваются."
         ),
     },
+    "set_desc_no_citations": {
+        "en": (
+            "Drop `[#<msg_id>](<link>)` citations from the report entirely — "
+            "pure prose, no message links. Cached results stay intact; toggling "
+            "this setting doesn't re-run the analysis."
+        ),
+        "ru": (
+            "Полностью удалять цитаты `[#<msg_id>](<link>)` из отчёта — "
+            "чистый текст без ссылок на сообщения. Кеш результатов не "
+            "сбрасывается; включение/выключение не запускает анализ заново."
+        ),
+    },
+    "set_desc_log_mode": {
+        "en": (
+            "How much progress/log chatter the CLI prints. Affects every command. "
+            "Override per-run with `-q` / `-v` / `--debug` or `UNREAD_LOG_MODE=…`."
+        ),
+        "ru": (
+            "Сколько прогресса/логов CLI печатает. Применяется ко всем командам. "
+            "Перекрыть на один запуск можно через `-q` / `-v` / `--debug` или `UNREAD_LOG_MODE=…`."
+        ),
+    },
     # AI provider routing — exposed in `unread settings` so a multi-key
     # user can switch between OpenAI / Anthropic / Google / OpenRouter /
     # local without re-running `unread init`.
@@ -927,12 +995,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": (
             "Flagship model — the most capable / most expensive call per run. "
             "Used by `unread <chat>` (final summary), `unread ask <chat> <q>` (answer), "
-            "`unread chats run`, and `unread <youtube-url|web-url|file>`."
+            "`unread tg chats run`, and `unread <youtube-url|web-url|file>`."
         ),
         "ru": (
             "Флагманская модель — самый ёмкий и дорогой вызов на запуск. "
             "Используется в `unread <чат>` (итоговое резюме), `unread ask <чат> <вопрос>` (ответ), "
-            "`unread chats run` и `unread <youtube-url|веб-url|файл>`."
+            "`unread tg chats run` и `unread <youtube-url|веб-url|файл>`."
         ),
     },
     "set_label_ai_filter_model": {
@@ -1258,8 +1326,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Нечего индексировать — уже актуально.",
     },
     "ask_no_matching_messages": {
-        "en": "No matching messages. Try `unread sync <chat>` first if the chat hasn't been backfilled, or broaden your scope.",
-        "ru": "Нет подходящих сообщений. Попробуйте сначала `unread sync <chat>`, если чат не синхронизирован, или расширьте область поиска.",
+        "en": "No matching messages. Try `unread tg sync <chat>` first if the chat hasn't been backfilled, or broaden your scope.",
+        "ru": "Нет подходящих сообщений. Попробуйте сначала `unread tg sync <chat>`, если чат не синхронизирован, или расширьте область поиска.",
     },
     "ask_no_matches_reusing": {
         "en": "→ No new matches; reusing prior context.",
@@ -1314,7 +1382,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     # The bold-prefix style stays language-neutral; only the label text
     # flips per locale.
     "report_meta_chat": {"en": "**Chat:**", "ru": "**Чат:**"},
-    "report_meta_thread": {"en": "**Thread:**", "ru": "**Топик:**"},
+    "report_meta_chat_id": {"en": "**Chat ID:**", "ru": "**ID чата:**"},
+    "report_meta_thread": {"en": "**Topic:**", "ru": "**Топик:**"},
+    "report_meta_thread_id": {"en": "**Topic ID:**", "ru": "**ID топика:**"},
+    "report_meta_link": {"en": "**Link:**", "ru": "**Ссылка:**"},
     "report_meta_period": {"en": "**Period:**", "ru": "**Период:**"},
     "report_meta_messages": {"en": "**Messages analyzed:**", "ru": "**Сообщений проанализировано:**"},
     "report_meta_messages_filtered": {
@@ -2140,8 +2211,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "Подписок пока нет.",
     },
     "tg_chats_use_add": {
-        "en": "Use [cyan]unread chats add[/] to create one.",
-        "ru": "Используйте [cyan]unread chats add[/], чтобы создать.",
+        "en": "Use [cyan]unread tg chats add[/] to create one.",
+        "ru": "Используйте [cyan]unread tg chats add[/], чтобы создать.",
     },
     "tg_chats_done_label": {"en": "← Done", "ru": "← Готово"},
     "tg_chats_manage_q": {
@@ -2314,8 +2385,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cli_error_prefix": {"en": "Error:", "ru": "Ошибка:"},
     "cli_warning_prefix": {"en": "Warning:", "ru": "Предупреждение:"},
     "cli_error_traceback_hint": {
-        "en": "Run with -v for the full traceback, or `unread bug-report` to share with maintainers.",
-        "ru": "Запустите с -v для полного traceback или используйте `unread bug-report`, чтобы поделиться с разработчиками.",
+        "en": "Run with --debug for the full traceback, or `unread bug-report` to share with maintainers.",
+        "ru": "Запустите с --debug для полного traceback или используйте `unread bug-report`, чтобы поделиться с разработчиками.",
     },
     "cli_cancelled_partial_saved": {
         "en": "Cancelled — partial work was saved.",

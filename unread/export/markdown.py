@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from unread.analyzer.formatter import format_messages
+from unread.i18n import t as _i18n_t
 from unread.models import Message
 
 # CSV "formula injection" defense (OWASP). Excel / LibreOffice / Numbers
@@ -26,29 +27,72 @@ def _csv_safe(value: Any) -> Any:
     return value
 
 
-def render_md(msgs: list[Message], *, title: str | None, language: str = "en") -> str:
+def render_md(
+    msgs: list[Message],
+    *,
+    title: str | None,
+    language: str = "en",
+    chat_id: int | None = None,
+    thread_id: int | None = None,
+    chat_link: str | None = None,
+) -> str:
     """Build the markdown string without writing anything.
 
     Uses `blank_line_between_messages=True` so consecutive posts get a
     visible paragraph break — both for human readers of the saved `.md`
     and for Rich's CommonMark renderer in `--output console` mode, which
     would otherwise collapse adjacent lines into a single paragraph.
+
+    When `chat_id` / `thread_id` / `chat_link` are passed, a localized
+    `Chat ID: …`, `Topic ID: …`, `Chat link: …` triple is inserted right
+    after the `=== Chat: <title> ===` header so the saved dump carries
+    the same metadata as analyze reports.
     """
     period: tuple[datetime | None, datetime | None] = (
         msgs[0].date if msgs else None,
         msgs[-1].date if msgs else None,
     )
-    return format_messages(
+    body = format_messages(
         msgs,
         period=period,
         title=title,
         language=language,
         blank_line_between_messages=True,
     )
+    extra: list[str] = []
+    if chat_id is not None:
+        extra.append(f"{_i18n_t('chat_id_label', language)}: {chat_id}")
+    if thread_id:
+        extra.append(f"{_i18n_t('topic_id_label', language)}: {thread_id}")
+    if chat_link:
+        extra.append(f"{_i18n_t('chat_link_label', language)}: {chat_link}")
+    if not extra or not body:
+        return body
+    lines = body.split("\n")
+    if lines and lines[0].startswith("==="):
+        # Inject under the chat header so reading top-to-bottom is natural.
+        return "\n".join([lines[0], *extra, *lines[1:]])
+    return "\n".join([*extra, body])
 
 
-def export_md(msgs: list[Message], *, title: str | None, output: Path, language: str = "en") -> None:
-    rendered = render_md(msgs, title=title, language=language)
+def export_md(
+    msgs: list[Message],
+    *,
+    title: str | None,
+    output: Path,
+    language: str = "en",
+    chat_id: int | None = None,
+    thread_id: int | None = None,
+    chat_link: str | None = None,
+) -> None:
+    rendered = render_md(
+        msgs,
+        title=title,
+        language=language,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        chat_link=chat_link,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")
     from unread.util.fsmode import tighten

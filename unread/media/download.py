@@ -201,9 +201,17 @@ async def transcode_for_openai(
     ensure_private_dir(tmp_dir)
 
     if media_type == "voice":
-        # Telethon saves Telegram voice (Opus in OGG) as `.oga`; OpenAI
-        # whitelists `.ogg` by filename. Same bytes — just rename.
-        if src.suffix.lower() == ".oga":
+        # Telegram voice is always Opus in OGG. The file may arrive with
+        # `.oga` (Telethon's default for opus) OR with no extension at all
+        # — `download_message` writes via a `.part` atomic-rename, and
+        # Telethon's `_get_proper_filename` sees `.part` as the existing
+        # suffix and skips adding `.oga`. After the rename to the final
+        # path (which has no extension) the file looks suffix-less to us.
+        # Normalize to `.ogg` unconditionally: OpenAI's Whisper detects
+        # format from filename and rejects extensionless uploads with
+        # a 400 `Unsupported file format`.
+        suffix = src.suffix.lower()
+        if suffix in {"", ".oga"}:
             renamed = src.with_suffix(".ogg")
             src.rename(renamed)
             prepared = renamed

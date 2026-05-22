@@ -21,7 +21,7 @@ from unread.config import get_settings
 from unread.db.repo import apply_db_overrides_sync, open_repo
 from unread.i18n import t as _t
 from unread.i18n import tf as _tf
-from unread.util.logging import setup_logging
+from unread.util.logging import resolve_cli_log_mode, resolve_log_mode, setup_logging
 
 # Typer's defaults render option names as `bold cyan` in error / help output
 # and the "Try '… --help' for help." suggestion line as `dim` wrapped in
@@ -288,8 +288,10 @@ def _run(coro) -> None:
       - Any other Exception → one-line "Error: …" message instead of
         a multi-frame Rich traceback. The traceback is panic-inducing
         for non-technical users and rarely actionable; users opt back
-        in with ``-v / --verbose`` (sets ``UNREAD_DEBUG=1`` upstream)
-        when they want the full thing for a bug report.
+        in with ``--debug`` (sets ``UNREAD_DEBUG=1`` upstream) when they
+        want the full thing for a bug report. ``-v / --verbose`` is the
+        gentler middle ground — INFO-level structured logs without the
+        Rich locals-leaking traceback.
     `typer.Exit` and `SystemExit` always re-raise unchanged so exit
     codes stay correct for shell scripts.
     """
@@ -341,10 +343,10 @@ def _run(coro) -> None:
         # picked an exit code. Pass through.
         raise
     except Exception as e:
-        # In verbose mode, re-raise so the developer / power user sees
+        # In debug mode, re-raise so the developer / power user sees
         # the full Rich traceback. Otherwise, render a one-liner that
-        # points at -v and bug-report.
-        if _os.environ.get("UNREAD_DEBUG") or _os.environ.get("UNREAD_VERBOSE"):
+        # points at --debug and bug-report.
+        if _os.environ.get("UNREAD_DEBUG"):
             raise
         # Strip the leading exception class qualname in the message —
         # users care about WHAT happened, not whether it was a
@@ -674,6 +676,14 @@ def _dispatch_analyze(**kwargs) -> None:
         from unread.config import get_settings
 
         get_settings().analyze.plain_citations = True
+    # `--no-citations` strips `[#N](url)` from both rendered output AND
+    # the saved file. Same one-shot override pattern — the cache key
+    # stays stable so toggling doesn't re-run the analysis.
+    no_citations = kwargs.pop("no_citations", False)
+    if no_citations:
+        from unread.config import get_settings
+
+        get_settings().analyze.no_citations = True
     _run(cmd_analyze(save_default=save_flag, **kwargs))
 
 
@@ -2177,7 +2187,26 @@ def _root(
         is_eager=True,
         help="Show the unread version and exit.",
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Verbose: also show per-API-call structured log events (ai.chat, audio.transcribe, …).",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress status arrows / progress / non-error logs. The final report still renders.",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help=(
+            "Debug: DEBUG-level logs plus Rich tracebacks that render local-variable values "
+            "(may include API keys — only use when filing a bug report)."
+        ),
+    ),
     thread: int | None = typer.Option(None, "--thread", help="Forum-topic id."),
     msg: str | None = typer.Option(
         None,
@@ -2253,6 +2282,11 @@ def _root(
         False,
         "--plain-citations",
         help="Render citations as plain URLs in the console (use when your terminal can't handle OSC 8 hyperlinks). Saved markdown is unaffected.",
+    ),
+    no_citations: bool = typer.Option(
+        False,
+        "--no-citations",
+        help="Strip `[#N](url)` citations from the rendered AND saved report entirely. Just the prose, no links. Persistable via `unread settings`.",
     ),
     mark_read: bool | None = typer.Option(
         None,
@@ -2401,7 +2435,13 @@ def _root(
     bare `tg` is a magic ref token that opens the picker; the verbs
     `tg login` / `tg describe` / `tg logout` are subcommands.
     """
-    setup_logging(verbose=verbose)
+    try:
+        cli_mode = resolve_cli_log_mode(quiet=quiet, verbose=verbose, debug=debug)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(2) from None
+    mode = resolve_log_mode(cli_flag=cli_mode, settings_mode=get_settings().logging.mode)
+    setup_logging(mode=mode)
     if ctx.invoked_subcommand is not None:
         # A subcommand was matched (`tg`, `ask`, `dump`, `init`, …); let it run.
         # `unread tg` (with no further verb) routes here too — the `tg`
@@ -2554,7 +2594,7 @@ def download_media(
 ) -> None:
     """Download raw media files (photos, voice, video, documents) from a chat.
 
-    Works off messages already in the local DB — run [cyan]unread sync[/] or
+    Works off messages already in the local DB — run [cyan]unread tg sync[/] or
     [cyan]unread analyze[/] first if you need the latest messages. Safe to
     re-run: files are skipped when they already exist on disk (pass
     [cyan]--overwrite[/] to force). No OpenAI calls; no cost beyond
@@ -3136,7 +3176,7 @@ async def _cache_tg_ls(limit: int) -> None:
     async with open_repo(settings.storage.data_path) as repo:
         overview = await repo.tg_overview()
         if overview["messages"] == 0:
-            console.print("[yellow]No Telegram messages cached.[/] Run `unread sync` to populate.")
+            console.print("[yellow]No Telegram messages cached.[/] Run `unread tg sync` to populate.")
             return
         rows = await repo.tg_chats_summary(limit=limit)
         oldest = str(overview["oldest"] or "")[:10] or "—"
@@ -3188,7 +3228,7 @@ async def _cache_tg_stats() -> None:
     async with open_repo(settings.storage.data_path) as repo:
         overview = await repo.tg_overview()
         if overview["messages"] == 0:
-            console.print("[yellow]No Telegram messages cached.[/] Run `unread sync` to populate.")
+            console.print("[yellow]No Telegram messages cached.[/] Run `unread tg sync` to populate.")
             return
         oldest = str(overview["oldest"] or "")[:10] or "—"
         newest = str(overview["newest"] or "")[:10] or "—"

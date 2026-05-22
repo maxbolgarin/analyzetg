@@ -295,13 +295,28 @@ def build_chunks(
     context = model_context_window(model)
     overhead = count_tokens(system_prompt, model) + count_tokens(user_overhead, model)
     budget = context - overhead - output_budget - safety_margin
+    capped_by_preset = False
     if max_chunk_input_tokens is not None and max_chunk_input_tokens > 0:
         # Subtract per-chunk overhead once — the cap should bound the
         # *whole request* (system + user_overhead + body + output reserve),
         # not just the body. Without this, a 35k cap on a request with
         # ~3k of overhead silently lets through ~38k-token requests.
         cap_budget = max_chunk_input_tokens - overhead - output_budget - safety_margin
+        if cap_budget < budget:
+            capped_by_preset = True
         budget = min(budget, max(2000, cap_budget))
+    log.debug(
+        "chunker.budget",
+        model=model,
+        context=context,
+        overhead=overhead,
+        output_budget=output_budget,
+        safety_margin=safety_margin,
+        max_chunk_input_tokens=max_chunk_input_tokens,
+        capped_by_preset=capped_by_preset,
+        budget=budget,
+        msgs=len(msgs),
+    )
     if budget < 2000:
         # Silently clamping to 500 here used to produce 200+ pathological
         # tiny chunks and a runaway bill. Surface the misconfiguration so
@@ -317,6 +332,8 @@ def build_chunks(
     chunks: list[Chunk] = []
     current = Chunk()
     prev_date = None
+    soft_breaks = 0
+    hard_breaks = 0
     soft_break = timedelta(minutes=soft_break_minutes)
     min_roll_tokens = max(soft_break_min_tokens, min(budget // 3, 4000))
 
@@ -389,13 +406,27 @@ def build_chunks(
             if gap > soft_break and current.tokens >= min_roll_tokens:
                 chunks.append(current)
                 current = Chunk()
+                soft_breaks += 1
         if current.tokens + t > budget and current.messages:
             chunks.append(current)
             current = Chunk()
+            hard_breaks += 1
         current.messages.append(m)
         current.tokens += t
         prev_date = m.date
 
     if current.messages:
         chunks.append(current)
+    if chunks:
+        log.debug(
+            "chunker.packed",
+            chunks=len(chunks),
+            soft_breaks=soft_breaks,
+            hard_breaks=hard_breaks,
+            tokens_min=min(c.tokens for c in chunks),
+            tokens_max=max(c.tokens for c in chunks),
+            tokens_total=sum(c.tokens for c in chunks),
+            msgs_min=min(len(c.messages) for c in chunks),
+            msgs_max=max(len(c.messages) for c in chunks),
+        )
     return chunks

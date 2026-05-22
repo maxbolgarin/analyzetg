@@ -27,10 +27,17 @@ from unread.i18n import t as _t
 from unread.i18n import tf as _tf
 from unread.models import Subscription
 from unread.tg.client import tg_client
-from unread.util.logging import get_logger
+from unread.util.logging import get_logger, is_silent
 
 console = Console()
 log = get_logger(__name__)
+
+
+def _status(*args: object, **kwargs: object) -> None:
+    """Status / progress line: suppressed in `silent` mode."""
+    if is_silent():
+        return
+    console.print(*args, **kwargs)
 
 
 def _resolve_period(sub_value: str, override: str | None) -> str:
@@ -182,7 +189,7 @@ async def cmd_run(
             )
         console.print(summary_table)
         if n_comments_pairs:
-            console.print(f"[grey70]{_tf('run_comments_auto_merge', n=n_comments_pairs)}[/]")
+            _status(f"[grey70]{_tf('run_comments_auto_merge', n=n_comments_pairs)}[/]")
 
         from unread.util.prompt import Choice
         from unread.util.prompt import select as _select
@@ -199,7 +206,7 @@ async def cmd_run(
             default_value="per_chat",
         )
         if mode is None or mode == "cancel":
-            console.print(f"[grey70]{_t('cancelled')}[/]")
+            _status(f"[grey70]{_t('cancelled')}[/]")
             return
         if mode == "flat":
             flat = True
@@ -293,15 +300,15 @@ async def cmd_run(
         # otherwise that one channel + one comments sub = one merged report.
         n_with_comments = sum(1 for v in with_comments_map.values() if v)
         if n_with_comments:
-            console.print(f"[grey70]{_tf('run_comments_merge_note', n=n_with_comments)}[/]")
+            _status(f"[grey70]{_tf('run_comments_merge_note', n=n_with_comments)}[/]")
         if dry_run:
-            console.print(f"[grey70]{_t('run_dry_run_note')}[/]")
+            _status(f"[grey70]{_t('run_dry_run_note')}[/]")
             return
         if not yes:
             from unread.util.prompt import confirm as _confirm
 
             if not _confirm(_tf("run_analyze_confirm_q", n=len(targets)), default=True):
-                console.print(f"[grey70]{_t('cancelled')}[/]")
+                _status(f"[grey70]{_t('cancelled')}[/]")
                 return
 
     # Re-open client/repo per sub via cmd_analyze (each opens its own).
@@ -329,7 +336,7 @@ async def cmd_run(
             preset=preset_eff,
             period=period_eff,
         )
-        console.print(f"\n[bold cyan]>>[/] {progress}")
+        _status(f"\n[bold cyan]>>[/] {progress}")
         try:
             await cmd_analyze(
                 ref=str(s.chat_id),
@@ -520,17 +527,17 @@ async def _cmd_run_flat(
             enrich_summary = _t("run_enrich_none")
         else:
             enrich_summary = enrich_dict["enrich"] or _t("run_enrich_config_defaults")
-        console.print(
+        _status(
             f"[grey70]{_tf('run_flat_mode_desc', preset=preset_name, period=period, enrich=enrich_summary)}[/]"
         )
         if dry_run:
-            console.print(f"[grey70]{_t('run_dry_run_note')}[/]")
+            _status(f"[grey70]{_t('run_dry_run_note')}[/]")
             return
         if not yes:
             from unread.util.prompt import confirm as _confirm
 
             if not _confirm(_tf("run_flat_confirm_q", n=len(targets)), default=True):
-                console.print(f"[grey70]{_t('cancelled')}[/]")
+                _status(f"[grey70]{_t('cancelled')}[/]")
                 return
 
         # Pull each sub's messages. For channels with a sibling comments
@@ -554,7 +561,7 @@ async def _cmd_run_flat(
                 with_comments = await _has_linked_comments_sub(repo, int(s.chat_id), all_subs)
             mr_eff = mark_read_override if mark_read_override is not None else s.mark_read
             maybe_comments = _t("run_flat_with_comments_suffix") if with_comments else ""
-            console.print(
+            _status(
                 f"[bold cyan]>>[/] "
                 f"{_tf('run_flat_sub_progress', i=i, total=len(targets), title=s.title or s.chat_id, kind=s.source_kind, maybe_comments=maybe_comments)}"
             )
@@ -589,12 +596,12 @@ async def _cmd_run_flat(
                 )
             except typer.Exit as e:
                 if e.exit_code == 0:
-                    console.print(f"[grey70]{_tf('run_flat_no_msgs', title=s.title or s.chat_id)}[/]")
+                    _status(f"[grey70]{_tf('run_flat_no_msgs', title=s.title or s.chat_id)}[/]")
                     continue
                 raise
 
             if not prepared.messages:
-                console.print(f"[grey70]{_tf('run_flat_zero_msgs', title=s.title or s.chat_id)}[/]")
+                _status(f"[grey70]{_tf('run_flat_zero_msgs', title=s.title or s.chat_id)}[/]")
                 continue
 
             # Last_days lives on the iter-level filter rather than
@@ -663,7 +670,7 @@ async def _cmd_run_flat(
             n_chats=len(per_sub_msg_count),
             n_msgs=len(all_messages),
         )
-        console.print(f"\n[grey70]{_tf('run_flat_analyzing', n=len(all_messages))}[/]")
+        _status(f"\n[grey70]{_tf('run_flat_analyzing', n=len(all_messages))}[/]")
         try:
             result = await run_analysis(
                 repo=repo,
@@ -750,7 +757,7 @@ async def _cmd_run_flat(
             except Exception as e:
                 log.warning("run.flat.mark_read_failed", err=str(e)[:200])
         if marked:
-            console.print(f"[grey70]{_tf('run_marked_read_across', n=marked)}[/]")
+            _status(f"[grey70]{_tf('run_marked_read_across', n=marked)}[/]")
 
 
 __all__ = ["cmd_run"]

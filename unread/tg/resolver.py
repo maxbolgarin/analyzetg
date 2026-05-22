@@ -52,6 +52,7 @@ async def resolve(
 
     # Self
     if parsed.kind == "self":
+        log.debug("resolve.route", route="self")
         me = await client.get_me()
         eid = entity_id(me)
         await repo.upsert_chat(
@@ -64,16 +65,19 @@ async def resolve(
 
     # Direct numeric id
     if parsed.kind == "numeric_id" and parsed.chat_id is not None:
+        log.debug("resolve.route", route="numeric_id", chat_id=parsed.chat_id)
         entity = await client.get_entity(parsed.chat_id)
         return await _record_and_return(repo, entity, parsed)
 
     # Private link (t.me/c/<id>/...) → compose -100<id>
     if parsed.kind == "internal_id" and parsed.chat_id is not None:
+        log.debug("resolve.route", route="internal_id", chat_id=parsed.chat_id)
         entity = await client.get_entity(parsed.chat_id)
         return await _record_and_return(repo, entity, parsed)
 
     # Invite link
     if parsed.kind == "invite" and parsed.invite_hash:
+        log.debug("resolve.route", route="invite", join=join)
         from telethon.tl.functions.messages import (  # type: ignore[attr-defined]
             CheckChatInviteRequest,
             ImportChatInviteRequest,
@@ -108,14 +112,22 @@ async def resolve(
 
     # Username
     if parsed.kind == "username" and parsed.username:
+        log.debug("resolve.route", route="username", username=parsed.username)
         # Local cache first
         cached = await repo.find_chat_by_username(parsed.username)
         if cached:
+            log.debug("resolve.username.cache_hit", username=parsed.username, chat_id=cached["id"])
             try:
                 entity = await client.get_entity(cached["id"])
                 return await _record_and_return(repo, entity, parsed)
-            except Exception:
-                pass  # fall through to live lookup
+            except Exception as e:
+                log.debug(
+                    "resolve.username.cache_stale",
+                    username=parsed.username,
+                    chat_id=cached["id"],
+                    err=str(e)[:100],
+                )
+                # fall through to live lookup
         try:
             entity = await client.get_entity(parsed.username)
             return await _record_and_return(repo, entity, parsed)
@@ -170,8 +182,11 @@ async def _fuzzy_resolve(
     prompt_choice,
 ) -> ResolvedRef:
     """Scan iter_dialogs() and rank candidates by fuzzy match on title+username."""
+    log.debug("resolve.fuzzy.scan_start", query=query, threshold=threshold, margin=margin)
     pool: list[FuzzyCandidate] = []
+    scanned = 0
     async for dialog in client.iter_dialogs(limit=None):  # type: ignore[arg-type]
+        scanned += 1
         entity = dialog.entity
         title = entity_title(entity)
         username = entity_username(entity)
@@ -201,8 +216,16 @@ async def _fuzzy_resolve(
     pool.sort(key=lambda c: c.score, reverse=True)
     top = pool[0]
     second_score = pool[1].score if len(pool) > 1 else 0
+    log.debug(
+        "resolve.fuzzy.scan_done",
+        scanned=scanned,
+        candidates=len(pool),
+        top_score=top.score,
+        second_score=second_score,
+    )
 
     if top.score >= threshold and top.score - second_score >= margin:
+        log.debug("resolve.fuzzy.accept", chat_id=top.chat_id, title=top.title, score=top.score)
         return _candidate_to_ref(top)
 
     # Ambiguous — ask caller to choose
