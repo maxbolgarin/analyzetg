@@ -187,7 +187,7 @@ Then `unread init` skips wizard prompts and runs Telethon auth only.
 `.env` values always win over anything in the secrets DB, so key
 rotation is a one-line edit.
 
-`unread doctor` verifies the install at any time. `unread login --force`
+`unread doctor` verifies the install at any time. `unread tg login --force`
 re-runs Telethon auth without touching keys.
 
 > **Migrating from a cwd-relative install** (older versions wrote into
@@ -298,7 +298,7 @@ the prompt across invocations:
 ```bash
 unread security unlock              # cache the derived key until you `lock`
 unread security unlock --keep 30m   # … or for a bounded TTL
-unread chats run                    # no prompt
+unread tg chats run                 # no prompt
 unread security lock                # wipe the cache now
 unread security rotate-passphrase   # change the passphrase
 ```
@@ -386,11 +386,11 @@ doesn't replace it.
 | Command | Purpose |
 |---|---|
 | `unread tg describe [<ref>]` | List dialogs (no ref) or inspect one chat. Shows folder column. |
-| `unread describe folders` | List your Telegram folders (use with `--folder NAME`). |
-| `unread login [--force]` | Re-run the Telegram-only login step. `--force` wipes the saved session first. |
-| `unread logout` | Remove the local Telegram session. |
-| `unread chats add/list/enable/disable/remove` | Manage subscriptions. Optional — one-off `analyze` already fetches. |
-| `unread sync` | Pull new messages for every active subscription. |
+| `unread tg describe folders` | List your Telegram folders (use with `--folder NAME`). |
+| `unread tg login [--force]` | Re-run the Telegram-only login step. `--force` wipes the saved session first. |
+| `unread tg logout` | Remove the local Telegram session. |
+| `unread tg chats add <ref>` / `unread tg chats manage` | Add a subscription, or open the interactive panel to list / enable / disable / remove. Optional — one-off `analyze` already fetches. |
+| `unread tg sync` | Pull new messages for every active subscription. |
 
 ### Maintenance
 
@@ -1299,12 +1299,12 @@ streams live; each iteration is preceded by `── Run K  YYYY-MM-DDThh:mm:ss`.
 
 ---
 
-## `unread describe folders` — Telegram folder integration
+## `unread tg describe folders` — Telegram folder integration
 
 Telegram "folders" (dialog filters) become a first-class scope:
 
 ```bash
-unread describe folders                         # list every folder + chat counts
+unread tg describe folders                      # list every folder + chat counts
 unread --folder Work                            # batch every unread chat in folder
 unread dump --folder Work                       # same for dump
 unread ask "..." --folder Work                  # Q&A scoped to folder
@@ -1329,12 +1329,11 @@ resolves the chat and fetches what's missing. Subscriptions are for
 sync on a cron, and analyze by date ranges across many runs.
 
 ```bash
-unread chats add @somegroup
-unread chats list
-unread sync
-unread chats remove <chat_id>
-unread chats add @forum --all-topics
-unread chats add @channel --with-comments
+unread tg chats add @somegroup
+unread tg chats manage                  # interactive panel: list, enable, disable, remove
+unread tg sync
+unread tg chats add @forum --all-topics
+unread tg chats add @channel --with-comments
 ```
 
 ---

@@ -1,6 +1,6 @@
 [project]
 name = "unread"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local CLI for pulling Telegram chats and channels, transcribing voice/video via OpenAI, and analyzing with Chat Completions."
 readme = "README.md"
 license = { file = "LICENSE" }
