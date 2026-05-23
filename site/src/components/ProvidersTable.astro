@@ -1,0 +1,119 @@
+---
+const providers = [
+  { name: 'OpenAI',     models: 'gpt-5.x family',    extras: 'Whisper · vision · embeddings', notes: 'Default. Required for Whisper, vision, and embeddings.' },
+  { name: 'Anthropic',  models: 'Claude 4.x family', extras: 'Long-context champion',          notes: 'Excellent for big reduces and structured output.' },
+  { name: 'Google',     models: 'Gemini 2.x',        extras: 'Cheapest at scale',              notes: 'Long context with aggressive pricing.' },
+  { name: 'OpenRouter', models: 'Anything',          extras: 'One key, many models',           notes: 'Mix-and-match across providers without juggling keys.' },
+  { name: 'Local',      models: 'Ollama, LM Studio, vLLM', extras: 'Fully offline analysis',  notes: 'Air-gapped operation. Bring your own GPU.' },
+];
+---
+<section class="providers">
+  <div class="container">
+    <header class="section-head">
+      <p class="kicker">Providers</p>
+      <h2>Bring your own model.</h2>
+      <p class="sub">
+        Switch any time with <code>unread settings</code>. Caches and analyses persist across provider changes.
+      </p>
+    </header>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Models</th>
+            <th>Extras</th>
+            <th class="hide-sm">Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {providers.map((p) => (
+            <tr>
+              <td class="name">{p.name}</td>
+              <td><code>{p.models}</code></td>
+              <td>{p.extras}</td>
+              <td class="hide-sm">{p.notes}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    <p class="footnote">
+      Whisper transcription, vision descriptions, and embeddings are OpenAI-only today. Everything else works on any provider.
+    </p>
+  </div>
+</section>
+
+<style>
+  .providers { padding: 4rem 0; background: var(--bg-elev); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .section-head { margin-bottom: 1.8rem; max-width: 60ch; }
+  .kicker {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.5rem;
+  }
+  .section-head h2 {
+    font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.6rem;
+    font-weight: 700;
+  }
+  .section-head .sub {
+    color: var(--fg-muted);
+    font-size: 1.02rem;
+    margin: 0;
+  }
+  .section-head .sub code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.88em;
+    color: var(--fg);
+  }
+  .table-wrap {
+    overflow-x: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.94rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.85rem 1.1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  thead th {
+    color: var(--fg-muted);
+    font-weight: 600;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    background: var(--bg-elev);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.name { font-weight: 700; color: var(--fg); }
+  td code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.85em;
+  }
+  .footnote {
+    margin: 1rem 0 0;
+    color: var(--fg-muted);
+    font-size: 0.86rem;
+  }
+  @media (max-width: 720px) {
+    .hide-sm { display: none; }
+  }
+</style>

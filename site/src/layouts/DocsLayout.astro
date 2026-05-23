@@ -1,0 +1,120 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import DocsSidebar from '../components/DocsSidebar.astro';
+import DocsTOC from '../components/DocsTOC.astro';
+import { SITE_URL, BASE, DOCS_NAV } from '../consts';
+
+interface Heading { depth: number; slug: string; text: string; }
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  slug: string;
+  headings?: Heading[];
+  heading: string;
+}
+
+const { title, description, path, slug, headings = [], heading } = Astro.props;
+
+const idx = DOCS_NAV.findIndex((d) => d.slug === slug);
+const prev = idx > 0 ? DOCS_NAV[idx - 1] : null;
+const next = idx >= 0 && idx < DOCS_NAV.length - 1 ? DOCS_NAV[idx + 1] : null;
+
+const breadcrumb = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: 'unread', item: new URL(`${BASE}/`, SITE_URL).toString() },
+    { '@type': 'ListItem', position: 2, name: 'Docs', item: new URL(`${BASE}/docs/`, SITE_URL).toString() },
+    ...(slug !== 'index'
+      ? [{ '@type': 'ListItem', position: 3, name: heading, item: new URL(`${BASE}${path}`, SITE_URL).toString() }]
+      : []),
+  ],
+};
+
+const article = {
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: heading,
+  name: heading,
+  description,
+  url: new URL(`${BASE}${path}`, SITE_URL).toString(),
+  inLanguage: 'en',
+  isPartOf: { '@type': 'WebSite', name: 'unread', url: new URL(`${BASE}/`, SITE_URL).toString() },
+};
+---
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  jsonLd={[breadcrumb, article]}
+>
+  <div class="container docs-shell">
+    <DocsSidebar currentSlug={slug} />
+    <article class="prose docs-content">
+      <slot />
+      <nav class="prev-next" aria-label="Docs pagination">
+        {prev ? (
+          <a class="pn pn-prev" href={prev.href}>
+            <span class="pn-label">← Previous</span>
+            <span class="pn-title">{prev.label}</span>
+          </a>
+        ) : <span />}
+        {next ? (
+          <a class="pn pn-next" href={next.href}>
+            <span class="pn-label">Next →</span>
+            <span class="pn-title">{next.label}</span>
+          </a>
+        ) : <span />}
+      </nav>
+    </article>
+    <DocsTOC headings={headings} />
+  </div>
+</BaseLayout>
+
+<style>
+  .docs-shell {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr) 200px;
+    gap: 2rem;
+    padding-top: 2.5rem;
+    padding-bottom: 2rem;
+    align-items: start;
+  }
+  @media (max-width: 1024px) {
+    .docs-shell { grid-template-columns: 200px minmax(0, 1fr); }
+    :global(.docs-shell aside:last-child) { display: none; }
+  }
+  @media (max-width: 720px) {
+    .docs-shell { grid-template-columns: 1fr; gap: 1rem; }
+    :global(.docs-shell aside) { position: static; padding: 0; border: 0; }
+  }
+  .docs-content {
+    min-width: 0;
+    max-width: 75ch;
+  }
+  .prev-next {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .pn {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.7rem 1rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    min-width: 150px;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .pn:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .pn-next { text-align: right; }
+  .pn-label { color: var(--fg-muted); font-size: 0.78rem; font-family: var(--font-mono); }
+  .pn-title { color: var(--fg); font-weight: 600; }
+</style>

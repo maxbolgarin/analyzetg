@@ -1,0 +1,89 @@
+---
+interface Props {
+  lang?: string;
+  filename?: string;
+  copyText?: string;
+}
+const { lang = 'bash', filename, copyText } = Astro.props;
+---
+<div class="code-wrap">
+  {filename && <div class="code-filename">{filename}</div>}
+  <button class="copy-btn" type="button" data-copy={copyText ?? ''} aria-label="Copy code">
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2"/>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+    </svg>
+    <span class="copy-label">Copy</span>
+  </button>
+  <pre class={`lang-${lang}`}><code><slot /></code></pre>
+</div>
+
+<style>
+  .code-wrap {
+    position: relative;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 1rem 0;
+  }
+  .code-filename {
+    padding: 0.45rem 0.9rem;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+  }
+  .copy-btn {
+    position: absolute;
+    top: 0.55rem;
+    right: 0.55rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.55rem;
+    background: var(--bg-elev);
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .copy-btn:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
+  .copy-btn.copied { color: var(--success); border-color: var(--success); }
+  pre {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    line-height: 1.55;
+    color: var(--fg);
+  }
+</style>
+
+<script is:inline>
+  (function () {
+    document.addEventListener('click', (e) => {
+      const target = e.target instanceof Element ? e.target.closest('.copy-btn') : null;
+      if (!target) return;
+      const explicit = target.getAttribute('data-copy');
+      const pre = target.parentElement && target.parentElement.querySelector('pre');
+      const text = explicit && explicit.length > 0 ? explicit : (pre ? pre.innerText : '');
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        target.classList.add('copied');
+        const label = target.querySelector('.copy-label');
+        const orig = label ? label.textContent : 'Copy';
+        if (label) label.textContent = 'Copied';
+        setTimeout(() => {
+          target.classList.remove('copied');
+          if (label) label.textContent = orig || 'Copy';
+        }, 1400);
+      });
+    });
+  })();
+</script>

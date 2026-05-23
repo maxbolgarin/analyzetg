@@ -1,0 +1,69 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Hero from '../components/Hero.astro';
+import CommandsGrid from '../components/CommandsGrid.astro';
+import SourcesGrid from '../components/SourcesGrid.astro';
+import WhyUnread from '../components/WhyUnread.astro';
+import Quickstart from '../components/Quickstart.astro';
+import ProvidersTable from '../components/ProvidersTable.astro';
+import FAQ from '../components/FAQ.astro';
+import {
+  SITE_NAME,
+  SITE_URL,
+  BASE,
+  AUTHOR,
+  AUTHOR_URL,
+  GH_URL,
+  PYPI_URL,
+  LICENSE_URL,
+  VERSION,
+} from '../consts';
+import { faqItems } from '../faqData';
+
+const title = 'unread — Telegram, YouTube & web summarizer CLI with citations';
+const description =
+  'Open-source local CLI that turns Telegram chats, YouTube videos, and web pages into Markdown reports with citations. OpenAI, Anthropic, Gemini, OpenRouter, or local LLMs.';
+
+const homeUrl = new URL(`${BASE}/`, SITE_URL).toString();
+
+const softwareSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: SITE_NAME,
+  applicationCategory: 'DeveloperApplication',
+  applicationSubCategory: 'CommandLineTool',
+  operatingSystem: 'macOS, Linux, Windows',
+  description,
+  url: homeUrl,
+  downloadUrl: PYPI_URL,
+  softwareVersion: VERSION,
+  license: LICENSE_URL,
+  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  author: { '@type': 'Person', name: AUTHOR, url: AUTHOR_URL },
+  sameAs: [GH_URL, PYPI_URL],
+};
+
+const faqSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'FAQPage',
+  mainEntity: faqItems.map((item) => ({
+    '@type': 'Question',
+    name: item.q,
+    acceptedAnswer: { '@type': 'Answer', text: item.aText },
+  })),
+};
+---
+<BaseLayout
+  title={title}
+  description={description}
+  path="/"
+  jsonLd={[softwareSchema, faqSchema]}
+>
+  <Hero />
+  <CommandsGrid />
+  <SourcesGrid />
+  <WhyUnread />
+  <Quickstart />
+  <ProvidersTable />
+  <FAQ />
+</BaseLayout>

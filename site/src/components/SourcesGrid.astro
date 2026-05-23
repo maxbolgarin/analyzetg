@@ -1,0 +1,138 @@
+---
+const sources = [
+  {
+    name: 'Telegram',
+    tagline: '@username, links, channels, forums, comments',
+    body: 'Chats, channels, topic-threaded forums, channel comments. Voice notes transcribed. Photos described. Folders batched. Citations are clickable t.me links — one click opens the message.',
+    example: 'unread @ru_dev_news --last-days 7',
+    accent: '#37afe1',
+  },
+  {
+    name: 'YouTube',
+    tagline: 'Captions when present, Whisper when not',
+    body: 'Every citation becomes a t=SECONDS deep link that jumps to the moment. Transcripts cached, so re-asking only costs the answer call.',
+    example: 'unread https://youtu.be/dQw4w9WgXcQ',
+    accent: '#ff4d4d',
+  },
+  {
+    name: 'Web pages',
+    tagline: 'Articles, blog posts, anything HTML',
+    body: 'Runs trafilatura for clean extraction, then your LLM. Paragraph-level citations. Cached locally so follow-up Asks are free.',
+    example: 'unread "https://paulgraham.com/greatwork.html"',
+    accent: '#7dd3fc',
+  },
+  {
+    name: 'Local files',
+    tagline: 'PDF, DOCX, MD, audio, video, images',
+    body: 'Same <ref> shape, same citations format. Audio and video transcribed locally. Images described by vision models.',
+    example: 'unread ./meeting.mp3',
+    accent: '#a78bfa',
+  },
+];
+---
+<section class="sources">
+  <div class="container">
+    <header class="section-head">
+      <p class="kicker">Sources</p>
+      <h2>One <code>&lt;ref&gt;</code> shape, four worlds.</h2>
+      <p class="sub">
+        Pass a Telegram handle, a URL, or a file path. Same syntax, same caches, same citations. Read once, refer forever.
+      </p>
+    </header>
+    <div class="grid">
+      {sources.map((s) => (
+        <article class="card">
+          <div class="badge" style={`--badge:${s.accent}`}>{s.name}</div>
+          <h3>{s.tagline}</h3>
+          <p>{s.body}</p>
+          <code class="example">{s.example}</code>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .sources { padding: 4rem 0; background: var(--bg-elev); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .section-head { margin-bottom: 2.5rem; max-width: 60ch; }
+  .kicker {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.5rem;
+  }
+  .section-head h2 {
+    font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.6rem;
+    font-weight: 700;
+  }
+  .section-head h2 code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    padding: 0.1em 0.4em;
+    border-radius: 6px;
+    font-size: 0.85em;
+    color: var(--accent);
+  }
+  .section-head .sub {
+    color: var(--fg-muted);
+    font-size: 1.02rem;
+    margin: 0;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.3rem;
+    display: grid;
+    gap: 0.7rem;
+    transition: border-color 0.18s ease, transform 0.18s ease;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .badge {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.6rem;
+    background: color-mix(in oklab, var(--badge) 14%, transparent);
+    color: var(--badge);
+    border: 1px solid color-mix(in oklab, var(--badge) 35%, transparent);
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  .card h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--fg);
+    line-height: 1.35;
+  }
+  .card p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.93rem;
+    line-height: 1.55;
+  }
+  .example {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.4rem 0.65rem;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--fg);
+    overflow-x: auto;
+  }
+</style>

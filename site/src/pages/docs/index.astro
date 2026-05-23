@@ -1,0 +1,125 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { BASE, SITE_URL } from '../../consts';
+
+const title = 'Documentation · unread';
+const description =
+  'Install, configure, and run unread — the local-first CLI for summarizing Telegram chats, YouTube videos, web pages, and files with any LLM.';
+
+const cards = [
+  {
+    href: `${BASE}/docs/install/`,
+    title: 'Install',
+    body: 'One-line install via uv. Wizard, ffmpeg, dev install, file locations.',
+  },
+  {
+    href: `${BASE}/docs/sources/`,
+    title: 'Sources',
+    body: 'Every <ref> shape: Telegram, YouTube, web pages, local files.',
+  },
+  {
+    href: `${BASE}/docs/reference/`,
+    title: 'CLI reference',
+    body: 'Every subcommand and flag: analyze, ask, dump, doctor, watch, stats.',
+  },
+  {
+    href: `${BASE}/docs/configuration/`,
+    title: 'Configuration',
+    body: 'config.toml, language settings, cost guardrails, two-layer cache.',
+  },
+  {
+    href: `${BASE}/docs/security/`,
+    title: 'Security & privacy',
+    body: 'Local-first storage, three credential backends, PII redaction.',
+  },
+];
+
+const breadcrumb = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: 'unread', item: new URL(`${BASE}/`, SITE_URL).toString() },
+    { '@type': 'ListItem', position: 2, name: 'Docs', item: new URL(`${BASE}/docs/`, SITE_URL).toString() },
+  ],
+};
+---
+<BaseLayout
+  title={title}
+  description={description}
+  path="/docs/"
+  jsonLd={breadcrumb}
+>
+  <div class="container docs-index">
+    <header>
+      <p class="kicker">Documentation</p>
+      <h1>Everything about unread.</h1>
+      <p class="lead">Five short guides. Start with <a href={`${BASE}/docs/install/`}>Install</a>, run <code>unread doctor</code>, then explore the rest.</p>
+    </header>
+    <div class="grid">
+      {cards.map((c) => (
+        <a class="card" href={c.href}>
+          <h2>{c.title}</h2>
+          <p>{c.body}</p>
+          <span class="arrow">Read →</span>
+        </a>
+      ))}
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .docs-index {
+    padding: 4rem 0 2rem;
+  }
+  .kicker {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.5rem;
+  }
+  h1 {
+    font-size: clamp(2rem, 4vw, 2.8rem);
+    letter-spacing: -0.02em;
+    margin: 0 0 0.8rem;
+    font-weight: 800;
+  }
+  .lead {
+    color: var(--fg-muted);
+    max-width: 60ch;
+    font-size: 1.05rem;
+    margin: 0 0 2.5rem;
+  }
+  .lead code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    color: var(--fg);
+    font-size: 0.88em;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.3rem 1.4rem;
+    display: block;
+    transition: border-color 0.18s, transform 0.18s;
+    color: inherit;
+  }
+  .card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    color: inherit;
+  }
+  .card h2 { margin: 0 0 0.4rem; font-size: 1.15rem; font-weight: 700; color: var(--fg); }
+  .card p { margin: 0 0 0.6rem; color: var(--fg-muted); font-size: 0.95rem; line-height: 1.55; }
+  .arrow { color: var(--accent); font-weight: 600; font-size: 0.88rem; }
+</style>

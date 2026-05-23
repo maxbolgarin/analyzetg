@@ -1,0 +1,16 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+const mods = import.meta.glob('../../../../docs/reference.md', { eager: true });
+const post = Object.values(mods)[0] as any;
+const { Content, headings } = post;
+---
+<DocsLayout
+  title="CLI command reference · unread"
+  description="Every unread subcommand and flag: analyze, ask, dump, doctor, watch, security, cache, stats — with examples."
+  path="/docs/reference/"
+  slug="reference"
+  heading="CLI reference"
+  headings={headings}
+>
+  <Content />
+</DocsLayout>

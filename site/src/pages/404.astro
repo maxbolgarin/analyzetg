@@ -1,0 +1,44 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { BASE } from '../consts';
+---
+<BaseLayout
+  title="Not found · unread"
+  description="The page you were looking for doesn't exist."
+  path="/404/"
+  noindex
+>
+  <section class="nf">
+    <div class="container">
+      <p class="code">404</p>
+      <h1>That route is unread — and not in the good way.</h1>
+      <p class="lead">The page you were looking for doesn't exist. Try one of these:</p>
+      <div class="links">
+        <a class="btn btn-primary" href={`${BASE}/`}>Home</a>
+        <a class="btn btn-ghost" href={`${BASE}/docs/`}>Docs</a>
+        <a class="btn btn-ghost" href={`${BASE}/docs/install/`}>Install</a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .nf { padding: 6rem 0 8rem; text-align: center; }
+  .code {
+    font-family: var(--font-mono);
+    font-size: 5rem;
+    color: var(--accent);
+    margin: 0 0 0.5rem;
+    line-height: 1;
+    font-weight: 700;
+    opacity: 0.6;
+  }
+  h1 {
+    font-size: clamp(1.6rem, 3vw, 2.2rem);
+    letter-spacing: -0.02em;
+    margin: 0 0 0.8rem;
+    font-weight: 700;
+  }
+  .lead { color: var(--fg-muted); margin: 0 0 1.6rem; }
+  .links { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; }
+</style>

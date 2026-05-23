@@ -1,0 +1,128 @@
+---
+const reasons = [
+  {
+    title: 'Local-first.',
+    body: 'SQLite under ~/.unread/. Your messages, embeddings, analyses, and secrets stay on your disk. The only network calls are the ones you asked for.',
+    icon: 'shield',
+  },
+  {
+    title: 'Citations on every claim.',
+    body: 'Each line in every report links back to a message, paragraph, or YouTube timestamp. Verify a fact without re-opening the source.',
+    icon: 'quote',
+  },
+  {
+    title: 'Bring any model.',
+    body: 'OpenAI, Anthropic, Gemini, OpenRouter, or local Ollama / LM Studio / vLLM. Switch with one command — caches and analyses persist.',
+    icon: 'plug',
+  },
+  {
+    title: 'Cost-aware by default.',
+    body: '--max-cost aborts before overspend. --dry-run estimates without calling. unread stats shows lifetime spend by chat, preset, and day.',
+    icon: 'coin',
+  },
+  {
+    title: 'PII redaction built in.',
+    body: '--redact scrubs phones, emails, IBANs, and Luhn-valid card numbers from the API payload. Originals stay in your local DB and saved reports.',
+    icon: 'mask',
+  },
+  {
+    title: 'Multi-language.',
+    body: 'Source language and report language are independent. Russian chat → English digest. English file → Spanish summary. Anything → anything.',
+    icon: 'globe',
+  },
+];
+
+const icons: Record<string, string> = {
+  shield: '<path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>',
+  quote: '<path d="M7 7h4v4H7zM7 13h4v4H7zM15 7h4v4h-4zM15 13h4v4h-4z"/>',
+  plug: '<path d="M9 7v6a3 3 0 0 0 6 0V7M9 7h6M12 16v4"/>',
+  coin: '<circle cx="12" cy="12" r="8"/><path d="M9 12h6M9 9h6M9 15h6"/>',
+  mask: '<path d="M3 12c0-3 4-5 9-5s9 2 9 5-4 6-9 6-9-3-9-6z"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+};
+---
+<section class="why">
+  <div class="container">
+    <header class="section-head">
+      <p class="kicker">Why unread</p>
+      <h2>Built for people who care where their data goes.</h2>
+      <p class="sub">
+        Boring, real-world properties. The kind that matter on day 30, not just day 1.
+      </p>
+    </header>
+    <div class="grid">
+      {reasons.map((r) => (
+        <article class="card">
+          <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" set:html={icons[r.icon]} />
+          </div>
+          <h3>{r.title}</h3>
+          <p>{r.body}</p>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .why { padding: 4rem 0; }
+  .section-head { margin-bottom: 2.5rem; max-width: 62ch; }
+  .kicker {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.5rem;
+  }
+  .section-head h2 {
+    font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.6rem;
+    font-weight: 700;
+  }
+  .section-head .sub {
+    color: var(--fg-muted);
+    font-size: 1.02rem;
+    margin: 0;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.3rem;
+    transition: border-color 0.18s ease, transform 0.18s ease;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    margin-bottom: 0.8rem;
+  }
+  .card h3 {
+    margin: 0 0 0.4rem;
+    font-size: 1.02rem;
+    font-weight: 700;
+    color: var(--fg);
+  }
+  .card p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.93rem;
+    line-height: 1.55;
+  }
+</style>

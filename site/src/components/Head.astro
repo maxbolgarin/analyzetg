@@ -1,0 +1,56 @@
+---
+import { SITE_URL, BASE, SITE_NAME } from '../consts';
+
+interface Props {
+  title: string;
+  description: string;
+  /** Path relative to base, e.g. "/", "/docs/install/" — leading slash required */
+  path: string;
+  ogImage?: string;
+  jsonLd?: object | object[];
+  noindex?: boolean;
+}
+
+const { title, description, path, ogImage, jsonLd, noindex = false } = Astro.props;
+
+const canonical = new URL(`${BASE}${path}`.replace(/\/+/g, '/'), SITE_URL).toString();
+const ogImageUrl = new URL(ogImage ?? `${BASE}/og-image.png`, SITE_URL).toString();
+const jsonLdArray = jsonLd ? (Array.isArray(jsonLd) ? jsonLd : [jsonLd]) : [];
+---
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonical} />
+{noindex ? <meta name="robots" content="noindex,nofollow" /> : <meta name="robots" content="index,follow,max-image-preview:large" />}
+<meta name="theme-color" content="#0a0d12" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+<meta name="color-scheme" content="dark light" />
+
+<link rel="icon" type="image/svg+xml" href={`${BASE}/favicon.svg`} />
+<link rel="icon" type="image/png" sizes="32x32" href={`${BASE}/favicon-32.png`} />
+<link rel="apple-touch-icon" href={`${BASE}/apple-touch-icon.png`} />
+<link rel="sitemap" href={`${BASE}/sitemap-index.xml`} />
+
+<link rel="preconnect" href="https://github.com" crossorigin />
+
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content={SITE_NAME} />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonical} />
+<meta property="og:image" content={ogImageUrl} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:locale" content="en_US" />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImageUrl} />
+
+<meta name="generator" content={Astro.generator} />
+
+{jsonLdArray.map((obj) => (
+  <script is:inline type="application/ld+json" set:html={JSON.stringify(obj)} />
+))}

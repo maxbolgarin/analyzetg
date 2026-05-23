@@ -1,0 +1,88 @@
+---
+import { faqItems } from '../faqData';
+---
+<section id="faq" class="faq">
+  <div class="container">
+    <header class="section-head">
+      <p class="kicker">FAQ</p>
+      <h2>Honest answers.</h2>
+    </header>
+    <div class="faq-list">
+      {faqItems.map((item) => (
+        <details>
+          <summary>
+            <span>{item.q}</span>
+            <svg class="chev" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </summary>
+          <div class="answer" set:html={item.aHtml} />
+        </details>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .faq { padding: 4rem 0; }
+  .section-head { margin-bottom: 2rem; max-width: 60ch; }
+  .kicker {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.5rem;
+  }
+  .section-head h2 {
+    font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0;
+    font-weight: 700;
+  }
+  .faq-list {
+    display: grid;
+    gap: 0.6rem;
+    max-width: 780px;
+  }
+  details {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color 0.18s ease;
+  }
+  details[open] { border-color: var(--accent); }
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.1rem;
+    cursor: pointer;
+    color: var(--fg);
+    font-weight: 600;
+    font-size: 0.98rem;
+    list-style: none;
+    user-select: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  .chev { color: var(--fg-muted); transition: transform 0.2s ease; flex-shrink: 0; }
+  details[open] .chev { transform: rotate(180deg); color: var(--accent); }
+  .answer {
+    padding: 0 1.1rem 1.1rem;
+    color: var(--fg-muted);
+    font-size: 0.95rem;
+    line-height: 1.65;
+  }
+  .answer :global(code) {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.88em;
+    color: var(--fg);
+  }
+  .answer :global(a) { color: var(--accent); }
+</style>

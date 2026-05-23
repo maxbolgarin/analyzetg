@@ -1,0 +1,114 @@
+---
+const commands = [
+  {
+    cmd: 'unread <ref>',
+    name: 'Analyze',
+    desc: 'Map-reduce any source into a Markdown report. Every claim links back to its message, paragraph, or timestamp.',
+  },
+  {
+    cmd: 'unread ask <ref> "Q"',
+    name: 'Ask',
+    desc: 'One-shot Q&A over the same source — with citations. Follow-up questions are one keystroke away.',
+  },
+  {
+    cmd: 'unread dump <ref>',
+    name: 'Dump',
+    desc: 'Save the verbatim original — chat history, transcript, article. No LLM call, no cost.',
+  },
+  {
+    cmd: 'unread doctor',
+    name: 'Doctor',
+    desc: 'Preflight check: API keys, ffmpeg, DB, pricing, full-disk-encryption warnings. Run this first when something looks off.',
+  },
+];
+---
+<section class="commands">
+  <div class="container">
+    <header class="section-head">
+      <p class="kicker">The CLI</p>
+      <h2>Four verbs. Anything as input.</h2>
+      <p class="sub">
+        Same flags, same caches, same citations format. Learn one, use them all.
+      </p>
+    </header>
+    <div class="grid">
+      {commands.map((c) => (
+        <article class="card">
+          <div class="card-cmd"><span class="prompt">$</span> <code>{c.cmd}</code></div>
+          <h3>{c.name}</h3>
+          <p>{c.desc}</p>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .commands { padding: 4rem 0; }
+  .section-head { margin-bottom: 2.5rem; max-width: 60ch; }
+  .kicker {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.5rem;
+  }
+  .section-head h2 {
+    font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.6rem;
+    font-weight: 700;
+  }
+  .section-head .sub {
+    color: var(--fg-muted);
+    font-size: 1.02rem;
+    margin: 0;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.2rem 1.3rem 1.3rem;
+    transition: border-color 0.18s ease, transform 0.18s ease;
+  }
+  .card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+  }
+  .card-cmd {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.45rem 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 0.83rem;
+    color: var(--fg);
+    margin-bottom: 0.9rem;
+    overflow-x: auto;
+  }
+  .prompt { color: var(--accent); }
+  .card h3 {
+    margin: 0 0 0.35rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  .card p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.93rem;
+    line-height: 1.55;
+  }
+</style>

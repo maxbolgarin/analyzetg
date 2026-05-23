@@ -1,0 +1,64 @@
+---
+interface Props {
+  title?: string;
+}
+const { title = 'unread' } = Astro.props;
+---
+<div class="term">
+  <div class="term-bar" aria-hidden="true">
+    <span class="dot dot-red"></span>
+    <span class="dot dot-yel"></span>
+    <span class="dot dot-grn"></span>
+    <span class="term-title">{title}</span>
+  </div>
+  <pre class="term-body"><slot /></pre>
+</div>
+
+<style>
+  .term {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.55rem 0.9rem;
+    background: linear-gradient(180deg, color-mix(in oklab, var(--bg-elev) 90%, var(--bg)), var(--bg-elev));
+    border-bottom: 1px solid var(--border);
+  }
+  .dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    display: inline-block;
+  }
+  .dot-red { background: #ff5f56; }
+  .dot-yel { background: #ffbd2e; }
+  .dot-grn { background: #27c93f; }
+  .term-title {
+    margin-left: auto;
+    color: var(--fg-dim);
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
+  }
+  .term-body {
+    margin: 0;
+    padding: 1.1rem 1.2rem 1.3rem;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-x: auto;
+    background: var(--bg-code);
+  }
+  :global(.term-body .p)  { color: var(--accent); }
+  :global(.term-body .c)  { color: var(--fg-dim); }
+  :global(.term-body .ok) { color: var(--success); }
+  :global(.term-body .w)  { color: var(--warn); }
+  :global(.term-body .a)  { color: var(--accent); }
+  :global(.term-body .b)  { color: var(--fg); font-weight: 700; }
+  :global(.term-body .m)  { color: var(--fg-muted); }
+</style>

@@ -1,0 +1,16 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+const mods = import.meta.glob('../../../../docs/install.md', { eager: true });
+const post = Object.values(mods)[0] as any;
+const { Content, headings } = post;
+---
+<DocsLayout
+  title="Install unread — macOS, Linux, Windows"
+  description="One-line install via uv tool install unread. Setup wizard, ffmpeg dependency, dev install, and where files live."
+  path="/docs/install/"
+  slug="install"
+  heading="Install"
+  headings={headings}
+>
+  <Content />
+</DocsLayout>
