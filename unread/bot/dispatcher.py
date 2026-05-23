@@ -23,6 +23,7 @@ from telethon.tl.types import (
     Document,
     MessageMediaDocument,
     MessageMediaPhoto,
+    MessageMediaWebPage,
 )
 
 # URL grabber. Intentionally permissive — we re-validate with the
@@ -44,7 +45,13 @@ def classify(event: events.NewMessage.Event) -> tuple[str, dict[str, Any]]:
     """Single-level classifier. Recurses once for forwards."""
     msg = event.message
 
-    if msg.media is not None:
+    # `MessageMediaWebPage` is Telegram's auto-generated link preview
+    # that fires whenever a user sends a URL — every YouTube / web URL
+    # message has one. We MUST NOT treat it as a file attachment;
+    # the URL itself lives in `msg.message` and gets the proper
+    # classifier branch below. Real downloadable media (documents,
+    # photos) keep the file branch.
+    if msg.media is not None and not isinstance(msg.media, MessageMediaWebPage):
         return ("file", _classify_media(msg.media))
 
     text = (msg.message or "").strip()

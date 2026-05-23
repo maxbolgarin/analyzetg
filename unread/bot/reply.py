@@ -1,12 +1,19 @@
 """Bot → Telegram reply helpers.
 
-Locates the report that the analyze pipeline just wrote, uploads it as
-a TG document, and stamps a one-line caption with token + cost totals
-pulled from `usage_log`.
+Locates the report that the analyze pipeline just wrote, then:
+
+1. Replies with the TL;DR section as a properly-formatted text message
+   (renders natively on every Telegram client — phone, desktop, web).
+2. Uploads the full report as a PDF (preferred — markdown attachments
+   open as raw text on phones) or falls back to the .md file when the
+   optional `[bot]` extras aren't installed.
+3. Stamps a one-line caption on the document with elapsed time and
+   cost totals from `usage_log`.
 """
 
 from __future__ import annotations
 
+import io
 import time
 from collections.abc import Iterable
 from datetime import datetime
@@ -14,7 +21,9 @@ from pathlib import Path
 
 import structlog
 from telethon import events
+from telethon.tl.types import DocumentAttributeFilename
 
+from unread.bot.extract import extract_tldr
 from unread.config import get_settings
 from unread.core.paths import reports_dir
 from unread.db.repo import open_repo
@@ -174,28 +183,97 @@ async def _upload_with_caption(
     *,
     started: float,
 ) -> None:
-    """Read the saved report, derive a cost caption, and upload."""
+    """Send the TL;DR inline + the full report as PDF (or .md fallback)."""
     elapsed = max(0.0, time.time() - started)
     caption = await _build_caption(started, elapsed)
     try:
-        await event.client.send_file(
-            event.chat_id,
-            file=str(report),
-            caption=caption,
-            reply_to=event.message.id,
-            force_document=True,
-        )
+        md_text = report.read_text(encoding="utf-8")
+    except OSError:
+        log.exception("bot.report_read_failed", report=str(report))
+        await event.reply(f"⚠️ Analysis done but report unreadable. {caption}")
+        return
+
+    # Step 1: TL;DR inline. Phone clients render Telegram MarkdownV1
+    # natively — `**bold**`, `[text](url)` citations, etc. — so the
+    # user sees the summary without downloading anything.
+    await _send_tldr(event, md_text)
+
+    # Step 2: full report as a document. PDF when the optional
+    # `[bot]` extras are present; raw `.md` otherwise so the operator
+    # still gets something even on a minimal install.
+    await _send_full_report(event, report=report, md_text=md_text, caption=caption)
+
+
+async def _send_tldr(event: events.NewMessage.Event, md_text: str) -> None:
+    """Reply with the TL;DR body. No-op when the report has no TL;DR."""
+    tldr = extract_tldr(md_text)
+    if not tldr:
+        return
+    # Telegram caps text messages at 4096 chars. TL;DRs are usually a
+    # paragraph or two (≤1000 chars), but cap defensively so a runaway
+    # LLM output never trips the API.
+    if len(tldr) > 3800:
+        tldr = tldr[:3800].rsplit(" ", 1)[0] + " …"
+    try:
+        await event.reply(f"**TL;DR**\n\n{tldr}", parse_mode="md")
+    except Exception:
+        # Markdown can choke on stray characters in the TL;DR. Retry
+        # as plain text rather than dropping the message entirely.
+        log.warning("bot.tldr_md_failed", exc_info=True)
+        try:
+            await event.reply(f"TL;DR\n\n{tldr}")
+        except Exception:
+            log.exception("bot.tldr_send_failed")
+
+
+async def _send_full_report(
+    event: events.NewMessage.Event,
+    *,
+    report: Path,
+    md_text: str,
+    caption: str,
+) -> None:
+    """Send the full report as PDF (preferred) or .md (fallback)."""
+    from unread.bot import pdf as pdf_helper
+
+    pdf_bytes: bytes | None = None
+    if pdf_helper.is_available():
+        try:
+            pdf_bytes = pdf_helper.markdown_to_pdf_bytes(md_text, title=report.stem)
+        except Exception:
+            # PDF generation can fail on weird CSS or a Pango edge
+            # case — log and fall through to the .md upload so the
+            # user still gets the report.
+            log.exception("bot.pdf_render_failed", report=str(report))
+            pdf_bytes = None
+
+    try:
+        if pdf_bytes is not None:
+            buf = io.BytesIO(pdf_bytes)
+            # Telethon picks the upload filename from the BytesIO
+            # object only when we attach a DocumentAttributeFilename.
+            pdf_name = report.stem + ".pdf"
+            await event.client.send_file(
+                event.chat_id,
+                file=buf,
+                attributes=[DocumentAttributeFilename(file_name=pdf_name)],
+                caption=caption,
+                reply_to=event.message.id,
+                force_document=True,
+            )
+        else:
+            await event.client.send_file(
+                event.chat_id,
+                file=str(report),
+                caption=caption,
+                reply_to=event.message.id,
+                force_document=True,
+            )
     except Exception:
         log.exception("bot.upload_failed", report=str(report))
-        # Fall back to inline text so the user gets *something*. Cap at
-        # 3500 chars to leave headroom under TG's 4096 limit.
-        try:
-            body = report.read_text(encoding="utf-8")
-        except OSError:
-            await event.reply("⚠️ Couldn't read the report file.")
-            return
-        chunk = body[:3500]
-        await event.reply(chunk + ("\n…(truncated)" if len(body) > 3500 else ""))
+        # Last-resort: inline text (capped under the 4096 limit).
+        chunk = md_text[:3500]
+        await event.reply(chunk + ("\n…(truncated)" if len(md_text) > 3500 else ""))
 
 
 async def _build_caption(started: float, elapsed: float) -> str:

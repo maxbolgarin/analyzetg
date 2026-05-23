@@ -17,6 +17,7 @@ from unread.core.paths import (
     default_env_path,
     default_media_dir,
     default_session_path,
+    unread_home,
 )
 
 
@@ -577,6 +578,36 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 _DOTENV_VALUES: dict[str, str] = {}
 
 
+def _resolve_bot_env_path() -> Path | None:
+    """Return the `.env.bot` path to use, or None.
+
+    Resolution order (first hit wins):
+
+    1. ``UNREAD_BOT_ENV_FILE`` env var — explicit override. Returned
+       even when the file is missing so the user sees a clear
+       warning from `_load_dotenv` instead of a silent skip.
+    2. ``unread_home() / ".env.bot"`` — canonical location, matches
+       the way `.env` lives at ``~/.unread/.env``.
+
+    No CWD lookup here on purpose: a stray `./.env.bot` in some
+    unrelated directory must never silently shadow real settings,
+    same doctrine as `./config.toml`. `cmd_bot_run` ALONE opts into
+    CWD discovery (by pre-setting `UNREAD_BOT_ENV_FILE` before any
+    settings load), so the `unread bot run` workflow stays
+    convenient without polluting every other command.
+
+    Returning None means "no overlay" — `.env.bot` loading is opt-in
+    by file presence; commands other than the bot never need it.
+    """
+    explicit = os.environ.get("UNREAD_BOT_ENV_FILE")
+    if explicit:
+        return Path(explicit)
+    canonical = unread_home() / ".env.bot"
+    if canonical.exists():
+        return canonical
+    return None
+
+
 def dotenv_value(name: str) -> str | None:
     """Return ``name`` from the cached .env overlay, or ``None`` if absent.
 
@@ -626,6 +657,23 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
     # Coerce None → {} defensively for tests that monkeypatch the loader.
     global _DOTENV_VALUES
     _DOTENV_VALUES = _load_dotenv(default_env_path()) or {}
+
+    # Optional bot-specific env file. Loaded as an overlay on top of
+    # `.env` so a single `~/.unread/.env.bot` (or a CWD `.env.bot`
+    # during dev) can keep `UNREAD_BOT_*` + bot-relevant API keys
+    # out of the general `.env`. Order of preference (first match
+    # wins, no merging across files):
+    #   1. `UNREAD_BOT_ENV_FILE` env var (explicit path)
+    #   2. `~/.unread/.env.bot` (canonical location, matches `.env`)
+    #   3. `./.env.bot` (CWD — convenient for `unread bot run` in a
+    #      project checkout, ignored when absent)
+    # Shell env still wins over the merged overlay (same precedence as
+    # `.env` itself), so a `docker run -e` flag always beats the file.
+    bot_env_path = _resolve_bot_env_path()
+    if bot_env_path is not None:
+        bot_overlay = _load_dotenv(bot_env_path) or {}
+        if bot_overlay:
+            _DOTENV_VALUES.update(bot_overlay)
 
     def _env(name: str) -> str | None:
         # Shell env wins over the .env overlay — same precedence as the

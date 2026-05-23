@@ -43,7 +43,7 @@ async def start_upload(event: events.NewMessage.Event, *, app: BotApp) -> None:
     chat_state = app._chat_state.setdefault(event.chat_id, {})
     chat_state["pending_session_upload"] = True
     await event.reply(
-        "Send your Telethon `session.sqlite` as a *document* "
+        "Send your Telethon `session.sqlite` as a **document** "
         "(not photo / not voice). I'll validate it before installing.\n\n"
         "`/cancel` to abort.",
         parse_mode="md",
@@ -65,7 +65,14 @@ async def handle_uploaded_file(event: events.NewMessage.Event, *, app: BotApp) -
     chat_state = app._chat_state.setdefault(event.chat_id, {})
     chat_state["pending_session_upload"] = False
     s = get_settings()
-    target = Path(s.telegram.session_path)
+    # Telethon's SQLiteSession appends `.session` to the path you give
+    # it, so the actual on-disk file the CLI's `build_client` reads is
+    # `<session_path>.session`. If we wrote the upload to the bare
+    # name, `build_client` would open an empty new session file beside
+    # it. Normalize once here so the install matches what every reader
+    # expects, regardless of whether the operator's config has the
+    # `.session` suffix or not.
+    target = _normalized_session_path(s.telegram.session_path)
 
     name = _name_of_attachment(event)
     size = _size_of_attachment(event)
@@ -98,15 +105,18 @@ async def handle_uploaded_file(event: events.NewMessage.Event, *, app: BotApp) -
 
         # Combined validate + owner-id probe: must be authorized, AND
         # we want the user_id baked into the session so we can refresh
-        # the allowlist after install.
-        from unread.bot.app import _probe_session_owner_id
-
-        derived_owner = await _probe_session_owner_id(Path(downloaded), s)
+        # the allowlist after install. Probes the candidate file
+        # directly (not through build_client) because we need to point
+        # Telethon at the staged path, not the configured one.
+        derived_owner = await _probe_candidate_owner_id(Path(downloaded), s)
         if derived_owner is None:
             await event.reply(
-                "⚠️ That session file isn't authorized (or didn't load). "
-                "Re-export it on the host that's already logged in:\n"
-                "`cp ~/.unread/storage/session.sqlite ./out.sqlite`"
+                "⚠️ That session file isn't authorized (or didn't load).\n\n"
+                "Re-export it on a host that's already logged in: Telethon "
+                "stores it as `session.sqlite.session` (with the `.session` "
+                "suffix). On your laptop, copy the file shown by\n"
+                "`ls ~/.unread/storage/session.sqlite.session`\n"
+                "and send THAT file back here as a document."
             )
             return
 
@@ -136,6 +146,52 @@ async def handle_uploaded_file(event: events.NewMessage.Event, *, app: BotApp) -
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _normalized_session_path(configured: Path) -> Path:
+    """Return the actual on-disk filename Telethon will read for `configured`.
+
+    Telethon's `SQLiteSession` constructor appends `.session` to the
+    name you pass unless it's already there. So a config like
+    `session.sqlite` (the project default) results in `session.sqlite.session`
+    on disk. We normalize once so the upload destination matches what
+    the next `build_client()` call will look for.
+    """
+    s = str(configured)
+    return Path(s if s.endswith(".session") else s + ".session")
+
+
+async def _probe_candidate_owner_id(candidate: Path, settings) -> int | None:
+    """Open `candidate` as a Telethon session and return the owner's user_id.
+
+    Returns None on missing / empty / unauthorized / any error.
+    Specific to the upload validator — `unread.bot.app._probe_session_owner_id`
+    can't be reused here because it goes through `build_client(settings)`,
+    which would open the *configured* path, not our staged candidate.
+    """
+    from telethon import TelegramClient
+
+    if not candidate.exists() or candidate.stat().st_size == 0:
+        return None
+    client = TelegramClient(
+        str(candidate),
+        api_id=settings.telegram.api_id,
+        api_hash=settings.telegram.api_hash,
+    )
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return None
+        me = await client.get_me()
+        if me is None or not getattr(me, "id", 0):
+            return None
+        return int(me.id)
+    except Exception:
+        log.exception("bot.session.candidate_probe_failed")
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            await client.disconnect()
 
 
 def _name_of_attachment(event: events.NewMessage.Event) -> str:

@@ -17,12 +17,14 @@ import contextlib
 from pathlib import Path
 
 import structlog
+from rich.console import Console
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 from unread.config import Settings
 
 log = structlog.get_logger(__name__)
+console = Console()
 
 
 class BotApp:
@@ -64,26 +66,56 @@ class BotApp:
     # ------------------------------------------------------------------
 
     async def run_forever(self) -> None:
-        """Start the bot client, resolve the allowlist, run until SIGINT."""
+        """Start the bot client, resolve the allowlist, run until SIGINT.
+
+        User-visible status uses `console.print` (always shown, even
+        at the default "normal" log mode which filters INFO). The
+        parallel `log.info` calls survive for `-v / --verbose` debug
+        traces.
+        """
+        console.print("[grey70]→ starting Telegram bot client…[/]")
+        log.info("bot.startup.begin", owner_id_from_env=self.settings.bot.owner_id)
         await self._start_bot_client()
+        log.info("bot.startup.bot_client_ready")
+
+        console.print("[grey70]→ checking your Telegram user session…[/]")
+        log.info("bot.startup.verifying_user_session")
         await self._verify_user_session()
+        log.info(
+            "bot.startup.user_session_done",
+            user_session_ready=self.user_session_ready,
+            owner_id=self.owner_id,
+        )
+
         if self.owner_id == 0:
-            # No env var AND no usable session — refuse to wire
-            # handlers. Without an allowlist the first message would
-            # establish trust-on-first-use; we never want that for a
-            # token that could leak.
-            log.error("bot.no_owner_allowlist")
-            raise RuntimeError(
-                "Bot has no owner allowlist: set UNREAD_BOT_OWNER_ID or "
-                "mount/upload an authorized user session before starting."
+            console.print(
+                "[red]Bot has no owner allowlist.[/] Set UNREAD_BOT_OWNER_ID "
+                "or mount/upload an authorized user session before starting."
             )
+            log.error("bot.no_owner_allowlist")
+            raise RuntimeError("no owner allowlist")
         self._wire_handlers()
+        session_state = (
+            "[green]ready[/]"
+            if self.user_session_ready
+            else "[yellow]missing[/] — TG-chat analysis disabled until /upload_session"
+        )
+        console.print(
+            f"[green]✓ bot ready[/] · owner=[cyan]{self.owner_id}[/]"
+            f" · session={session_state}"
+            f" · concurrency={self.settings.bot.concurrency}"
+        )
+        console.print("[grey70]Listening for messages. Ctrl-C to stop.[/]")
         log.info(
             "bot.ready",
             owner_id=self.owner_id,
             user_session_ready=self.user_session_ready,
             concurrency=self.settings.bot.concurrency,
         )
+        # PDF availability probe deferred to first request — it spawns
+        # a subprocess that on a misconfigured macOS Pango can take
+        # ~10s. Keeping it off the startup path means the bot is
+        # accepting messages as soon as the `bot ready` line appears.
         try:
             assert self.bot_client is not None
             await self.bot_client.run_until_disconnected()
@@ -122,19 +154,30 @@ class BotApp:
           disagrees with the session is logged as a warning; the
           session wins.
 
-        Does NOT keep the client connected.
+        Uses `unread.tg.client.build_client` so the bot picks up the
+        same session the CLI uses regardless of backend (on-disk
+        SQLite, system keychain, or passphrase-encrypted StringSession
+        in the secrets DB). Does NOT keep the client connected.
         """
-        path = self.settings.telegram.session_path
-        if not path.exists():
+        if not _has_session_blob(self.settings):
             log.warning(
                 "bot.user_session.missing",
-                path=str(path),
-                hint="send /upload_session via Telegram or SCP the file in",
+                session_path=str(self.settings.telegram.session_path),
+                hint=(
+                    "no session file or DB blob found — send /upload_session via "
+                    "Telegram, or SCP your existing session into "
+                    f"{self.settings.telegram.session_path}.session "
+                    "(Telethon appends `.session` to the path)."
+                ),
             )
             return
-        derived = await _probe_session_owner_id(path, self.settings)
+        derived = await _probe_session_owner_id(self.settings)
         if derived is None:
-            log.warning("bot.user_session.unauthorized", path=str(path))
+            log.warning(
+                "bot.user_session.unauthorized",
+                session_path=str(self.settings.telegram.session_path),
+                hint="session blob exists but isn't authorized — re-export from a logged-in host.",
+            )
             return
         self.user_session_ready = True
         if self.owner_id and self.owner_id != derived:
@@ -230,6 +273,15 @@ class BotApp:
             try:
                 await self._run_analysis_handler(event, kind, payload)
             except Exception as e:
+                # `typer.Exit(0)` is a graceful "nothing to do" bail
+                # from inside the analyze pipeline (e.g. "no unread
+                # messages since your read marker"). Handlers that
+                # know about it surface a friendly progress-message
+                # edit; the outer catch here intentionally swallows
+                # it without a "⚠️ Exit: 0" reply that would confuse
+                # the user.
+                if _is_clean_exit(e):
+                    return
                 log.exception("bot.handler_failed", kind=kind)
                 await _safe_reply(event, f"⚠️ {type(e).__name__}: {e}")
 
@@ -271,34 +323,114 @@ class BotApp:
 # ----------------------------------------------------------------------
 
 
-async def _probe_session_owner_id(session_path: Path, settings: Settings) -> int | None:
-    """Open a Telethon session, return `me.id` iff authorized, else None.
+def _has_session_blob(settings: Settings) -> bool:
+    """Cheap, synchronous check: is there any plausible session source?
 
-    Combines the authorization check with the owner-ID derivation so
-    we only pay one connect/disconnect cycle. Always disconnects
-    before returning so the SQLite file handle releases.
+    Used by the startup gate AND `_verify_user_session` so the bot
+    can decide before paying a network round-trip whether there's
+    something for `build_client()` to load. Three branches mirror
+    `unread.tg.client.build_client`:
+
+    1. `db` / `keychain` backend → Telethon's SQLiteSession lives on
+       disk. Telethon appends `.session` to the path you give it, so
+       the actual file is `<session_path>.session`; older saves and
+       the `default_session_path()` constant both write the bare
+       name, so we accept either form.
+    2. `passphrase` backend → session string lives in
+       `data.sqlite::secrets` as `telegram.session_string`.
     """
-    client = TelegramClient(
-        str(session_path),
-        api_id=settings.telegram.api_id,
-        api_hash=settings.telegram.api_hash,
-    )
+    p = Path(settings.telegram.session_path)
+    if p.exists() or Path(str(p) + ".session").exists():
+        return True
     try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            return None
-        me = await client.get_me()
-        # Telethon's get_me() can return None on a degenerate session
-        # (e.g. mid-revocation). Treat that the same as unauthorized.
-        if me is None or not getattr(me, "id", 0):
-            return None
-        return int(me.id)
+        from unread.secrets_backend import (
+            BACKEND_PASSPHRASE,
+            read_active_backend_sync,
+        )
+
+        backend = read_active_backend_sync(settings.storage.data_path)
+        if backend == BACKEND_PASSPHRASE:
+            from unread.db.repo import read_data_db_secrets_sync
+
+            secrets = read_data_db_secrets_sync(settings.storage.data_path)
+            return bool(secrets.get("telegram.session_string"))
+    except Exception:
+        log.exception("bot.session_blob_check_failed")
+    return False
+
+
+async def _probe_session_owner_id(settings: Settings) -> int | None:
+    """Open the user-mode client via build_client(), return `me.id` if authorized.
+
+    Going through `build_client` is what reconciles the bot with the
+    CLI: same backend resolution (db/keychain/passphrase), same path
+    semantics (Telethon's `.session` suffix handling), same secrets
+    DB lookup for the encrypted-session case. If the CLI can log in
+    on this machine, the bot picks up the same session.
+
+    Hard-capped at 15s total — a flaky network or wedged Telegram
+    datacenter shouldn't hang bot startup forever. On timeout the
+    probe behaves like "unauthorized": bot keeps running with
+    `user_session_ready=False`, TG-link handlers reply "send
+    /upload_session", and the operator sees a clear timeout warning.
+
+    Returns the user's Telegram ID on success, None on missing /
+    unauthorized / timeout / any error. Always disconnects.
+    """
+    from unread.tg.client import build_client
+
+    try:
+        client = build_client(settings)
+    except SystemExit:
+        # build_client calls `_exit_missing_telegram_credentials()`
+        # via typer.Exit when api_id/api_hash are missing. The bot's
+        # `cmd_bot_run` gate catches that earlier — but defensively
+        # treat it as "no session" rather than letting it tear down
+        # the bot startup.
+        return None
+    except Exception:
+        log.exception("bot.session.build_client_failed")
+        return None
+    try:
+        return await asyncio.wait_for(_probe_inner(client), timeout=15.0)
+    except TimeoutError:
+        log.warning(
+            "bot.session.probe_timeout",
+            hint="user-session probe took >15s; continuing without TG-chat support",
+        )
+        return None
     except Exception:
         log.exception("bot.session.probe_failed")
         return None
     finally:
         with contextlib.suppress(Exception):
             await client.disconnect()
+
+
+async def _probe_inner(client) -> int | None:
+    """Inner body of `_probe_session_owner_id` — wrapped in `wait_for` above."""
+    await client.connect()
+    if not await client.is_user_authorized():
+        return None
+    me = await client.get_me()
+    if me is None or not getattr(me, "id", 0):
+        return None
+    return int(me.id)
+
+
+def _is_clean_exit(exc: BaseException) -> bool:
+    """True iff `exc` is a `typer.Exit(0)` / `SystemExit(0)` graceful bail.
+
+    Used to suppress the "⚠️ Exit: 0" reply that would otherwise fire
+    when `cmd_analyze*` legitimately exits with no work to do (empty
+    window, already-read chat, etc.). Non-zero exit codes still fall
+    through to the warning path so a real failure stays visible.
+    """
+    import typer as _typer
+
+    if isinstance(exc, _typer.Exit | SystemExit):
+        return getattr(exc, "exit_code", getattr(exc, "code", None)) in (0, None)
+    return False
 
 
 async def _safe_reply(event: events.NewMessage.Event, text: str) -> None:

@@ -19,6 +19,7 @@ import time
 from typing import TYPE_CHECKING
 
 import structlog
+import typer
 from telethon import events
 
 from unread.config import get_settings
@@ -69,6 +70,17 @@ async def handle(
     if (m := _TME_PARSE.match(ref)) is not None and m.group("msg"):
         from_msg = m.group("msg")
 
+    # Window: when the user pinned a specific message via `t.me/.../<msg>`,
+    # let `cmd_analyze` use that as the anchor and walk from there. For
+    # a bare `@chat` / `t.me/chat` ref, the CLI default "since the read
+    # marker" usually produces nothing for bot users (they typically
+    # read chats on their phone before asking the bot to summarize) —
+    # surface the last N days instead, matching the CLI's
+    # `default_lookback_days` setting.
+    last_days: int | None = None
+    if from_msg is None:
+        last_days = s.sync.default_lookback_days
+
     progress = await event.reply(f"⏳ Resolving `{ref}`…")
     try:
         await progress.edit("⏳ Pulling messages…")
@@ -83,7 +95,7 @@ async def handle(
             full_history=False,
             since=None,
             until=None,
-            last_days=None,
+            last_days=last_days,
             last_msgs=None,
             preset=preset or None,
             prompt_file=None,
@@ -104,6 +116,22 @@ async def handle(
         await _upload_latest_tg_report(event, preset=preset, started=started)
         with contextlib.suppress(Exception):
             await progress.delete()
+    except typer.Exit as e:
+        # `cmd_analyze` uses `typer.Exit(0)` to bail gracefully — most
+        # commonly "no unread messages in this chat", but also "nothing
+        # matched the time window". A 0 exit code is not an error; show
+        # a friendly status. Non-zero exits surface as warnings.
+        code = getattr(e, "exit_code", 0)
+        if code == 0:
+            with contextlib.suppress(Exception):
+                await progress.edit(
+                    f"✓ Nothing to analyze in `{ref}` for the requested window. "
+                    "Try a `t.me/<chat>/<msg>` link to anchor on a specific message.",
+                )
+            return
+        log.warning("bot.tg_handler_typer_exit", ref=ref, exit_code=code)
+        with contextlib.suppress(Exception):
+            await progress.edit(f"⚠️ Analyze exited with code {code}.")
     except Exception as e:
         log.exception("bot.tg_handler_failed", ref=ref)
         with contextlib.suppress(Exception):

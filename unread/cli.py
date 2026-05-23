@@ -46,7 +46,9 @@ def _version_callback(value: bool) -> None:
     even on a broken install where `~/.unread/` isn't readable.
     """
     if value:
-        typer.echo(f"unread {__version__}")
+        from unread.util.banner import print_banner
+
+        print_banner(__version__)
         raise typer.Exit()
 
 
