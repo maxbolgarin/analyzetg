@@ -79,10 +79,15 @@ def test_cmd_bot_run_refuses_when_no_owner_and_no_session(monkeypatch, tmp_path)
 
     from unread.bot.commands import cmd_bot_run
 
+    # chdir to an empty tmp dir so the bot's CWD `.env.bot`
+    # auto-discovery doesn't pick up the repo's real `.env.bot` (which
+    # would populate owner_id and let the gate pass).
+    monkeypatch.chdir(tmp_path)
     # Clean creds so other gates pass; force the no-owner / no-session
     # state explicitly.
     monkeypatch.setenv("UNREAD_BOT_TOKEN", "fake-token")
     monkeypatch.delenv("UNREAD_BOT_OWNER_ID", raising=False)
+    monkeypatch.delenv("UNREAD_BOT_ENV_FILE", raising=False)
     # Point telegram.session_path at a guaranteed-missing file.
     monkeypatch.setenv("UNREAD_HOME", str(tmp_path / "fresh"))
 
@@ -93,6 +98,83 @@ def test_cmd_bot_run_refuses_when_no_owner_and_no_session(monkeypatch, tmp_path)
         with pytest.raises(typer.Exit) as excinfo:
             asyncio.run(cmd_bot_run())
         assert excinfo.value.exit_code == 1
+    finally:
+        reset_settings()
+
+
+def test_env_bot_file_overlays_dotenv(monkeypatch, tmp_path):
+    """Values in `.env.bot` flow into Settings via the dotenv overlay.
+
+    The `.env.bot` overlay is loaded ON TOP of `~/.unread/.env` and
+    is consulted by the same `_env()` helper as the rest of the
+    settings chain, so `UNREAD_BOT_TOKEN=...` in `.env.bot` ends up
+    in `settings.bot.token` without any per-key plumbing.
+    """
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    (home / ".env.bot").write_text(
+        "UNREAD_BOT_TOKEN=from-env-bot-file\nUNREAD_BOT_OWNER_ID=4242\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNREAD_HOME", str(home))
+    monkeypatch.delenv("UNREAD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("UNREAD_BOT_OWNER_ID", raising=False)
+    monkeypatch.delenv("UNREAD_BOT_ENV_FILE", raising=False)
+    # chmod 600 so _load_dotenv accepts the file (it refuses group/other-readable).
+    (home / ".env.bot").chmod(0o600)
+
+    from unread.config import load_settings, reset_settings
+
+    reset_settings()
+    try:
+        s = load_settings()
+        assert s.bot.token == "from-env-bot-file"
+        assert s.bot.owner_id == 4242
+    finally:
+        reset_settings()
+
+
+def test_env_bot_file_explicit_path_wins(monkeypatch, tmp_path):
+    """`UNREAD_BOT_ENV_FILE` overrides the canonical / CWD lookups."""
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / ".env.bot").write_text("UNREAD_BOT_TOKEN=from-canonical\n", encoding="utf-8")
+    (home / ".env.bot").chmod(0o600)
+    elsewhere = tmp_path / "side.env"
+    elsewhere.write_text("UNREAD_BOT_TOKEN=from-explicit\n", encoding="utf-8")
+    elsewhere.chmod(0o600)
+
+    monkeypatch.setenv("UNREAD_HOME", str(home))
+    monkeypatch.setenv("UNREAD_BOT_ENV_FILE", str(elsewhere))
+    monkeypatch.delenv("UNREAD_BOT_TOKEN", raising=False)
+
+    from unread.config import load_settings, reset_settings
+
+    reset_settings()
+    try:
+        s = load_settings()
+        assert s.bot.token == "from-explicit"
+    finally:
+        reset_settings()
+
+
+def test_shell_env_still_beats_env_bot_file(monkeypatch, tmp_path):
+    """Shell env always wins — `docker run -e` overrides a mounted file."""
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / ".env.bot").write_text("UNREAD_BOT_TOKEN=from-file\n", encoding="utf-8")
+    (home / ".env.bot").chmod(0o600)
+
+    monkeypatch.setenv("UNREAD_HOME", str(home))
+    monkeypatch.setenv("UNREAD_BOT_TOKEN", "from-shell-env")
+    monkeypatch.delenv("UNREAD_BOT_ENV_FILE", raising=False)
+
+    from unread.config import load_settings, reset_settings
+
+    reset_settings()
+    try:
+        s = load_settings()
+        assert s.bot.token == "from-shell-env"
     finally:
         reset_settings()
 
@@ -111,8 +193,10 @@ def test_cmd_bot_run_accepts_env_owner_id_without_session(monkeypatch, tmp_path)
 
     from unread.bot import commands as bot_commands
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("UNREAD_BOT_TOKEN", "fake-token")
     monkeypatch.setenv("UNREAD_BOT_OWNER_ID", "9999")
+    monkeypatch.delenv("UNREAD_BOT_ENV_FILE", raising=False)
     monkeypatch.setenv("UNREAD_HOME", str(tmp_path / "fresh"))
 
     class _Sentinel(Exception):

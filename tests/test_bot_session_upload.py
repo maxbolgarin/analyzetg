@@ -63,11 +63,61 @@ def test_size_of_attachment_none_when_no_media():
 
 
 @pytest.mark.asyncio
-async def test_probe_session_owner_id_missing_file(tmp_path):
-    """Owner-id probe returns None on a missing file (no Telethon call)."""
-    from unread.bot.app import _probe_session_owner_id
+async def test_probe_candidate_owner_id_missing_file(tmp_path):
+    """Candidate validator returns None on missing / empty files (no Telethon call)."""
+    from unread.bot.session_upload import _probe_candidate_owner_id
     from unread.config import get_settings
 
     s = get_settings()
     missing = tmp_path / "absent.sqlite"
-    assert await _probe_session_owner_id(missing, s) is None
+    assert await _probe_candidate_owner_id(missing, s) is None
+    empty = tmp_path / "empty.sqlite"
+    empty.write_bytes(b"")
+    assert await _probe_candidate_owner_id(empty, s) is None
+
+
+def test_normalized_session_path_adds_session_suffix():
+    """Telethon appends `.session` — installer destination must match."""
+    from pathlib import Path
+
+    from unread.bot.session_upload import _normalized_session_path
+
+    assert _normalized_session_path(Path("/x/y/session.sqlite")) == Path("/x/y/session.sqlite.session")
+    # Already-suffixed paths are left alone.
+    assert _normalized_session_path(Path("/x/y/foo.session")) == Path("/x/y/foo.session")
+
+
+def test_has_session_blob_finds_dot_session_file(tmp_path, monkeypatch):
+    """The legacy `session.sqlite` AND Telethon's `session.sqlite.session`
+    both count as a usable session blob."""
+    from unread.bot.app import _has_session_blob
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path))
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    # Only the .session-suffixed file exists (this is the real Telethon shape).
+    (storage / "session.sqlite.session").write_bytes(b"\x00")
+
+    from unread.config import load_settings, reset_settings
+
+    reset_settings()
+    try:
+        s = load_settings()
+        assert _has_session_blob(s) is True
+    finally:
+        reset_settings()
+
+
+def test_has_session_blob_false_when_neither_exists(tmp_path, monkeypatch):
+    from unread.bot.app import _has_session_blob
+
+    monkeypatch.setenv("UNREAD_HOME", str(tmp_path / "fresh"))
+
+    from unread.config import load_settings, reset_settings
+
+    reset_settings()
+    try:
+        s = load_settings()
+        assert _has_session_blob(s) is False
+    finally:
+        reset_settings()

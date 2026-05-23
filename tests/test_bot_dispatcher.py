@@ -137,6 +137,44 @@ def test_classify_photo_is_image_file():
     assert payload["kind"] == "image"
 
 
+def test_classify_youtube_url_with_link_preview_is_youtube():
+    """Telegram auto-attaches a web-page preview for every URL message.
+    The dispatcher must ignore that preview and classify by URL text,
+    or YouTube / website URLs end up in the file handler instead.
+    """
+    from telethon.tl.types import MessageMediaWebPage
+
+    preview = MessageMediaWebPage.__new__(MessageMediaWebPage)
+    ev = _FakeEvent(
+        _FakeMessage(
+            message="https://www.youtube.com/watch?v=xwYfsknlWHI",
+            media=preview,
+        )
+    )
+    kind, payload = classify(ev)
+    assert kind == "youtube"
+    assert payload["url"] == "https://www.youtube.com/watch?v=xwYfsknlWHI"
+
+
+def test_classify_website_url_with_link_preview_is_website():
+    from telethon.tl.types import MessageMediaWebPage
+
+    preview = MessageMediaWebPage.__new__(MessageMediaWebPage)
+    ev = _FakeEvent(_FakeMessage(message="https://example.com/article", media=preview))
+    kind, payload = classify(ev)
+    assert kind == "url"
+    assert payload["url"] == "https://example.com/article"
+
+
+def test_classify_tme_link_with_link_preview_is_tg():
+    from telethon.tl.types import MessageMediaWebPage
+
+    preview = MessageMediaWebPage.__new__(MessageMediaWebPage)
+    ev = _FakeEvent(_FakeMessage(message="https://t.me/somechan/123", media=preview))
+    kind, _ = classify(ev)
+    assert kind == "tg"
+
+
 @pytest.mark.parametrize(
     "name, mime, expected_kind",
     [
