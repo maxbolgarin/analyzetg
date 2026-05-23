@@ -1,0 +1,41 @@
+---
+interface Heading { depth: number; slug: string; text: string; }
+interface Props { headings: Heading[]; }
+const { headings } = Astro.props;
+const items = (headings ?? []).filter((h) => h.depth === 2 || h.depth === 3);
+---
+{items.length > 0 && (
+  <aside class="toc" aria-label="On this page">
+    <div class="title">On this page</div>
+    <ul>
+      {items.map((h) => (
+        <li class:list={[`d${h.depth}`]}>
+          <a href={`#${h.slug}`}>{h.text}</a>
+        </li>
+      ))}
+    </ul>
+  </aside>
+)}
+
+<style>
+  .toc {
+    position: sticky;
+    top: 5rem;
+    align-self: start;
+    padding-left: 1rem;
+    border-left: 1px solid var(--border);
+    font-size: 0.86rem;
+  }
+  .title {
+    font-family: var(--font-mono);
+    color: var(--fg-muted);
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.6rem;
+  }
+  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.25rem; }
+  li.d3 { padding-left: 1rem; }
+  a { color: var(--fg-muted); display: block; padding: 0.2rem 0; line-height: 1.4; }
+  a:hover { color: var(--accent); }
+</style>

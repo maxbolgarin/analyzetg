@@ -1,0 +1,16 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+const mods = import.meta.glob('../../../../docs/configuration.md', { eager: true });
+const post = Object.values(mods)[0] as any;
+const { Content, headings } = post;
+---
+<DocsLayout
+  title="Configuration, costs & caching · unread"
+  description="config.toml options, language settings, cost guardrails, two-layer cache, troubleshooting, and architecture details."
+  path="/docs/configuration/"
+  slug="configuration"
+  heading="Configuration"
+  headings={headings}
+>
+  <Content />
+</DocsLayout>

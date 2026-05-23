@@ -1,0 +1,48 @@
+---
+import '../styles/global.css';
+import Head from '../components/Head.astro';
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  ogImage?: string;
+  jsonLd?: object | object[];
+  noindex?: boolean;
+}
+
+const { title, description, path, ogImage, jsonLd, noindex } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <script is:inline>
+      (function () {
+        try {
+          const stored = localStorage.getItem('theme');
+          const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+          const theme = stored || (prefersLight ? 'light' : 'dark');
+          if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+        } catch (_) {}
+      })();
+    </script>
+    <Head
+      title={title}
+      description={description}
+      path={path}
+      ogImage={ogImage}
+      jsonLd={jsonLd}
+      noindex={noindex}
+    />
+  </head>
+  <body>
+    <a href="#main" class="skip-link">Skip to content</a>
+    <Header />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

@@ -10,6 +10,8 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**[Website](https://maxbolgarin.github.io/unread/)** · **[Docs](https://maxbolgarin.github.io/unread/docs/)** · **[PyPI](https://pypi.org/project/unread/)**
+
 ---
 
 You have 47 unread Telegram groups. You will never read them.

@@ -1,0 +1,59 @@
+---
+import { DOCS_NAV } from '../consts';
+interface Props { currentSlug: string; }
+const { currentSlug } = Astro.props;
+---
+<aside class="sidebar" aria-label="Documentation navigation">
+  <div class="title">Docs</div>
+  <nav>
+    <ul>
+      {DOCS_NAV.map((item) => (
+        <li>
+          <a href={item.href} class:list={["link", { active: item.slug === currentSlug }]}>
+            {item.label}
+          </a>
+        </li>
+      ))}
+    </ul>
+  </nav>
+</aside>
+
+<style>
+  .sidebar {
+    position: sticky;
+    top: 5rem;
+    align-self: start;
+    padding-right: 1rem;
+  }
+  .title {
+    font-family: var(--font-mono);
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 0 0 0.7rem;
+  }
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.15rem;
+  }
+  .link {
+    display: block;
+    padding: 0.45rem 0.7rem;
+    color: var(--fg-muted);
+    font-size: 0.92rem;
+    border-radius: 7px;
+    border-left: 2px solid transparent;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .link:hover { color: var(--fg); background: var(--bg-elev); }
+  .link.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+</style>

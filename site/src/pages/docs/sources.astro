@@ -1,0 +1,16 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+const mods = import.meta.glob('../../../../docs/sources.md', { eager: true });
+const post = Object.values(mods)[0] as any;
+const { Content, headings } = post;
+---
+<DocsLayout
+  title="Sources — Telegram, YouTube, web pages, local files · unread"
+  description="Every <ref> shape unread accepts. Telegram chats, channels, forums, comments. YouTube with time-stamped citations. Web articles. Local PDF, DOCX, audio, video."
+  path="/docs/sources/"
+  slug="sources"
+  heading="Sources"
+  headings={headings}
+>
+  <Content />
+</DocsLayout>

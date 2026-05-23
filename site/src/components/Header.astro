@@ -1,0 +1,129 @@
+---
+import { BASE, GH_URL, NAV } from '../consts';
+import ThemeToggle from './ThemeToggle.astro';
+
+const pathname = Astro.url.pathname.replace(/\/+$/, '/');
+function isActive(href: string) {
+  const norm = href.replace(/\/+$/, '/');
+  if (norm === `${BASE}/`) return pathname === `${BASE}/` || pathname === BASE;
+  return pathname === norm || pathname.startsWith(norm);
+}
+---
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href={`${BASE}/`} aria-label="unread — home">
+      <span class="brand-prompt">$</span>
+      <span class="brand-name">unread</span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      {NAV.map((item) => {
+        const external = /^https?:/i.test(item.href);
+        return (
+          <a
+            href={item.href}
+            class:list={["nav-link", { active: !external && isActive(item.href) }]}
+            {...(external ? { rel: 'noopener', target: '_blank' } : {})}
+          >
+            {item.label}
+            {external && (
+              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left:.25rem;opacity:.6">
+                <path d="M7 17L17 7M9 7h8v8"/>
+              </svg>
+            )}
+          </a>
+        );
+      })}
+    </nav>
+    <div class="actions">
+      <ThemeToggle />
+      <a href={GH_URL} class="gh-btn" aria-label="Star unread on GitHub" rel="noopener" target="_blank">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.5-1.4-1.3-1.7-1.3-1.7-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.9 2.9 1.3 3.6 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.3.5-2.4 1.2-3.3-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.3a11.5 11.5 0 0 1 6 0c2.3-1.6 3.3-1.3 3.3-1.3.7 1.7.3 2.9.1 3.2.8.9 1.2 2 1.2 3.3 0 4.7-2.8 5.7-5.5 6 .4.3.8 1 .8 2v3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"/>
+        </svg>
+        <span>Star</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in oklab, var(--bg) 80%, transparent);
+    backdrop-filter: saturate(140%) blur(12px);
+    -webkit-backdrop-filter: saturate(140%) blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .header-inner {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding-top: 0.85rem;
+    padding-bottom: 0.85rem;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    color: var(--fg);
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: -0.01em;
+  }
+  .brand:hover { color: var(--fg); }
+  .brand-prompt {
+    color: var(--accent);
+    font-family: var(--font-mono);
+  }
+  .brand-name { font-family: var(--font-mono); }
+  .nav {
+    display: flex;
+    gap: 0.25rem;
+    margin-left: 1rem;
+    flex: 1;
+  }
+  .nav-link {
+    color: var(--fg-muted);
+    font-size: 0.92rem;
+    font-weight: 500;
+    padding: 0.4rem 0.7rem;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .nav-link:hover {
+    color: var(--fg);
+    background: var(--bg-elev);
+  }
+  .nav-link.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .gh-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--fg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    background: var(--bg-elev);
+  }
+  .gh-btn:hover {
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+  @media (max-width: 640px) {
+    .nav { display: none; }
+    .gh-btn span { display: none; }
+  }
+</style>

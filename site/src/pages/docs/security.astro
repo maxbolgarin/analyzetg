@@ -1,0 +1,16 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+const mods = import.meta.glob('../../../../docs/security.md', { eager: true });
+const post = Object.values(mods)[0] as any;
+const { Content, headings } = post;
+---
+<DocsLayout
+  title="Security & privacy · unread"
+  description="Local-first storage, three credential backends (plain, OS keystore, passphrase encryption), PII redaction, and threat model."
+  path="/docs/security/"
+  slug="security"
+  heading="Security"
+  headings={headings}
+>
+  <Content />
+</DocsLayout>

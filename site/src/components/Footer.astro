@@ -1,0 +1,99 @@
+---
+import {
+  BASE,
+  GH_URL,
+  GH_ISSUES_URL,
+  GH_CHANGELOG_URL,
+  GH_CONTRIBUTING_URL,
+  GH_SECURITY_URL,
+  PYPI_URL,
+  LICENSE_URL,
+  AUTHOR,
+  AUTHOR_EMAIL,
+} from '../consts';
+
+const year = new Date().getFullYear();
+---
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <div class="cols">
+      <div class="col">
+        <h3>Project</h3>
+        <ul>
+          <li><a href={GH_URL} rel="noopener" target="_blank">GitHub</a></li>
+          <li><a href={PYPI_URL} rel="noopener" target="_blank">PyPI</a></li>
+          <li><a href={GH_ISSUES_URL} rel="noopener" target="_blank">Issues</a></li>
+          <li><a href={GH_CHANGELOG_URL} rel="noopener" target="_blank">Changelog</a></li>
+          <li><a href={LICENSE_URL} rel="noopener" target="_blank">MIT License</a></li>
+        </ul>
+      </div>
+      <div class="col">
+        <h3>Docs</h3>
+        <ul>
+          <li><a href={`${BASE}/docs/install/`}>Install</a></li>
+          <li><a href={`${BASE}/docs/sources/`}>Sources</a></li>
+          <li><a href={`${BASE}/docs/reference/`}>CLI reference</a></li>
+          <li><a href={`${BASE}/docs/configuration/`}>Configuration</a></li>
+          <li><a href={`${BASE}/docs/security/`}>Security</a></li>
+        </ul>
+      </div>
+      <div class="col">
+        <h3>About</h3>
+        <ul>
+          <li><a href={GH_CONTRIBUTING_URL} rel="noopener" target="_blank">Contributing</a></li>
+          <li><a href={GH_SECURITY_URL} rel="noopener" target="_blank">Security policy</a></li>
+          <li><a href={`mailto:${AUTHOR_EMAIL}`}>Contact</a></li>
+        </ul>
+      </div>
+    </div>
+    <p class="meta">
+      © {year} {AUTHOR} · MIT License · Built with <a href="https://astro.build" rel="noopener" target="_blank">Astro</a>
+    </p>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: 5rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .footer-inner {
+    padding-top: 3rem;
+    padding-bottom: 2.5rem;
+  }
+  .cols {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem;
+  }
+  @media (max-width: 640px) {
+    .cols { grid-template-columns: 1fr; gap: 1.5rem; }
+  }
+  .col h3 {
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 0.7rem;
+  }
+  .col ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.4rem;
+  }
+  .col a {
+    color: var(--fg);
+    font-size: 0.92rem;
+  }
+  .col a:hover { color: var(--accent); }
+  .meta {
+    margin: 2.5rem 0 0;
+    color: var(--fg-dim);
+    font-size: 0.82rem;
+    text-align: center;
+  }
+</style>
