@@ -1,6 +1,5 @@
 import cairosvg
 from PIL import Image
-import os
 
 
 def png(src, out, w=None, h=None):
