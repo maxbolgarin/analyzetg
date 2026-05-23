@@ -74,11 +74,13 @@ async def test_transcript_mode_writes_metadata_and_transcript(tmp_path) -> None:
         )
     assert (out / "metadata.json").exists()
     assert (out / "transcript.md").exists()
-    assert (out / "transcript_timed.json").exists()
+    # Dump-mode transcripts are plain text — per-cue timing stays in the DB
+    # for analyze/ask but is NOT emitted into the dump directory.
+    assert not (out / "transcript_timed.json").exists()
     md = (out / "transcript.md").read_text(encoding="utf-8")
     assert "Hello World" in md
-    assert "[00:00]" in md and "hello" in md
-    assert "[00:05]" in md and "world" in md
+    assert "hello world" in md
+    assert "[00:00]" not in md and "[00:05]" not in md
     meta_data = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
     assert meta_data["video_id"] == meta.video_id
     assert meta_data["title"] == "Hello World"
@@ -295,5 +297,6 @@ async def test_transcript_mode_uses_repo_cache(tmp_path) -> None:
         )
 
     md = (out / "transcript.md").read_text(encoding="utf-8")
-    assert "cached" in md and "transcript text" in md
-    assert (out / "transcript_timed.json").exists()
+    assert "cached transcript text" in md
+    assert "[00:00]" not in md and "[00:03]" not in md
+    assert not (out / "transcript_timed.json").exists()

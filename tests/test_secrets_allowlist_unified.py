@@ -36,6 +36,8 @@ def test_secret_keys_include_every_chat_provider() -> None:
         "anthropic.api_key",
         "google.api_key",
         "telegram.session_string",
+        # `unread bot` @BotFather token; added alongside the bot subcommand.
+        "telegram.bot_token",
     }
     assert expected == SECRET_KEYS
 
