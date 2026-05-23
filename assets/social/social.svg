@@ -1,0 +1,18 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="unread social card">
+  <rect x="0" y="0" width="1280" height="640" fill="#0f0f10"/>
+
+  <g transform="translate(338,200) scale(1.5)">
+    <path d="M40 28 L28 28 L28 72 L40 72" fill="none" stroke="#fafafa" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M60 28 L72 28 L72 72 L60 72" fill="none" stroke="#fafafa" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="50" cy="50" r="8" fill="#3b82f6"/>
+  </g>
+  <text x="524" y="318" font-family="'DejaVu Sans Mono', monospace" font-size="116" font-weight="500" fill="#fafafa">unread</text>
+
+  <text x="640" y="430" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="34" fill="#a1a1aa">Read your unread. Without reading it.</text>
+
+  <text x="352" y="508" font-family="'DejaVu Sans Mono', monospace" font-size="26" fill="#71717a">summarized, with real sources</text>
+  <text x="822" y="508" font-family="'DejaVu Sans Mono', monospace" font-size="26" fill="#3b82f6">[#1586]</text>
+
+  <rect x="468" y="556" width="344" height="48" rx="10" fill="#1c1c1f" stroke="#2e2e33" stroke-width="1"/>
+  <text x="640" y="587" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="24" fill="#d4d4d8">$ pip install unread</text>
+</svg>

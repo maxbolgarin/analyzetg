@@ -1,0 +1,2 @@
+[*] unread 0.1.0
+    read your unread — without reading it.

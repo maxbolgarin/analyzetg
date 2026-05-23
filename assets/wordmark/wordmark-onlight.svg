@@ -1,0 +1,8 @@
+<svg width="300" height="100" viewBox="0 0 300 100" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="unread">
+  <g transform="translate(6,18) scale(0.64)">
+    <path d="M40 28 L28 28 L28 72 L40 72" fill="none" stroke="#18181b" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M60 28 L72 28 L72 72 L60 72" fill="none" stroke="#18181b" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="50" cy="50" r="8" fill="#3b82f6"/>
+  </g>
+  <text x="92" y="66" font-family="'DejaVu Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="52" font-weight="500" fill="#18181b">unread</text>
+</svg>
