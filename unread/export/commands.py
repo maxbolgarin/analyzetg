@@ -223,6 +223,8 @@ async def cmd_dump(
     save_media_types: str | None = None,
     folder: str | None = None,
     with_comments: bool = False,
+    comments_max: int | None = None,
+    comments_order: str = "all",
     yes: bool = False,
     language: str | None = None,
     report_language: str | None = None,
@@ -542,6 +544,7 @@ async def cmd_dump(
                         f"{len(topic_markers)} topics "
                         f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
                     )
+                    console.print(f"[grey70]{_tf('forum_overfetch_note', unread=unread_across)}[/]")
 
         # Single topic in a forum + unread-default → resolve topic's marker.
         if (
@@ -602,6 +605,8 @@ async def cmd_dump(
             save_media=save_media,
             save_media_types=save_media_kinds,
             with_comments=with_comments,
+            comments_max=comments_max,
+            comments_order=comments_order,
             language=eff_language,
             report_language=eff_report_language,
             source_language=eff_source_language,
@@ -636,6 +641,8 @@ async def _dump_single(
     save_media: bool = False,
     save_media_types: set[str] | None = None,
     with_comments: bool = False,
+    comments_max: int | None = None,
+    comments_order: str = "all",
     language: str = "en",
     report_language: str = "en",
     source_language: str = "",
@@ -676,6 +683,8 @@ async def _dump_single(
         topic_markers=topic_markers,
         mark_read=mark_read,
         with_comments=with_comments,
+        comments_max=comments_max,
+        comments_order=comments_order,
         language=language,
         report_language=report_language,
     )

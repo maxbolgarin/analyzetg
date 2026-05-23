@@ -2647,6 +2647,14 @@ def _apply_one_override(settings, key: str, value: str) -> None:
         attr = key.split(".", 1)[1]
         setattr(settings.enrich, attr, b)
         return
+    # Enrich per-run soft caps — non-negative ints; 0 disables.
+    if key in {"enrich.max_link_fetches_per_run", "enrich.max_images_per_run"}:
+        n = _coerce_int(value)
+        if n is None or n < 0:
+            return
+        attr = key.split(".", 1)[1]
+        setattr(settings.enrich, attr, n)
+        return
     # Analyze tuning.
     if key == "analyze.high_impact_reactions":
         n = _coerce_int(value)
@@ -2721,6 +2729,13 @@ def _apply_one_override(settings, key: str, value: str) -> None:
         v = value.strip().lower()
         if v in LOG_MODES:
             settings.logging.mode = v
+        return
+    # Wizard ergonomics.
+    if key == "interactive.offer_more_presets":
+        b = _coerce_bool(value)
+        if b is None:
+            return
+        settings.interactive.offer_more_presets = b
         return
 
 

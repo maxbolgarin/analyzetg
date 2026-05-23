@@ -276,6 +276,15 @@ class InteractiveAnswers:
     # Channel + comments toggle. Asked only when the picked chat is a
     # channel that has a linked discussion group; default False otherwise.
     with_comments: bool = False
+    # Soft cap on the number of comments fetched from the linked discussion
+    # group. None = no cap ("all comments in window"). Used together with
+    # `comments_order` to control fetch cost on active discussion groups
+    # where comments can outnumber posts 10-30x.
+    comments_max: int | None = None
+    # "all" (default; no cap), "first" (oldest N within the window),
+    # or "last" (newest N within the window). Ignored when
+    # `comments_max` is None.
+    comments_order: str = "all"
 
 
 def _period_to_db_filters(
@@ -518,7 +527,13 @@ async def run_interactive_analyze(
     args["source_language"] = source_language
     # CLI explicit value wins; wizard answer fills in when CLI didn't set it.
     args["with_comments"] = with_comments or bool(answers.with_comments)
+    args["comments_max"] = answers.comments_max
+    args["comments_order"] = answers.comments_order
     await cmd_analyze(**args)
+    # Post-run tail: offer to re-run the same window with another preset.
+    # Wizard-only (this path); direct-CLI callers like `unread <ref> --preset X`
+    # skip this entirely. Gated by `settings.interactive.offer_more_presets`.
+    await _run_another_preset_loop(args, first_preset=answers.preset)
 
 
 async def run_interactive_dump(
@@ -576,6 +591,8 @@ async def run_interactive_dump(
     args["language"] = language
     args["report_language"] = report_language
     args["source_language"] = source_language
+    args["comments_max"] = answers.comments_max
+    args["comments_order"] = answers.comments_order
     await cmd_dump(**args)
 
 
@@ -766,6 +783,8 @@ async def run_interactive_ask(
         show_retrieved=show_retrieved,
         max_cost=max_cost,
         with_comments=bool(answers.with_comments),
+        comments_max=answers.comments_max,
+        comments_order=answers.comments_order,
         yes=yes,
         no_followup=no_followup,
         language=language,
@@ -848,6 +867,10 @@ async def _collect_answers(
         custom_until: str | None = None
         custom_from_msg: str | None = None
         with_comments: bool = False
+        # Soft cap on comments fetched + walk direction. See
+        # `InteractiveAnswers` for semantics.
+        comments_max: int | None = None
+        comments_order: str = "all"
         # Resolved linked-chat id for the picked channel, cached so a
         # back-step doesn't refetch from Telegram.
         linked_chat_id: int | None = None
@@ -985,26 +1008,51 @@ async def _collect_answers(
                         linked_chat_id = None
                 if chat["kind"] == "forum":
                     step = "thread"
-                elif chat["kind"] == "channel" and linked_chat_id is not None:
-                    step = "comments"
                 elif mode == "analyze":
                     step = "preset"
                 else:
                     # Ask and dump: no preset step. Go to period so the
                     # user can pick a date range before enrich/confirm.
+                    # Channel + comments is asked AFTER period now, so
+                    # the user sees the cost of the window before being
+                    # prompted to add the discussion group on top.
                     step = "period"
 
             elif step == "comments":
-                # Channel-only step: include the linked discussion group's
-                # messages? Asked once per chat selection. Default Yes
-                # (the user opted into a channel — comments are usually
-                # the more interesting part).
+                # Channel + linked-discussion step. Runs AFTER `period` so
+                # the cost of the channel-only window is already known and
+                # the comments estimate (which depends on the picked
+                # period) can be inlined in the question text.
+                #
+                # Soft-cap (`comments_max`) lives here, not on the picker
+                # for the channel posts themselves, because comments are
+                # the runaway cost on active groups (10-30x the post
+                # count is typical). The window itself stays whatever
+                # the user picked at the `period` step.
+                if comments_count_est is None and linked_chat_id is not None and chat is not None and period:
+                    comments_count_est = await _estimate_comments_count(
+                        client,
+                        channel_chat=chat,
+                        linked_chat_id=linked_chat_id,
+                        period=period,
+                        custom_since=custom_since,
+                        custom_until=custom_until,
+                    )
+                est_str = str(comments_count_est) if comments_count_est is not None else "?"
+                n_channel_for_q = _count_for_period(period, period_counts) or 0
+                question_text = i18n_tf(
+                    "wiz_include_comments_q_v2",
+                    est=est_str,
+                    posts=n_channel_for_q,
+                )
                 result = await _bind_escape(
                     questionary.select(
-                        i18n_t("wiz_include_comments_q"),
+                        question_text,
                         choices=[
-                            questionary.Choice(i18n_t("wiz_yes_with_comments"), value=True),
-                            questionary.Choice(i18n_t("wiz_no_only_posts"), value=False),
+                            questionary.Choice(i18n_t("wiz_comments_no"), value=("no", None)),
+                            questionary.Choice(i18n_t("wiz_comments_all"), value=("all", None)),
+                            questionary.Choice(i18n_t("wiz_comments_last_n"), value=("last", "ask")),
+                            questionary.Choice(i18n_t("wiz_comments_first_n"), value=("first", "ask")),
                             questionary.Choice(i18n_t("wiz_back"), value=BACK),
                         ],
                         style=LIST_STYLE,
@@ -1012,13 +1060,73 @@ async def _collect_answers(
                     BACK,
                 ).ask_async()
                 if result is BACK:
-                    step = "chat"
+                    step = "period"
                     continue
                 if result is None:
                     console.print(f"[grey70]{i18n_t('cancelled')}[/]")
                     return None
-                with_comments = bool(result)
-                step = "preset" if mode == "analyze" else "period"
+                order, _cap_marker = result
+                if order == "no":
+                    with_comments = False
+                    comments_max = None
+                    comments_order = "all"
+                elif order == "all":
+                    with_comments = True
+                    comments_max = None
+                    comments_order = "all"
+                else:
+                    # Follow-up cap picker. Sized presets cover the common
+                    # cases; "Custom…" prompts a free-text integer so
+                    # power users can dial in (e.g. 50 or 2500). Cancel
+                    # / Back at this picker returns to the outer comments
+                    # question rather than stepping out of the wizard.
+                    cap_result = await _bind_escape(
+                        questionary.select(
+                            i18n_t("wiz_comments_cap_q"),
+                            choices=[
+                                questionary.Choice("10", value=10),
+                                questionary.Choice("20", value=20),
+                                questionary.Choice("50", value=50),
+                                questionary.Choice("100", value=100),
+                                questionary.Choice("250", value=250),
+                                questionary.Choice(i18n_t("wiz_comments_cap_custom"), value="custom"),
+                                questionary.Choice(i18n_t("wiz_back"), value=BACK),
+                            ],
+                            style=LIST_STYLE,
+                        ),
+                        BACK,
+                    ).ask_async()
+                    if cap_result is BACK or cap_result is None:
+                        # Re-enter the comments step so the user can
+                        # pick a different option (or back out to period).
+                        continue
+                    if cap_result == "custom":
+                        # Free-text int prompt. Empty / invalid → fall back
+                        # to 200 (a sane middle-of-the-road default) so the
+                        # wizard never blocks on a parse failure.
+                        from unread.util.prompt import ask_text
+
+                        try:
+                            raw = ask_text(i18n_t("wiz_comments_cap_custom_q"), default="50")
+                        except KeyboardInterrupt:
+                            # User pressed Esc / Ctrl-C in the int prompt:
+                            # treat as "cancel this picker, re-enter
+                            # the outer comments choice" — same as the
+                            # cap-picker BACK path above.
+                            continue
+                        try:
+                            n = max(1, int((raw or "").strip()))
+                        except ValueError:
+                            n = 50
+                    else:
+                        n = int(cap_result)
+                    with_comments = True
+                    comments_max = n
+                    comments_order = order
+                # After comments, all modes converge on enrich (the next
+                # cost-bearing step). Ask + ALL_LOCAL never reaches here
+                # because that path skips the comments step entirely.
+                step = "enrich"
 
             elif step == "thread":
                 result = await _pick_thread(client, chat["chat_id"])
@@ -1043,8 +1151,6 @@ async def _collect_answers(
                         step = "chat"
                     elif chat and chat["kind"] == "forum":
                         step = "thread"
-                    elif chat and chat["kind"] == "channel" and linked_chat_id is not None:
-                        step = "comments"
                     else:
                         step = "chat"
                     continue
@@ -1093,19 +1199,13 @@ async def _collect_answers(
                 result = await _pick_period(counts=period_counts)
                 if result is BACK:
                     # Period sits between `preset` (analyze) / chat-or-thread
-                    # (dump) and `enrich`. Mirror the pre-existing back-step
-                    # logic that used to live on the enrich block.
+                    # (dump) and `comments` (channel + linked) / `enrich`.
+                    # Comments step now follows period, so we never step
+                    # *back* into it from here.
                     if mode == "analyze":
                         step = "preset"
                     elif chat and chat["kind"] == "forum":
                         step = "thread"
-                    elif (
-                        mode in ("ask", "dump")
-                        and chat
-                        and chat["kind"] == "channel"
-                        and linked_chat_id is not None
-                    ):
-                        step = "comments"
                     else:
                         # Includes ask + ALL_LOCAL (run_on_all_local) and
                         # ask + private/group chats: back to chat picker.
@@ -1156,27 +1256,20 @@ async def _collect_answers(
                             since=_since_dt,
                             until=_until_dt,
                         )
-                # When comments are on for a channel, estimate the linked
-                # discussion's message count for the same window so the
-                # plan reflects the real workload. The actual run pulls
-                # comments by date range bounded by the channel posts'
-                # date span; we approximate that here per the chosen
-                # period. Best-effort — None on lookup failure.
-                if with_comments and linked_chat_id is not None and chat is not None and period:
-                    comments_count_est = await _estimate_comments_count(
-                        client,
-                        channel_chat=chat,
-                        linked_chat_id=linked_chat_id,
-                        period=period,
-                        custom_since=custom_since,
-                        custom_until=custom_until,
-                    )
                 # Ask mode skips output/mark_read but keeps enrich (so
                 # voice/image/link content becomes searchable mid-flow).
                 # Exception: ALL_LOCAL (run_on_all_local) skips enrich
                 # because cmd_ask refuses to enrich every synced chat —
-                # showing the picker would mislead the user.
-                step = "confirm" if mode == "ask" and run_on_all_local else "enrich"
+                # showing the picker would mislead the user. The
+                # channel + comments prompt now sits between `period`
+                # and `enrich` so the discussion-group estimate can
+                # reflect the period the user just picked.
+                if mode == "ask" and run_on_all_local:
+                    step = "confirm"
+                elif chat is not None and chat["kind"] == "channel" and linked_chat_id is not None:
+                    step = "comments"
+                else:
+                    step = "enrich"
 
             elif step == "enrich":
                 # Runs for both analyze and dump so media-to-text
@@ -1222,7 +1315,10 @@ async def _collect_answers(
                     )
                 result = await _pick_enrich(media_counts=media_counts)
                 if result is BACK:
-                    step = "period"
+                    if chat is not None and chat["kind"] == "channel" and linked_chat_id is not None:
+                        step = "comments"
+                    else:
+                        step = "period"
                     continue
                 if result is None:
                     console.print(f"[grey70]{i18n_t('cancelled')}[/]")
@@ -1536,6 +1632,8 @@ async def _collect_answers(
             enrich_kinds=enrich_kinds,
             custom_from_msg=custom_from_msg,
             with_comments=with_comments,
+            comments_max=comments_max,
+            comments_order=comments_order,
         )
 
 
@@ -2932,6 +3030,160 @@ async def _pick_preset():
         return BACK
     _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_preset')}: [bold]{picked}[/]")
     return picked
+
+
+_PRESET_LOOP_DONE = object()
+
+
+async def _pick_another_preset(used: set[str]) -> str | object | None:
+    """Tail-of-wizard picker: pick a follow-up preset, or "Done", or cancel.
+
+    Returns the preset name (str), ``_PRESET_LOOP_DONE`` if the user
+    picked the "Done" row, or ``None`` on Esc / Ctrl-C.
+
+    Presets the user has already run in this session are filtered out —
+    re-running the same preset on the same window would only hit cache.
+    When every visible preset is used, the picker short-circuits to
+    ``_PRESET_LOOP_DONE`` instead of presenting an empty list.
+    """
+    from unread.config import get_settings
+
+    locale = get_settings().locale
+    active_lang = (locale.report_language or locale.language or "en").lower()
+    presets_for_lang = {
+        name: preset
+        for name, preset in get_presets(active_lang).items()
+        if not preset.hidden and name not in used
+    }
+    if not presets_for_lang:
+        return _PRESET_LOOP_DONE
+
+    preferred = [
+        "summary",
+        "tldr",
+        "digest",
+        "highlights",
+        "quotes",
+        "links",
+        "action_items",
+        "decisions",
+        "questions",
+        "reactions",
+    ]
+    names = [p for p in preferred if p in presets_for_lang]
+    names += [n for n in sorted(presets_for_lang.keys()) if n not in preferred]
+
+    def _label(name: str) -> str:
+        preset = presets_for_lang[name]
+        desc = preset.description or preset.prompt_version
+        return f"{name:<13} — {desc}"
+
+    # Done sits at the top so Enter on a fresh prompt finishes the loop —
+    # the common case after one analyze run. Type-to-filter still surfaces
+    # any preset by name; arrow-down lands on the first preset row.
+    done_choice = questionary.Choice(title=i18n_t("wiz_another_preset_done"), value=_PRESET_LOOP_DONE)
+    choices: list[Any] = [
+        done_choice,
+        questionary.Separator(),
+        *(questionary.Choice(title=_label(n), value=n) for n in names),
+    ]
+
+    picked = await _bind_escape(
+        questionary.select(
+            i18n_t("wiz_another_preset_q"),
+            choices=choices,
+            default=done_choice,
+            use_search_filter=True,
+            use_jk_keys=False,
+            instruction=i18n_t("wiz_filter_instruction"),
+            style=LIST_STYLE,
+        ),
+        _PRESET_LOOP_DONE,
+    ).ask_async()
+    if picked is None:
+        return None
+    if picked is _PRESET_LOOP_DONE:
+        _replace_last_line(f"[grey70]{i18n_t('wiz_another_preset_done')}[/]")
+        return _PRESET_LOOP_DONE
+    _replace_last_line(f"[bold cyan]?[/] {i18n_t('wiz_summary_step_preset')}: [bold]{picked}[/]")
+    return picked
+
+
+def _build_followup_analyze_args(args: dict[str, Any], *, preset: str) -> dict[str, Any]:
+    """Produce kwargs for the post-run "another preset" loop.
+
+    Re-uses the wizard's prepared args (so enrich / comments / output
+    settings stay aligned with the first run) but:
+
+    * swaps `preset` to the user's new pick;
+    * forces `mark_read=False` — the first run already moved the marker,
+      so the second pass is read-only;
+    * clears every period selector and sets `repeat_last=True` so the
+      absolute window the first run resolved gets reloaded from the DB.
+      Without this, a wizard `period="unread"` would resolve to "nothing
+      new" on the second run (the first run consumed it).
+    """
+    fa = dict(args)
+    fa["preset"] = preset
+    fa["mark_read"] = False
+    fa["repeat_last"] = True
+    fa["since"] = None
+    fa["until"] = None
+    fa["last_days"] = None
+    fa["last_hours"] = None
+    fa["last_minutes"] = None
+    fa["last_msgs"] = None
+    fa["from_msg"] = None
+    fa["full_history"] = False
+    fa["msg"] = None
+    return fa
+
+
+def _can_show_followup_prompt() -> bool:
+    """questionary needs a real TTY for its raw-mode keypress handling.
+
+    Pytest runs, piped stdin, and CI invocations all fail this check.
+    Without the guard the loop would try to open a picker against a
+    non-interactive stdin and either hang or raise EOFError.
+    """
+    import sys
+
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+async def _run_another_preset_loop(args: dict[str, Any], *, first_preset: str | None) -> None:
+    """Tail-of-wizard loop: offer to re-run with another preset.
+
+    Gated by `settings.interactive.offer_more_presets` and skipped in
+    non-TTY environments (tests, scripted invocations). Each iteration
+    picks a preset (skipping ones already used in this session), then
+    calls `cmd_analyze` with `repeat_last=True` against the same chat /
+    window. Stops on the "Done" row, Esc, or when every preset is used.
+
+    Failures inside `cmd_analyze` propagate naturally — the outer wizard
+    isn't trying to swallow them.
+    """
+    settings = get_settings()
+    if not settings.interactive.offer_more_presets:
+        return
+    if not _can_show_followup_prompt():
+        return
+
+    from unread.analyzer.commands import cmd_analyze
+
+    used: set[str] = {first_preset} if first_preset else set()
+    console.print("")  # one blank line separating the report from the prompt
+    while True:
+        result = await _pick_another_preset(used)
+        if result is None or result is _PRESET_LOOP_DONE:
+            return
+        next_preset = str(result)
+        used.add(next_preset)
+        followup = _build_followup_analyze_args(args, preset=next_preset)
+        await cmd_analyze(**followup)
 
 
 async def _pick_output(*, default_path: Path | None):

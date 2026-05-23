@@ -107,6 +107,32 @@ async def enrich_messages(
     sem = asyncio.Semaphore(max(1, opts.concurrency))
     caps = _caps(opts)
     counted: dict[str, int] = {"image": 0, "link": 0}
+
+    # Pre-flight: resolve the vision slot ONCE so we don't fetch image
+    # bytes from Telegram for photos that can't be described anyway.
+    # `make_vision_provider` is synchronous and constructs the SDK
+    # client without a network round-trip — the only failure mode is
+    # `ProviderUnavailableError`, which means "no API key / wrong
+    # provider name" and is the same outcome for every photo. Without
+    # this upfront check, each photo would still consume a cap slot and
+    # acquire the semaphore inside `handle()` only to bail at
+    # `enrich_image`'s first guard.
+    image_enrichment_available = True
+    if opts.image and plan.get("image", 0) > 0:
+        from unread.ai.providers import ProviderUnavailableError, resolve_vision
+        from unread.ai.vision_provider import make_vision_provider
+
+        vision_provider, _vision_model = resolve_vision(settings)
+        try:
+            make_vision_provider(vision_provider, settings)
+        except ProviderUnavailableError as e:
+            image_enrichment_available = False
+            log.warning(
+                "enrich.image.disabled_no_vision",
+                provider=vision_provider,
+                err=str(e),
+                hint="run `unread settings` and set the vision slot's API key",
+            )
     # Guards the link-cap reservation. The link branch has an `await` between
     # the cap check and the post-call increment, so without a lock multiple
     # concurrent tasks can all observe `counted["link"] == 0`, all proceed,
@@ -155,7 +181,23 @@ async def enrich_messages(
                 if res:
                     stats.record("video", res)
             elif mt == "photo" and opts.image:
-                if counted["image"] >= caps["image"]:
+                # Skip BEFORE the cap counter / semaphore when we know
+                # the enrichment would no-op — burning a cap slot on a
+                # photo we'd silently drop inside `enrich_image` makes
+                # the cap fire early for the next photo that *could*
+                # have been described. These two guards mirror
+                # `enrich_image`'s own early-returns so no TG fetch is
+                # ever initiated for them.
+                if not image_enrichment_available:
+                    stats.record_skip("image")
+                elif msg.media_doc_id is None:
+                    log.debug(
+                        "enrich.image.skip_no_doc_id",
+                        chat_id=msg.chat_id,
+                        msg_id=msg.msg_id,
+                    )
+                    stats.record_skip("image")
+                elif counted["image"] >= caps["image"]:
                     log.debug(
                         "enrich.cap_skip",
                         kind="image",

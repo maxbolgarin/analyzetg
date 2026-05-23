@@ -220,6 +220,20 @@ _TUNING_SETTINGS: tuple[SettingDef, ...] = (
     SettingDef("enrich.image", "settings_cat_enrich", "bool", "set_label_image", "set_desc_enrich_default"),
     SettingDef("enrich.doc", "settings_cat_enrich", "bool", "set_label_doc", "set_desc_enrich_default"),
     SettingDef("enrich.link", "settings_cat_enrich", "bool", "set_label_link", "set_desc_enrich_default"),
+    SettingDef(
+        "enrich.max_link_fetches_per_run",
+        "settings_cat_enrich",
+        "int",
+        "set_label_max_link_fetches_per_run",
+        "set_desc_max_link_fetches_per_run",
+    ),
+    SettingDef(
+        "enrich.max_images_per_run",
+        "settings_cat_enrich",
+        "int",
+        "set_label_max_images_per_run",
+        "set_desc_max_images_per_run",
+    ),
     # Analysis tuning
     SettingDef(
         "analyze.high_impact_reactions",
@@ -255,6 +269,15 @@ _TUNING_SETTINGS: tuple[SettingDef, ...] = (
         "bool",
         "set_label_no_citations",
         "set_desc_no_citations",
+    ),
+    # Wizard ergonomics — controls the post-run "Run another preset?"
+    # prompt at the tail of `unread tg` / `unread` (wizard mode).
+    SettingDef(
+        "interactive.offer_more_presets",
+        "settings_cat_analyze",
+        "bool",
+        "set_label_offer_more_presets",
+        "set_desc_offer_more_presets",
     ),
     # Output verbosity — `silent` / `normal` / `verbose` / `debug`.
     # Editor is a 4-way enum picker; persisted as `logging.mode` in

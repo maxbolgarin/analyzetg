@@ -233,6 +233,15 @@ async def cmd_ask(
     max_cost: float | None = None,
     no_followup: bool = False,
     with_comments: bool = False,
+    # `comments_max` / `comments_order` are accepted for signature
+    # symmetry with cmd_analyze + cmd_dump (the wizard passes the same
+    # kwargs for all three modes). `cmd_ask` retrieves from the local
+    # index — no Telegram backfill of the linked chat happens here —
+    # so the cap is currently a no-op. Wire-up would land at the
+    # retrieval layer (e.g. cap the linked-chat candidate pool) if
+    # demanded.
+    comments_max: int | None = None,
+    comments_order: str = "all",
     enrich: str | None = None,
     enrich_all: bool = False,
     no_enrich: bool = False,

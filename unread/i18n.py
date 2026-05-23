@@ -84,6 +84,49 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "No — channel posts only",
         "ru": "Нет — только посты канала",
     },
+    # v2 comments question (post-period): inlines the linked-discussion
+    # estimate + a warning that comments commonly outnumber posts 10-30x
+    # so the user can size the fetch with the follow-up cap picker.
+    "wiz_include_comments_q_v2": {
+        "en": (
+            "Linked discussion has ~{est} messages in the window "
+            "({posts} channel posts above). Comments commonly "
+            "outnumber posts 10-30x — pick a cap to bound the fetch."
+        ),
+        "ru": (
+            "В привязанном чате ~{est} сообщений в выбранном окне "
+            "({posts} постов канала выше). Комментариев обычно "
+            "в 10-30 раз больше, чем постов — выберите лимит для загрузки."
+        ),
+    },
+    "wiz_comments_no": {
+        "en": "No — channel posts only",
+        "ru": "Нет — только посты канала",
+    },
+    "wiz_comments_all": {
+        "en": "Yes — all comments in window (no cap)",
+        "ru": "Да — все комментарии за период (без лимита)",
+    },
+    "wiz_comments_last_n": {
+        "en": "Yes — last N comments (newest)",
+        "ru": "Да — последние N комментариев (самые новые)",
+    },
+    "wiz_comments_first_n": {
+        "en": "Yes — first N comments (oldest)",
+        "ru": "Да — первые N комментариев (самые старые)",
+    },
+    "wiz_comments_cap_q": {
+        "en": "How many comments?",
+        "ru": "Сколько комментариев?",
+    },
+    "wiz_comments_cap_custom": {
+        "en": "Custom...",
+        "ru": "Другое...",
+    },
+    "wiz_comments_cap_custom_q": {
+        "en": "Enter cap (integer, e.g. 50):",
+        "ru": "Введите лимит (целое число, например 50):",
+    },
     # Confirm step (Run / Back / Cancel)
     "wiz_run_it_q": {"en": "Run it?", "ru": "Запустить?"},
     "wiz_run_choice": {"en": "Run", "ru": "Запустить"},
@@ -164,6 +207,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cmd_prompt": {
         "en": "Send a plain prompt to the configured AI provider (no retrieval, no archive context).",
         "ru": "Отправить произвольный prompt в выбранного AI-провайдера (без поиска и контекста архива).",
+    },
+    "cmd_presets": {
+        "en": "List analysis presets available in your active report language.",
+        "ru": "Список пресетов анализа, доступных для текущего языка отчёта.",
     },
     "cmd_dump": {
         "en": "Dump chat history to a file. Default window = messages since your Telegram read marker.",
@@ -793,6 +840,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Minimum message length (chars)",
         "ru": "Минимальная длина сообщения (символы)",
     },
+    "set_label_max_link_fetches_per_run": {
+        "en": "Max link enrichments per run",
+        "ru": "Лимит обогащений ссылок за запуск",
+    },
+    "set_label_max_images_per_run": {
+        "en": "Max image enrichments per run",
+        "ru": "Лимит обогащений картинок за запуск",
+    },
     "set_label_plain_citations": {
         "en": "Plain-text citation URLs in console",
         "ru": "Цитаты как обычный текст в консоли",
@@ -800,6 +855,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "set_label_no_citations": {
         "en": "Strip citations from the report",
         "ru": "Удалять цитаты из отчёта",
+    },
+    "set_label_offer_more_presets": {
+        "en": "Offer another preset after each wizard run",
+        "ru": "Предлагать другой пресет после каждого запуска визарда",
     },
     "set_label_log_mode": {
         "en": "Console verbosity",
@@ -916,6 +975,32 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Drop messages whose effective body is shorter than N chars.",
         "ru": "Отбрасывать сообщения короче N символов в эффективном теле.",
     },
+    "set_desc_max_link_fetches_per_run": {
+        "en": (
+            "Soft cost cap. Once N link-bearing messages have been enriched, "
+            "remaining ones get logged as `enrich.cap_skip` and pass through "
+            "with plain text only. Counts messages, not unique URLs. 0 disables "
+            "link enrichment for the run."
+        ),
+        "ru": (
+            "Мягкий лимит расходов. После обогащения N сообщений со ссылками "
+            "остальные логируются как `enrich.cap_skip` и проходят дальше "
+            "только с обычным текстом. Считаются сообщения, а не уникальные "
+            "URL. 0 отключает обогащение ссылок на запуск."
+        ),
+    },
+    "set_desc_max_images_per_run": {
+        "en": (
+            "Soft cost cap. Once N images have been described, remaining ones "
+            "get logged as `enrich.cap_skip` and skipped. 0 disables image "
+            "enrichment for the run."
+        ),
+        "ru": (
+            "Мягкий лимит расходов. После описания N картинок остальные "
+            "логируются как `enrich.cap_skip` и пропускаются. 0 отключает "
+            "обогащение картинок на запуск."
+        ),
+    },
     "set_desc_plain_citations": {
         "en": (
             "Render `[#N](url)` citations as `#N (url)` so URLs stay visible in "
@@ -938,6 +1023,20 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Полностью удалять цитаты `[#<msg_id>](<link>)` из отчёта — "
             "чистый текст без ссылок на сообщения. Кеш результатов не "
             "сбрасывается; включение/выключение не запускает анализ заново."
+        ),
+    },
+    "set_desc_offer_more_presets": {
+        "en": (
+            "After a wizard analyze run, offer to re-run the same messages "
+            "with another preset (no Telegram round-trip, enrichment cache "
+            "hits — only the LLM map-reduce fires). Has no effect on direct "
+            "CLI calls like `unread <ref> --preset X`."
+        ),
+        "ru": (
+            "После запуска анализа из визарда предлагать прогнать те же "
+            "сообщения другим пресетом (без обращения к Telegram, обогащение "
+            "из кеша — выполняется только LLM map-reduce). Не влияет на "
+            "прямые вызовы CLI вроде `unread <ref> --preset X`."
         ),
     },
     "set_desc_log_mode": {
@@ -1093,6 +1192,16 @@ _STRINGS: dict[str, dict[str, str]] = {
         "ru": "→ Получаем маркер непрочитанных для топика...",
     },
     "running_analysis": {"en": "→ Running analysis...", "ru": "→ Запускаем анализ..."},
+    "forum_overfetch_note": {
+        "en": (
+            "→ Note: Telegram has no per-topic backfill — the fetch below may pull "
+            "many more messages than {unread}; only the {unread} unread ones are analyzed."
+        ),
+        "ru": (
+            "→ Примечание: в Telegram нет per-topic backfill — загрузка ниже может "
+            "вытянуть гораздо больше сообщений, чем {unread}; анализируются только {unread} непрочитанных."
+        ),
+    },
     "filtered_per_topic": {
         "en": "→ Filtered per-topic: kept {kept} / dropped {dropped}",
         "ru": "→ Фильтрация по топикам: оставлено {kept} / отброшено {dropped}",
@@ -1505,6 +1614,17 @@ _STRINGS: dict[str, dict[str, str]] = {
     "wiz_col_folder": {"en": "folder", "ru": "папка"},
     "wiz_col_title": {"en": "title", "ru": "название"},
     "wiz_pick_preset_q": {"en": "Pick a preset", "ru": "Выберите пресет"},
+    # Post-run loop — offered at the tail of `unread tg` / wizard analyze
+    # to re-run the same window with another preset. The window is reused
+    # via `--repeat-last` (no Telegram round-trip; enrichment cache hits).
+    "wiz_another_preset_q": {
+        "en": "Run another preset on the same messages? (Esc / Done to finish)",
+        "ru": "Запустить другой пресет на этих же сообщениях? (Esc / Готово — завершить)",
+    },
+    "wiz_another_preset_done": {
+        "en": "✓ Done — no more presets",
+        "ru": "✓ Готово — больше пресетов не нужно",
+    },
     "wiz_output_q": {"en": "Where do you want the output?", "ru": "Куда сохранить результат?"},
     "wiz_output_save_and_console": {
         "en": "📺 Save to reports/ + print to terminal (default)",

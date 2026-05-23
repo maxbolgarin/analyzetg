@@ -479,6 +479,8 @@ async def cmd_analyze(
     post_to: str | None = None,
     repeat_last: bool = False,
     with_comments: bool = False,
+    comments_max: int | None = None,
+    comments_order: str = "all",
     yes: bool = False,
     language: str | None = None,
     report_language: str | None = None,
@@ -626,6 +628,8 @@ async def cmd_analyze(
             by=by,
             post_to=post_to,
             with_comments=with_comments,
+            comments_max=comments_max,
+            comments_order=comments_order,
             language=effective_language,
             report_language=effective_report_language,
             source_language=effective_source_language,
@@ -1076,6 +1080,7 @@ async def cmd_analyze(
                         f"{len(topic_markers)} topics "
                         f"(floor msg_id={from_msg_id} from oldest per-topic marker)[/]"
                     )
+                    _status(f"[grey70]{_tf('forum_overfetch_note', unread=unread_across)}[/]")
                 # If every topic marker is 0 (fresh account, never read
                 # anything), leave from_msg_id=None — _determine_start will
                 # fall back to the dialog unread state, which at that point
@@ -1142,6 +1147,8 @@ async def cmd_analyze(
             by=by,
             post_to=post_to,
             with_comments=with_comments,
+            comments_max=comments_max,
+            comments_order=comments_order,
             redact=redact,
             yes=yes,
             include_transcripts=include_transcripts,
@@ -1341,6 +1348,8 @@ async def _run_single(
     by: str | None = None,
     post_to: str | None = None,
     with_comments: bool = False,
+    comments_max: int | None = None,
+    comments_order: str = "all",
     redact: bool | None = None,
     yes: bool = False,
     language: str = "en",
@@ -1388,6 +1397,8 @@ async def _run_single(
         topic_markers=topic_markers,
         mark_read=mark_read,
         with_comments=with_comments,
+        comments_max=comments_max,
+        comments_order=comments_order,
         language=language,
         report_language=report_language,
     )
@@ -2431,6 +2442,7 @@ def _print_and_write(
         no_console=not console_out,
         no_save=no_save,
         plain_citations=settings.analyze.plain_citations,
+        preset=result.preset,
     )
 
 

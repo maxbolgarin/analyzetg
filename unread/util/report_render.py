@@ -35,12 +35,14 @@ importing it doesn't drag in `analyzer/commands.py`.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 
 from unread.core.paths import unique_path
 from unread.i18n import tf as _tf
@@ -93,6 +95,65 @@ def _strip_md_bold(label: str) -> str:
     return label
 
 
+# Tokenizer for the inline content of a `quotes` blockquote line: matches
+# either a markdown link `[label](url)` (groups 1, 2) or a `@username`
+# handle (group 3). The link side uses `[^)]+` because Telegram URLs —
+# the only template the LLM gets in this preset — never contain `)`.
+_QUOTES_INLINE_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)|(@[A-Za-z][\w]*)")
+_QUOTES_HEADING_RE = re.compile(r"^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$")
+
+
+def _render_quotes_inline(content: str) -> Text:
+    """Style a single inline run from a `quotes`-preset blockquote line.
+
+    Quote text renders white, `@username` handles in bold magenta, and
+    inline markdown citations as clickable Rich hyperlinks. Falls back
+    to plain white for anything else — including pre-flattened
+    `#N (url)` citations when `plain_citations` is in effect.
+    """
+    text = Text()
+    last = 0
+    for m in _QUOTES_INLINE_RE.finditer(content):
+        if m.start() > last:
+            text.append(content[last : m.start()], style="white")
+        if m.group(3) is not None:
+            text.append(m.group(3), style="bold magenta")
+        else:
+            text.append(m.group(1), style=f"link {m.group(2)} cyan")
+        last = m.end()
+    if last < len(content):
+        text.append(content[last:], style="white")
+    return text
+
+
+def render_quotes_body(body_md: str) -> Group:
+    """Custom Rich renderer for the `quotes` preset's report body.
+
+    Rich's default Markdown blockquote paints the bar, quote text, and
+    author handle in a single `markdown.block_quote` color (magenta) —
+    legible on light backgrounds, muddy on dark ones. This renderer
+    splits the styles: `▌` bar in magenta, quote text in white,
+    `@username` in bold magenta, citation links cyan + clickable. The
+    saved markdown file is untouched; only the console render swaps.
+    """
+    renderables: list[RenderableType] = []
+    for raw in body_md.splitlines():
+        line = raw.rstrip()
+        if line.startswith("> "):
+            bar = Text("▌ ", style="magenta")
+            bar.append_text(_render_quotes_inline(line[2:]))
+            renderables.append(bar)
+        elif line == ">":
+            renderables.append(Text("▌", style="magenta"))
+        elif (heading := _QUOTES_HEADING_RE.match(line)) is not None:
+            renderables.append(Text(heading.group(2), style="bold cyan"))
+        elif line == "":
+            renderables.append(Text(""))
+        else:
+            renderables.append(_render_quotes_inline(line))
+    return Group(*renderables)
+
+
 def render_meta_grid(rows: list[tuple[str, str]]) -> Table:
     """Build a Rich `Table.grid` for the report header.
 
@@ -134,6 +195,7 @@ def print_report_shell(
     no_save: bool = False,
     plain_citations: bool = False,
     saved_label_key: str = "also_saved",
+    preset: str | None = None,
 ) -> Path | None:
     """Render the report shell + (optionally) save to disk.
 
@@ -173,7 +235,10 @@ def print_report_shell(
             from unread.analyzer.commands import _flatten_citations
 
             rendered = _flatten_citations(rendered)
-        console.print(Markdown(rendered))
+        body_renderable: RenderableType = (
+            render_quotes_body(rendered) if preset == "quotes" else Markdown(rendered)
+        )
+        console.print(body_renderable)
         console.print(Rule(style="cyan"))
     else:
         # Even in --no-console mode, print the one-line summary so the

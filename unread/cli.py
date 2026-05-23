@@ -4258,6 +4258,56 @@ def prompt(
     )
 
 
+@app.command(rich_help_panel=PANEL_MAIN, help=_t("cmd_presets"))
+def presets(
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        "-l",
+        help="Preset directory to read (en, ru, …). Default: active report language.",
+    ),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Include hidden presets (auto-selected by routing logic, normally not user-pickable).",
+    ),
+) -> None:
+    """List the analysis presets you can pass to `--preset` for `unread <ref>`.
+
+    Reads `presets/<language>/*.md`. The active language defaults to your
+    locale.report_language (falls back to locale.language, then `en`).
+    Pass `--language ru` to peek at a different catalog without changing
+    settings.
+    """
+    from rich.table import Table
+
+    from unread.analyzer.prompts import get_presets
+
+    locale = get_settings().locale
+    active_lang = (language or locale.report_language or locale.language or "en").lower()
+    catalog = get_presets(active_lang)
+    items = sorted(catalog.values(), key=lambda p: (p.hidden, p.name))
+    if not show_all:
+        items = [p for p in items if not p.hidden]
+
+    if not items:
+        console.print(f"[grey70]No presets found for language {active_lang!r}.[/]")
+        return
+
+    table = Table(show_header=True, header_style="bold", title=f"Presets ({active_lang})")
+    table.add_column("name", style="cyan")
+    table.add_column("description")
+    table.add_column("enrich", style="grey70")
+    table.add_column("v", style="grey70")
+    for p in items:
+        name = p.name + ("  [grey50](hidden)[/]" if p.hidden else "")
+        enrich = ",".join(p.enrich_kinds) if p.enrich_kinds else "—"
+        table.add_row(name, p.description or "—", enrich, p.prompt_version)
+    console.print(table)
+    console.print("\n[grey70]Use with[/] [bold]unread <ref> --preset <name>[/][grey70].[/]")
+
+
 @app.command(rich_help_panel=PANEL_MAINT, help=_t("cmd_settings"))
 def settings() -> None:
     """Open the interactive settings editor.

@@ -376,6 +376,20 @@ class LocaleCfg(_StrictCfg):
     content_language: str = ""
 
 
+class InteractiveCfg(_StrictCfg):
+    """Knobs for wizard ergonomics (no effect outside the interactive shell).
+
+    `offer_more_presets` controls the tail prompt of `unread tg` / `unread`-
+    in-wizard-mode: after a successful analyze run, the wizard offers to
+    re-run the same window with another preset. Re-runs reuse the absolute
+    window the first run resolved (via `--repeat-last` semantics) so no
+    Telegram round-trip and no enrichment re-spend; only the map-reduce
+    LLM calls fire. Set to False to suppress the offer.
+    """
+
+    offer_more_presets: bool = True
+
+
 class ChatPricing(_StrictCfg):
     input: float
     cached_input: float
@@ -411,6 +425,7 @@ class Settings(BaseSettings):
     storage: StorageCfg = Field(default_factory=StorageCfg)
     logging: LoggingCfg = Field(default_factory=LoggingCfg)
     locale: LocaleCfg = Field(default_factory=LocaleCfg)
+    interactive: InteractiveCfg = Field(default_factory=InteractiveCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
 
     # Resolved at load time by `load_settings()`. Field default is the

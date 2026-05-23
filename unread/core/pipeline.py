@@ -223,6 +223,7 @@ def _build_mark_read_fn(
     chat_id: int,
     thread_id: int | None,
     topic_titles: dict[int, str] | None,
+    topic_markers: dict[int, int] | None,
     messages: list[Any],
     enabled: bool,
 ) -> Callable[[], Awaitable[int]] | None:
@@ -254,9 +255,40 @@ def _build_mark_read_fn(
         marked = 0
         if not topic_titles:
             return 0
+        markers = topic_markers or {}
         for tid, tname in topic_titles.items():
-            latest = latest_by_topic.get(tid, 0)
-            if not latest:
+            observed = latest_by_topic.get(tid, 0)
+            marker = int(markers.get(tid, 0))
+            # Primary path: we observed messages we could attribute to this
+            # topic via `m.thread_id` — advance to the per-topic max.
+            #
+            # Fallback path: no observed messages for this topic, but its
+            # pre-analysis marker was below `latest_msg_id`. This catches
+            # the case where Telethon didn't populate `reply_to.forum_topic`
+            # on the synced messages (General-topic posts, service msgs,
+            # stale-cache forum classification) — without it, every
+            # message lands as `thread_id=None` in the DB and
+            # `latest_by_topic` is empty for every topic, leaving the
+            # whole forum unread after analyze. `ReadDiscussionRequest`
+            # treats `read_max_id` as a chat-global msg_id ceiling, so
+            # passing the overall max is safe: Telegram only marks
+            # messages that actually belong to the topic. Topics whose
+            # marker is already at-or-above `latest_msg_id` are
+            # untouched.
+            if observed:
+                latest = observed
+            elif marker and marker < latest_msg_id:
+                latest = latest_msg_id
+                log.debug(
+                    "mark_read.topic.fallback",
+                    chat_id=chat_id,
+                    thread_id=tid,
+                    name=tname,
+                    marker=marker,
+                    latest=latest_msg_id,
+                    reason="no_observed_messages_with_thread_id",
+                )
+            else:
                 continue
             if await mark_as_read(client, chat_id, latest, thread_id=tid):
                 marked += 1
@@ -301,6 +333,8 @@ async def _pull_linked_comments(
     primary_msgs: list[Any],
     since_dt: datetime | None,
     until_dt: datetime | None,
+    comments_max: int | None = None,
+    comments_order: str = "all",
 ) -> tuple[dict[str, Any], list[Any]]:
     """Resolve `linked_chat_id`, backfill its date window, return (meta, msgs).
 
@@ -390,11 +424,50 @@ async def _pull_linked_comments(
         f"[grey70]{_tf('including_comments', title=title, linked_id=linked_id, since=com_since, until=com_until)}[/]"
     )
 
-    # Backfill the linked chat for the comment window. Use since_date
-    # when only since_dt is provided; otherwise rely on a forward pull
-    # from local_max so we don't refetch what's already there.
+    # Backfill the linked chat for the comment window. `comments_order`
+    # + `comments_max` define a soft cap on the fetch:
+    #
+    #   - "all" (default, comments_max=None): pull every message in
+    #     the date window. Same shape as the historical behavior.
+    #   - "first" N: oldest N within the window. Walk forward from
+    #     `com_since` and stop after N messages have been streamed
+    #     from Telegram.
+    #   - "last" N: newest N within the window. Walk backward from
+    #     `com_until` (or now) and stop after N messages.
+    #
+    # The cap is enforced at the Telegram-iter layer, NOT post-hoc
+    # in-memory slicing, so the network + Whisper / vision enrichment
+    # costs are actually bounded. Without a cap an active discussion
+    # group can pull 10-30x the channel's post count.
+    fetch_limit = comments_max if (comments_max and comments_max > 0) else None
     try:
-        if com_since is not None:
+        if comments_order == "last" and fetch_limit is not None:
+            # Newest-first walk capped at N. When `com_until` is "now"
+            # (the common case derived from the channel's post range),
+            # we omit offset_date so Telethon starts from the chat's
+            # tip.
+            await backfill(
+                client,
+                repo,
+                chat_id=linked_id,
+                thread_id=None,
+                since_date=com_since,  # soft floor on the back-walk
+                until_date=com_until,
+                direction="back",
+                limit_count=fetch_limit,
+            )
+        elif comments_order == "first" and fetch_limit is not None and com_since is not None:
+            await backfill(
+                client,
+                repo,
+                chat_id=linked_id,
+                thread_id=None,
+                since_date=com_since,
+                direction="forward",
+                limit_count=fetch_limit,
+            )
+        elif com_since is not None:
+            # "all" with an explicit since: pull the whole window.
             await backfill(
                 client,
                 repo,
@@ -425,6 +498,17 @@ async def _pull_linked_comments(
             until=com_until,
         )
     ]
+    # Final in-memory cap. The backfill above already limited what
+    # we fetched from Telegram, but the local DB may carry rows from
+    # an earlier "all"-mode run on the same window; trim here so the
+    # analysis sees exactly `comments_max` rows in the requested
+    # order. Sorted by msg_id (== chronological in a single chat).
+    if fetch_limit is not None and len(comments_msgs) > fetch_limit:
+        comments_msgs.sort(key=lambda m: m.msg_id)
+        if comments_order == "last":
+            comments_msgs = comments_msgs[-fetch_limit:]
+        else:  # "first" (and any future order that keeps the head)
+            comments_msgs = comments_msgs[:fetch_limit]
     if not comments_msgs:
         _status(f"[grey70]{_t('no_comments_in_window')}[/]")
 
@@ -460,6 +544,8 @@ async def prepare_chat_run(
     mark_read: bool = False,
     skip_filter: bool = False,
     with_comments: bool = False,
+    comments_max: int | None = None,
+    comments_order: str = "all",
     language: str | None = None,
     report_language: str | None = None,
 ) -> PreparedRun:
@@ -498,7 +584,6 @@ async def prepare_chat_run(
         start_msg_id=start_msg_id,
         since_dt=since_dt,
         full_history=full_history,
-        force_from_start=bool(topic_markers),
     )
 
     msgs = [
@@ -558,6 +643,8 @@ async def prepare_chat_run(
             primary_msgs=msgs,
             since_dt=since_dt,
             until_dt=until_dt,
+            comments_max=comments_max,
+            comments_order=comments_order,
         )
         log.debug(
             "prepare_chat_run.with_comments",
@@ -619,6 +706,7 @@ async def prepare_chat_run(
         chat_id=chat_id,
         thread_id=thread_id,
         topic_titles=topic_titles,
+        topic_markers=topic_markers,
         messages=msgs,
         enabled=mark_read,
     )

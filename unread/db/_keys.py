@@ -83,6 +83,13 @@ OVERRIDE_KEYS: tuple[str, ...] = (
     "enrich.image",
     "enrich.doc",
     "enrich.link",
+    # Per-run soft cost caps on the two enrichment kinds that fan out
+    # widely on busy chats (link + vision). 0 disables that enrichment;
+    # any positive int bounds the number of msgs the orchestrator
+    # processes before logging `enrich.cap_skip` and moving on. The cap
+    # counts messages, not unique URLs / images.
+    "enrich.max_link_fetches_per_run",
+    "enrich.max_images_per_run",
     # Analysis tuning
     "analyze.high_impact_reactions",
     "analyze.dedupe_forwards",
@@ -107,4 +114,6 @@ OVERRIDE_KEYS: tuple[str, ...] = (
     # Persisted choice is overridden at runtime by `UNREAD_LOG_MODE=…`
     # or the CLI flags (`-q`, `-v`, `--debug`).
     "logging.mode",
+    # Wizard ergonomics. See :class:`unread.config.InteractiveCfg`.
+    "interactive.offer_more_presets",
 )

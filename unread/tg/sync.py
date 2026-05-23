@@ -266,8 +266,10 @@ async def backfill(
     chat_id: int,
     from_msg_id: int | None = None,
     since_date: datetime | None = None,
+    until_date: datetime | None = None,
     thread_id: int | None = None,
     direction: str = "back",
+    limit_count: int | None = None,
 ) -> int:
     """One-shot history pull, no subscription row required, no sync_state writes.
 
@@ -275,6 +277,21 @@ async def backfill(
     given, pulls the full history (Telethon's default). Forward direction
     (`direction="forward"`) walks newer-first from the anchor; back walks
     older-first.
+
+    `until_date` (only meaningful with `direction="back"`) caps the walk
+    at the newer end — used by the linked-discussion "last N comments"
+    case to start from the channel-post window's upper bound rather than
+    the chat's tip.
+
+    `limit_count` is a soft cap on the number of messages fetched from
+    Telegram in this call. Combined with `direction` this yields:
+      - `"last N"` semantics → `direction="back"`, `limit_count=N`,
+        `until_date=<window_end>`. Newest-first walk capped at N.
+      - `"first N"` semantics → `direction="forward"`,
+        `since_date=<window_start>`, `limit_count=N`. Oldest-first walk
+        capped at N.
+    The cap is enforced at the iter loop, so the network + downstream
+    enrichment cost are actually bounded.
     """
     # Ensure we have a base subscription to attribute messages to.
     sub = await repo.get_subscription(chat_id, thread_id or 0)
@@ -297,6 +314,9 @@ async def backfill(
     if since_date is not None and direction == "forward":
         iter_kwargs["reverse"] = True
         iter_kwargs["offset_date"] = since_date
+    elif until_date is not None and direction == "back":
+        iter_kwargs["reverse"] = False
+        iter_kwargs["offset_date"] = until_date
     elif from_msg_id is not None:
         if direction == "forward":
             iter_kwargs["reverse"] = True
@@ -306,6 +326,8 @@ async def backfill(
             iter_kwargs["offset_id"] = from_msg_id
     elif direction == "forward":
         iter_kwargs["reverse"] = True
+    if limit_count is not None and limit_count > 0:
+        iter_kwargs["limit"] = limit_count
 
     settings = get_settings()
     log.debug(
@@ -388,9 +410,16 @@ async def backfill(
 
     from unread.util.logging import is_silent as _is_silent
 
+    # When walking back from a date upper bound, Telethon stops at the
+    # chat's earliest message — there's no lower-bound parameter. Apply
+    # the `since_date` floor here so a sparse window's "last N" walk
+    # doesn't silently pull messages from before the window.
+    floor_dt = since_date if direction == "back" and since_date is not None else None
     with Progress(*columns, transient=True, console=_console, disable=_is_silent()) as progress:
         task = progress.add_task("Fetching from Telegram", total=estimated_total)
         async for msg in client.iter_messages(**iter_kwargs):  # type: ignore[arg-type]
+            if floor_dt is not None and getattr(msg, "date", None) is not None and msg.date < floor_dt:
+                break
             await limiter.acquire()
             batch.append(normalize(msg, sub))
             if len(batch) >= settings.sync.batch_size:
