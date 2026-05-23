@@ -172,6 +172,7 @@ with contextlib.suppress(Exception):
 # command can pin its panel to the right localized header.
 PANEL_MAIN = _t("cli_panel_main")
 PANEL_TELEGRAM = _t("cli_panel_telegram")
+PANEL_BOT = _t("cli_panel_bot")
 PANEL_MAINT = _t("cli_panel_maint")
 
 # `no_args_is_help` removed: the root callback handles the no-arg case
@@ -234,8 +235,18 @@ tg_app = _UnreadTyper(
     # arg on the callback so we don't need _PreferSubcommandsGroup here.
     cls=_UnreadGroup,
 )
+# `bot` is the self-hosted Telegram-bot frontend. Same shape as `tg` —
+# a subgroup with its own verbs (`run`, `upload-session` helper, …)
+# rather than a single top-level command, so future bot-only knobs
+# (status / stats / etc.) hang off the same prefix.
+bot_app = _UnreadTyper(
+    help=_t("cmd_bot_group"),
+    cls=_UnreadGroup,
+    no_args_is_help=True,
+)
 
 app.add_typer(tg_app, name="tg", rich_help_panel=PANEL_TELEGRAM)
+app.add_typer(bot_app, name="bot", rich_help_panel=PANEL_BOT)
 app.add_typer(cache_app, name="cache", rich_help_panel=PANEL_MAINT)
 app.add_typer(backup_app, name="backup", rich_help_panel=PANEL_MAINT)
 # `chats` lives under `tg` (Telegram subscriptions). The previous
@@ -1142,16 +1153,15 @@ def _enumerate_commands(typer_app) -> list[tuple[str, str, str, bool]]:  # type:
     return rows
 
 
-def _enumerate_tg_subcommands() -> list[tuple[str, str]]:
-    """Return (name, one-line help) pairs for visible `tg` subcommands.
+def _enumerate_subapp_commands(sub_app) -> list[tuple[str, str]]:  # type: ignore[no-untyped-def]
+    """Return (name, one-line help) pairs for visible subcommands of any sub-Typer.
 
-    Hidden subcommands (legacy aliases like `dialogs`, `topics`,
-    `channel-info`, `download-media`, `backfill`) and nested groups
-    (e.g. `tg chats` — listed once under its own row) follow the same
-    rule: skip hidden, surface visible commands and groups as-is.
+    Used by the help overview to flatten `tg` / `bot` (and any future
+    subgroup) into their individual verbs. Skip hidden, surface visible
+    commands and groups as-is.
     """
     rows: list[tuple[str, str]] = []
-    for ci in tg_app.registered_commands:
+    for ci in sub_app.registered_commands:
         if ci.hidden:
             continue
         cli_name = ci.name or (ci.callback.__name__ if ci.callback else "")
@@ -1163,7 +1173,7 @@ def _enumerate_tg_subcommands() -> list[tuple[str, str]]:
             cli_name = cli_name[: -len("-cmd")]
         help_str = ci.help or (ci.callback.__doc__ or "").strip().split("\n")[0]
         rows.append((cli_name, help_str))
-    for gi in tg_app.registered_groups:
+    for gi in sub_app.registered_groups:
         if gi.hidden or not gi.typer_instance:
             continue
         name = gi.name or ""
@@ -1171,6 +1181,16 @@ def _enumerate_tg_subcommands() -> list[tuple[str, str]]:
         rows.append((name, help_str))
     rows.sort(key=lambda r: r[0])
     return rows
+
+
+def _enumerate_tg_subcommands() -> list[tuple[str, str]]:
+    """Back-compat alias — flattens the `tg` subgroup for the help overview."""
+    return _enumerate_subapp_commands(tg_app)
+
+
+def _enumerate_bot_subcommands() -> list[tuple[str, str]]:
+    """Flatten the `bot` subgroup for the help overview."""
+    return _enumerate_subapp_commands(bot_app)
 
 
 def _format_command_table(rows: list[tuple[str, str]], indent: str = "    ") -> str:
@@ -1249,11 +1269,15 @@ def _print_help_overview() -> None:
             for sub_name, sub_help in _enumerate_tg_subcommands():
                 by_panel.setdefault(PANEL_TELEGRAM, []).append((f"tg {sub_name}", sub_help))
             continue
+        if name == "bot":
+            for sub_name, sub_help in _enumerate_bot_subcommands():
+                by_panel.setdefault(PANEL_BOT, []).append((f"bot {sub_name}", sub_help))
+            continue
         effective_panel = init_panel if name == "init" else (panel or PANEL_MAIN)
         by_panel.setdefault(effective_panel, []).append((name, help_str))
 
     console.print("[bold]Commands[/]")
-    for panel in (PANEL_MAIN, PANEL_TELEGRAM, PANEL_MAINT):
+    for panel in (PANEL_MAIN, PANEL_TELEGRAM, PANEL_BOT, PANEL_MAINT):
         items = by_panel.get(panel, [])
         if not items:
             continue
@@ -5374,6 +5398,20 @@ def init_cmd(
     if force:
         _init_force_clear_session()
     _run(cmd_init(scope="full"))
+
+
+@bot_app.command(name="run", help=_t("cmd_bot_run"))
+def bot_run_cmd() -> None:
+    """Start the self-hosted Telegram bot in long-polling mode.
+
+    Blocks forever. The bot itself silently drops every message whose
+    sender isn't `settings.bot.owner_id`, so a missing or malformed
+    allowlist fails at startup (refuses to start with `owner_id == 0`)
+    rather than serving the wrong person quietly.
+    """
+    from unread.bot.commands import cmd_bot_run
+
+    _run(cmd_bot_run())
 
 
 @tg_app.command(

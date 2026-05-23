@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -12,6 +13,18 @@ from unread.ask.sources.file import _prompt_question  # reuse the same TTY-promp
 from unread.config import get_settings
 
 console = Console()
+
+
+def _fmt_hms(seconds: int | None) -> str:
+    sec = max(0, int(seconds or 0))
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _render_timed(cues: list[tuple[int, str]]) -> str:
+    """Format captions as ``[HH:MM:SS] line`` rows so the LLM can quote seekable timecodes."""
+    return "\n".join(f"[{_fmt_hms(start)}] {body}".strip() for start, body in cues)
 
 
 async def cmd_ask_youtube(
@@ -85,8 +98,18 @@ async def cmd_ask_youtube(
             console.print(f"[grey70]Using cached YouTube metadata + transcript ({video_id})[/]")
             meta = _restore_metadata_from_row(cached)
             console.print(_render_metadata_panel(meta, audio_estimate=0.0))
-            text = (cached.get("transcript") or "").strip()
             cached_source = cached.get("transcript_source") or "captions"
+            timed_raw = cached.get("transcript_timed_json")
+            timed_cues: list[tuple[int, str]] | None = None
+            if timed_raw:
+                try:
+                    timed_cues = [(int(s), str(t)) for s, t in json.loads(timed_raw)]
+                except (TypeError, ValueError):
+                    timed_cues = None
+            if timed_cues:
+                text = _render_timed(timed_cues).strip()
+            else:
+                text = (cached.get("transcript") or "").strip()
             console.print(f"[green]Transcript ready[/] ({cached_source}, {len(text):,} chars, cached)")
         else:
             if cached:
@@ -117,11 +140,9 @@ async def cmd_ask_youtube(
             except YoutubeFetchError as e:
                 console.print(f"[red]YouTube fetch failed: {str(e)[:300]}[/]")
                 raise typer.Exit(1) from e
+            text = _render_timed(tres.timed_cues).strip() if tres.timed_cues else (tres.text or "").strip()
             cost_str = f", ${tres.cost_usd:.4f}" if tres.cost_usd > 0 else ""
-            console.print(
-                f"[green]Transcript ready[/] ({tres.source}, {len(tres.text or ''):,} chars{cost_str})"
-            )
-            text = (tres.text or "").strip()
+            console.print(f"[green]Transcript ready[/] ({tres.source}, {len(text):,} chars{cost_str})")
 
     if not text:
         console.print("[red]Transcript is empty — nothing to answer over.[/]")

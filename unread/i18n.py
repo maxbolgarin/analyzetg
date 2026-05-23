@@ -237,6 +237,30 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Run the Telegram bot in long-polling mode (foreground).",
         "ru": "Запустить Telegram-бот в режиме long-polling (foreground).",
     },
+    "bot_missing_tg_creds": {
+        "en": "Telegram API credentials missing.",
+        "ru": "Не заданы Telegram API-креды.",
+    },
+    "bot_missing_tg_creds_hint": {
+        "en": "Set TELEGRAM_API_ID + TELEGRAM_API_HASH (env or ~/.unread/.env) — required even in bot mode.",
+        "ru": "Задай TELEGRAM_API_ID + TELEGRAM_API_HASH (env или ~/.unread/.env) — нужны и в режиме бота.",
+    },
+    "bot_missing_token": {
+        "en": "@BotFather token missing.",
+        "ru": "Не задан токен @BotFather.",
+    },
+    "bot_missing_token_hint": {
+        "en": "Set UNREAD_BOT_TOKEN (env) or [bot].token in ~/.unread/config.toml.",
+        "ru": "Задай UNREAD_BOT_TOKEN (env) или [bot].token в ~/.unread/config.toml.",
+    },
+    "bot_missing_owner_id": {
+        "en": "No owner allowlist available. Either mount an authorized user session at settings.telegram.session_path OR set UNREAD_BOT_OWNER_ID.",
+        "ru": "Нет owner allowlist. Либо положи авторизованную user-session в settings.telegram.session_path, либо задай UNREAD_BOT_OWNER_ID.",
+    },
+    "bot_missing_owner_id_hint": {
+        "en": "If you set UNREAD_BOT_OWNER_ID and then upload your session, the session-derived owner_id takes over (you'll see a warning if they differ).",
+        "ru": "Если задашь UNREAD_BOT_OWNER_ID и потом загрузишь session — owner_id из session перепишет env (будет warning при расхождении).",
+    },
     "cmd_folders": {
         "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`). Invoke as `unread tg describe folders`.",
         "ru": "Список папок Telegram (для `unread --folder NAME` / `unread dump --folder NAME`). Команда: `unread tg describe folders`.",

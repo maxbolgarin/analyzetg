@@ -3,9 +3,10 @@
 Mirrors :mod:`unread.youtube.commands` shape (fetch metadata, optional
 transcript / download) but skips the LLM analysis. Three modes:
 
-- ``transcript`` — ``metadata.json`` + ``transcript.md`` (+
-  ``transcript_timed.json`` when cues are available). Honors the
-  existing ``--youtube-source`` flag.
+- ``transcript`` — ``metadata.json`` + ``transcript.md`` (plain text,
+  no per-cue timestamps). Honors the existing ``--youtube-source`` flag.
+  Per-cue timing is still cached in the DB for the analyze / ask paths,
+  it just isn't emitted into the dump directory.
 - ``audio`` — ``metadata.json`` + ``audio.mp3`` (yt-dlp + ffmpeg).
 - ``video`` — ``metadata.json`` + ``video.mp4`` / ``.mkv`` /
   ``.webm`` (yt-dlp + ffmpeg merging).
@@ -51,13 +52,6 @@ log = get_logger(__name__)
 YoutubeDumpMode = Literal["transcript", "audio", "video"]
 
 
-def _fmt_hms(seconds: int | None) -> str:
-    sec = max(0, int(seconds or 0))
-    m, s = divmod(sec, 60)
-    h, m = divmod(m, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-
-
 def _metadata_dict(meta: YoutubeMetadata) -> dict:
     """JSON-serializable view of the metadata.
 
@@ -72,17 +66,14 @@ def _metadata_dict(meta: YoutubeMetadata) -> dict:
 
 
 def _build_transcript_md(meta: YoutubeMetadata, tres: TranscriptResult) -> str:
-    """Markdown body: meta header + cue-tagged transcript when timed.
+    """Markdown body: meta header + plain transcript text (no per-cue timestamps).
 
-    For caption sources we emit ``[HH:MM:SS] line`` rows so the user can
-    seek into the video. Audio/Whisper has no per-cue timing — we fall
-    back to plain transcript text.
+    Per-cue timing is preserved in the DB (and used by the analyze / ask
+    paths so the LLM can quote ``[HH:MM:SS]`` markers) but the dump
+    artifact is plain reading copy.
     """
     header = _meta_header(meta)
-    if tres.timed_cues:
-        body = "\n".join(f"[{_fmt_hms(start)}] {text}".strip() for start, text in tres.timed_cues)
-    else:
-        body = (tres.text or "").strip()
+    body = (tres.text or "").strip()
     parts = [header, "", "## Transcript", "", body]
     return "\n".join(parts).rstrip() + "\n"
 
@@ -132,25 +123,14 @@ async def _do_transcript_mode(
     settings,
     cached_row: dict | None,
 ) -> None:
-    timed_cues: list[tuple[int, str]] | None = None
     if cached_row and cached_row.get("transcript"):
-        text = cached_row["transcript"] or ""
-        source = cached_row.get("transcript_source") or "captions"
-        cost = float(cached_row.get("transcript_cost_usd") or 0.0)
-        lang = cached_row.get("language")
-        timed_raw = cached_row.get("transcript_timed_json")
-        if timed_raw:
-            try:
-                timed_cues = [(int(s), str(t)) for s, t in json.loads(timed_raw)]
-            except (TypeError, ValueError):
-                timed_cues = None
         tres = TranscriptResult(
-            text=text,
-            source=source,  # type: ignore[arg-type]
-            language=lang,
+            text=cached_row["transcript"] or "",
+            source=cached_row.get("transcript_source") or "captions",  # type: ignore[arg-type]
+            language=cached_row.get("language"),
             duration_sec=meta.duration_sec,
-            cost_usd=cost,
-            timed_cues=timed_cues,
+            cost_usd=float(cached_row.get("transcript_cost_usd") or 0.0),
+            timed_cues=None,
         )
     else:
         try:
@@ -187,7 +167,6 @@ async def _do_transcript_mode(
             transcript_cost_usd=tres.cost_usd,
             transcript_timed=tres.timed_cues,
         )
-        timed_cues = tres.timed_cues
 
     if not (tres.text or "").strip():
         console.print(f"[red]{_t('cli_error_prefix')}[/] {_t('err_files_empty_transcript')}")
@@ -195,11 +174,6 @@ async def _do_transcript_mode(
 
     _write_metadata(meta, dump_dir / "metadata.json")
     (dump_dir / "transcript.md").write_text(_build_transcript_md(meta, tres), encoding="utf-8")
-    if timed_cues:
-        (dump_dir / "transcript_timed.json").write_text(
-            json.dumps([[s, t] for s, t in timed_cues], ensure_ascii=False),
-            encoding="utf-8",
-        )
 
     console.print(f"[green]{_tf('dump_youtube_transcript_done', path=dump_dir)}[/]")
 

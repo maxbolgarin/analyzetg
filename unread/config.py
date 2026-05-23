@@ -376,19 +376,6 @@ class LocaleCfg(_StrictCfg):
     content_language: str = ""
 
 
-def _default_bot_session_path() -> Path:
-    """Default location for the operator-mounted user session file.
-
-    Lives OUTSIDE `~/.unread/` so a docker-compose deploy can mount the
-    session as its own named volume (read-write, owner-only) without
-    sharing a volume with the much larger `~/.unread/` state tree.
-    Operators who prefer to point this at their existing
-    `~/.unread/storage/session.sqlite` override via `[bot] session_path`
-    or `UNREAD_BOT_SESSION_PATH`.
-    """
-    return Path("/var/lib/unread-bot/session.sqlite")
-
-
 class BotCfg(_StrictCfg):
     """Settings for `unread bot` — the self-hosted Telegram bot frontend.
 
@@ -399,15 +386,15 @@ class BotCfg(_StrictCfg):
     `token` is sensitive and flows through `data.sqlite::secrets` as
     `telegram.bot_token` — same surface as the other API keys.
     Everything else is plain config. The operator deploying the bot on
-    a VM is expected to set `owner_id`, `session_path`, and `token`
-    once at deploy time.
+    a VM is expected to set `owner_id` and `token` once at deploy time.
 
     The bot is single-user by design: every event from a sender other
     than `owner_id` is silently dropped (no reply, no log spam). To
     read the owner's private chats — which a bot_token cannot do — the
-    bot opens a SECOND Telethon client against `session_path`, the
-    owner's already-bootstrapped user session, and uses it for any
-    `t.me/...` link the owner sends.
+    bot piggybacks on the *standard* Telethon user session at
+    `settings.telegram.session_path`. Operators either mount that
+    session onto the VM before starting the container OR send it as
+    `/upload_session` once via the bot itself.
     """
 
     # @BotFather token. Persisted as `telegram.bot_token` in the secrets
@@ -418,11 +405,6 @@ class BotCfg(_StrictCfg):
     # Owner's Telegram numeric user ID. Find it by messaging
     # @userinfobot once. Env var: `UNREAD_BOT_OWNER_ID`.
     owner_id: int = 0
-
-    # Path to the owner's already-authorized Telethon user session.
-    # Operator copies it onto the VM at deploy time; the
-    # `/upload_session` command is the fallback when forgotten.
-    session_path: Path = Field(default_factory=_default_bot_session_path)
 
     # Max concurrent analyses. Each analyze pipeline already
     # parallelizes internally — 2 is plenty for a single user.
@@ -704,24 +686,18 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
             raw["bot"]["owner_id"] = int(bot_owner)
         except ValueError as e:
             raise ValueError(f"UNREAD_BOT_OWNER_ID must be an integer, got: {bot_owner!r}") from e
-    if bot_session := _env("UNREAD_BOT_SESSION_PATH"):
-        raw["bot"]["session_path"] = bot_session
     if bot_concurrency := _env("UNREAD_BOT_CONCURRENCY"):
         try:
             raw["bot"]["concurrency"] = int(bot_concurrency)
         except ValueError as e:
-            raise ValueError(
-                f"UNREAD_BOT_CONCURRENCY must be an integer, got: {bot_concurrency!r}"
-            ) from e
+            raise ValueError(f"UNREAD_BOT_CONCURRENCY must be an integer, got: {bot_concurrency!r}") from e
     if bot_preset := _env("UNREAD_BOT_DEFAULT_PRESET"):
         raw["bot"]["default_preset"] = bot_preset
     if bot_max_file := _env("UNREAD_BOT_MAX_FILE_MB"):
         try:
             raw["bot"]["max_file_mb"] = int(bot_max_file)
         except ValueError as e:
-            raise ValueError(
-                f"UNREAD_BOT_MAX_FILE_MB must be an integer, got: {bot_max_file!r}"
-            ) from e
+            raise ValueError(f"UNREAD_BOT_MAX_FILE_MB must be an integer, got: {bot_max_file!r}") from e
 
     # Back-compat: mirror legacy [media].transcribe_* into [enrich] when the
     # user hasn't declared [enrich] yet. Keeps existing configs working without

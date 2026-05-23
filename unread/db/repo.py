@@ -2545,6 +2545,52 @@ class Repo:
             return 0.0
         return float(row["c"] or 0) / float(row["p"])
 
+    async def sum_usage_since(
+        self,
+        since: datetime,
+        *,
+        phases: Iterable[str] | None = None,
+    ) -> dict[str, float]:
+        """Aggregate token/cost counters across usage_log rows since `since`.
+
+        Used by the `unread bot` reply path to render a per-request
+        cost/timing caption. `phases` filters on the JSON-extracted
+        `context.phase` tag — pass `None` to sum every row in the window.
+        Returns a dict with keys ``prompt_tokens``, ``cached_tokens``,
+        ``completion_tokens``, ``cost_usd``, all numeric and always
+        present (zero when no rows match).
+        """
+        sql = (
+            "SELECT "
+            "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+            "COALESCE(SUM(cached_tokens), 0) AS cached_tokens, "
+            "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            "FROM usage_log WHERE created_at >= ?"
+        )
+        args: list[Any] = [since.isoformat()]
+        phase_list = list(phases) if phases is not None else None
+        if phase_list:
+            placeholders = ",".join("?" for _ in phase_list)
+            sql += f" AND json_extract(context, '$.phase') IN ({placeholders})"
+            args.extend(phase_list)
+        cur = await self._conn.execute(sql, args)
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return {
+                "prompt_tokens": 0.0,
+                "cached_tokens": 0.0,
+                "completion_tokens": 0.0,
+                "cost_usd": 0.0,
+            }
+        return {
+            "prompt_tokens": float(row["prompt_tokens"] or 0),
+            "cached_tokens": float(row["cached_tokens"] or 0),
+            "completion_tokens": float(row["completion_tokens"] or 0),
+            "cost_usd": float(row["cost_usd"] or 0),
+        }
+
 
 @asynccontextmanager
 async def open_repo(path: Path | str) -> AsyncIterator[Repo]:

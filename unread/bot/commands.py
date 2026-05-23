@@ -20,10 +20,15 @@ console = Console()
 async def cmd_bot_run() -> None:
     """Start the self-hosted Telegram bot in long-polling mode.
 
-    Blocks forever (until SIGINT). Validates that the @BotFather token,
-    owner_id, and Telegram api_id/api_hash are all set before opening
-    the first network connection — operator gets a focused banner
-    instead of a Telethon stack trace if something's missing.
+    Blocks forever (until SIGINT). Validates that the @BotFather token
+    and Telegram api_id/api_hash are set before opening the first
+    network connection.
+
+    `owner_id` is auto-derived from `settings.telegram.session_path`
+    when that session is present and authorized — so a deploy that
+    mounts the session ahead of time doesn't need `UNREAD_BOT_OWNER_ID`
+    at all. When neither a session nor an env-var owner_id is
+    available, the bot has no safe allowlist and refuses to start.
     """
     from unread.bot.app import BotApp
     from unread.cli import _telegram_credentials_present
@@ -34,28 +39,25 @@ async def cmd_bot_run() -> None:
     # Telethon's MTProto layer authenticates the *application* via
     # api_id/api_hash separately from the per-account auth).
     if not _telegram_credentials_present():
-        console.print(
-            f"[red]{_t('bot_missing_tg_creds')}[/]\n"
-            f"[grey70]{_t('bot_missing_tg_creds_hint')}[/]"
-        )
+        console.print(f"[red]{_t('bot_missing_tg_creds')}[/]\n[grey70]{_t('bot_missing_tg_creds_hint')}[/]")
         raise typer.Exit(1)
 
     # Gate 2: @BotFather token.
     if not s.bot.token:
-        console.print(
-            f"[red]{_t('bot_missing_token')}[/]\n"
-            f"[grey70]{_t('bot_missing_token_hint')}[/]"
-        )
+        console.print(f"[red]{_t('bot_missing_token')}[/]\n[grey70]{_t('bot_missing_token_hint')}[/]")
         raise typer.Exit(1)
 
-    # Gate 3: owner_id allowlist. A zero owner_id would mean "accept
-    # nobody" (and silently). Refuse to start in that state — the
-    # operator definitely meant to set it.
-    if not s.bot.owner_id:
-        console.print(
-            f"[red]{_t('bot_missing_owner_id')}[/]\n"
-            f"[grey70]{_t('bot_missing_owner_id_hint')}[/]"
-        )
+    # Gate 3: there must be SOME path to a non-zero owner_id. Two
+    # acceptable shapes:
+    #   - `UNREAD_BOT_OWNER_ID` is set → use it directly.
+    #   - A user session file exists → BotApp will derive owner_id
+    #     from it during startup (via get_me()).
+    # If neither is available, the bot has no allowlist and the first
+    # person to message it would otherwise become the owner (TOFU). We
+    # refuse that — operator must either mount the session OR set the
+    # env var as an explicit bootstrap allowlist.
+    if not s.bot.owner_id and not s.telegram.session_path.exists():
+        console.print(f"[red]{_t('bot_missing_owner_id')}[/]\n[grey70]{_t('bot_missing_owner_id_hint')}[/]")
         raise typer.Exit(1)
 
     app = BotApp(s)
