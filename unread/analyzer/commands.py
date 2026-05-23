@@ -545,14 +545,6 @@ async def cmd_analyze(
         preset=resolved_preset,
     )
 
-    # Preflight: if any AV enrichment kind is enabled, ffmpeg is required.
-    # Catch the missing-binary case BEFORE we sync messages / fetch metadata
-    # so the user doesn't wait minutes only to hit a transcode error.
-    if enrich_opts.voice or enrich_opts.videonote or enrich_opts.video:
-        from unread.util.preflight import require_ffmpeg
-
-        require_ffmpeg("transcribe voice / video media")
-
     # No ref but --folder → batch-analyze unread chats in that folder; skip wizard.
     if ref is None and folder:
         # Batch mode is unread-only today. Reject period flags explicitly —
@@ -859,6 +851,15 @@ async def cmd_analyze(
             yes=yes,
         )
         return
+
+    # Preflight: if any AV enrichment kind is enabled, ffmpeg is required for
+    # the Telegram pipeline. File / YouTube / website branches above handle
+    # ffmpeg requirements internally (only when they actually transcode), so
+    # they must not be gated by this top-level check.
+    if enrich_opts.voice or enrich_opts.videonote or enrich_opts.video:
+        from unread.util.preflight import require_ffmpeg
+
+        require_ffmpeg("transcribe voice / video media")
 
     async with tg_client(settings) as client, open_repo(settings.storage.data_path) as repo:
         _status(f"[grey70]{_tf('resolving', ref=effective_ref)}[/]")
