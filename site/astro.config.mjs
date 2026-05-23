@@ -1,7 +1,6 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import sitemap from '@astrojs/sitemap';
-import tailwindcss from '@tailwindcss/vite';
 import { visit } from 'unist-util-visit';
 
 const BASE = '/unread';
@@ -39,7 +38,6 @@ export default defineConfig({
   output: 'static',
   trailingSlash: 'always',
   build: { format: 'directory' },
-  vite: { plugins: [/** @type {any} */ (tailwindcss())] },
   integrations: [
     sitemap({
       filter: (page) => !page.includes('/404'),
