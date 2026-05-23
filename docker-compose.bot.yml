@@ -1,0 +1,55 @@
+# Self-hosted `unread bot`, single container.
+#
+# Quick start:
+#   1. Copy `.env.bot.example` to `.env.bot` and fill in the four
+#      required env vars (TELEGRAM_API_ID / TELEGRAM_API_HASH /
+#      OPENAI_API_KEY / UNREAD_BOT_TOKEN / UNREAD_BOT_OWNER_ID).
+#   2. `docker compose -f docker-compose.bot.yml --env-file .env.bot up -d`
+#   3. Message your bot. If it complains "send /upload_session", do that
+#      and drop your `~/.unread/storage/session.sqlite` from your
+#      laptop in as a document.
+#
+# Logs:    docker compose -f docker-compose.bot.yml logs -f
+# Update:  docker compose -f docker-compose.bot.yml pull && ... up -d --build
+
+services:
+  unread-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    image: unread-bot:latest
+    restart: unless-stopped
+    environment:
+      # Telegram app credentials (my.telegram.org). Same values you'd
+      # set on a laptop running `unread tg login`.
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}"
+
+      # AI provider — at least one. The bot uses whatever's configured;
+      # OpenAI is recommended for full feature coverage (Whisper /
+      # vision are OpenAI-only inside unread today).
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+
+      # Bot-specific.
+      UNREAD_BOT_TOKEN: "${UNREAD_BOT_TOKEN:?UNREAD_BOT_TOKEN is required}"
+      # Optional: derived from the mounted user session when one is
+      # present at /root/.unread/storage/session.sqlite. Only required
+      # for the first /upload_session bootstrap when no session is
+      # mounted yet. When both are present, the session-derived ID
+      # wins and the env var is logged as a warning.
+      UNREAD_BOT_OWNER_ID: "${UNREAD_BOT_OWNER_ID:-0}"
+      UNREAD_BOT_CONCURRENCY: "${UNREAD_BOT_CONCURRENCY:-2}"
+      UNREAD_BOT_DEFAULT_PRESET: "${UNREAD_BOT_DEFAULT_PRESET:-}"
+      UNREAD_BOT_MAX_FILE_MB: "${UNREAD_BOT_MAX_FILE_MB:-100}"
+    volumes:
+      # Persists reports, cache, secrets DB, and the uploaded user
+      # session across restarts. Drop your existing
+      # ~/.unread/storage/session.sqlite in here ahead of time to skip
+      # the /upload_session step.
+      - unread_state:/root/.unread
+
+volumes:
+  unread_state:

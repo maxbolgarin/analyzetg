@@ -8,7 +8,7 @@
 [![CI](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **[Website](https://maxbolgarin.github.io/unread/)** · **[Docs](https://maxbolgarin.github.io/unread/docs/)** · **[PyPI](https://pypi.org/project/unread/)**
 
@@ -65,10 +65,10 @@ hint is optional.
 
 ```bash
 # Russian-language group, English summary
-unread @ru_dev_news --last-days 7 --report-language en
+unread @forklog --last-days 7 --report-language en
 
 # English channel, Russian summary
-unread @stratechery --last-days 14 --report-language ru
+unread @thehackernews --last-days 14 --report-language ru
 ```
 
 Out of the box, hand-tuned preset *structures* ship for `en` and `ru`
@@ -104,10 +104,11 @@ report becomes a `t=SECONDS` deep link, so clicking jumps you to that
 moment of the video.
 
 ```bash
-unread "https://www.youtube.com/watch?v=jmzoJCn8evU"     # analyze
-unread ask "what's the main argument?" https://youtu.be/dQw4w9WgXcQ
-unread dump "https://youtu.be/<id>" --mode=transcript    # save transcript only
-unread dump "https://youtu.be/<id>" --mode=audio         # … or the audio file
+unread https://www.youtube.com/watch?v=Pmd6knanPKw # analyze 30 mins of podcast
+unread https://www.youtube.com/watch?v=SBEtiXnLtpw --report-language de   # DE report from random old russian lecture
+unread ask https://youtube.com/watch\?v\=k1njvbBmfsw "from what timecode should i start watching if i want to know about RAG?"
+unread dump https://www.youtube.com/watch?v=BDqvzFY72mg --mode=transcript # save transcript only
+
 ```
 
 Cached after the first run. Re-asking a question about the same video
@@ -227,6 +228,38 @@ reads `UNREAD_PASSPHRASE` for headless unlock.
 as the bundled ones in [`presets/`](presets/). Bump `prompt_version`
 in the frontmatter when you edit, otherwise the cache won't notice.
 
+## Self-hosted Telegram bot
+
+Same pipeline, Telegram-side surface. Run it on a VM and message your own
+`@BotFather` bot with any file / URL / YouTube link / forwarded message
+— you get the Markdown report back as a document with a one-line cost
+caption.
+
+It's **single-user**: the bot only answers ONE Telegram user. The
+allowlist is auto-derived from the user session you give it (mounted
+or sent via `/upload_session`); `UNREAD_BOT_OWNER_ID` is only a
+bootstrap fallback for the case where no session is installed yet.
+Everyone else is silently dropped.
+
+```bash
+# 1. Get a token from @BotFather.
+# 2. Copy the env template and fill it in.
+cp .env.bot.example .env.bot
+$EDITOR .env.bot
+# 3. Up.
+docker compose -f docker-compose.bot.yml --env-file .env.bot up -d --build
+```
+
+The first time you message the bot with a `t.me/...` link it'll ask
+for `/upload_session` — send your laptop's
+`~/.unread/storage/session.sqlite` as a Telegram document and it's
+ready. (Alternative: SCP that file into the `unread_state` volume at
+`/root/.unread/storage/session.sqlite` before starting the container —
+then you can leave `UNREAD_BOT_OWNER_ID` unset; the bot reads the
+owner ID from the session itself.)
+
+Logs: `docker compose -f docker-compose.bot.yml logs -f`.
+
 ## Deep docs
 
 The full reference manual lives under `docs/`:
@@ -238,8 +271,6 @@ The full reference manual lives under `docs/`:
 | Every CLI command, every flag, the wizard, `watch`, subscriptions | [`docs/reference.md`](docs/reference.md) |
 | Languages, cost & caching, `config.toml`, maintenance, troubleshooting, architecture | [`docs/configuration.md`](docs/configuration.md) |
 | Threat model, encryption backends, PII redaction, session hygiene | [`docs/security.md`](docs/security.md) |
-| Contributor map: invariants, caching layers, schema, editing hazards | [`CLAUDE.md`](CLAUDE.md) |
-| Release notes | [`CHANGELOG.md`](CHANGELOG.md) |
 
 Useful inline help: `unread --help`, `unread <subcommand> --help`,
 `unread help`, `unread doctor`.
@@ -280,4 +311,4 @@ out of your system Python.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
