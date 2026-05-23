@@ -100,14 +100,20 @@ def test_summary_preset_has_adequate_budget() -> None:
 
 def test_tldr_preset_is_compact_single_paragraph() -> None:
     # `tldr` is the absolute-shortest read — 2-3 sentences, single
-    # paragraph. Pin tight token budgets so future tidy-up doesn't
-    # quietly inflate it into "summary lite". The system prompt must
-    # also forbid headers / bullets / citations, which are the markers
-    # of structured output.
+    # paragraph. The system prompt must forbid headers / bullets /
+    # citations (the markers of structured output). The output budget
+    # is enforced by the prompt, not the token cap — capping the cap
+    # too tight (e.g. 400/600) made multi-chunk forum reduce calls hit
+    # `finish=length` mid-sentence on every run. The cache rule refuses
+    # to store truncated results, so each truncation re-bills the full
+    # prompt on the next run. Allow up to 1500 here to give the reduce
+    # pass on big inputs room to land coherently while the system prompt
+    # still enforces brevity. If you find tldr drifting into "summary
+    # lite", fix the system prompt — not the cap.
     p = PRESETS["tldr"]
-    assert p.output_budget_tokens <= 600, (
+    assert p.output_budget_tokens <= 1500, (
         f"tldr output_budget_tokens={p.output_budget_tokens} is too generous — "
-        "the preset is meant to be one paragraph."
+        "the preset is meant to be one paragraph; enforce brevity via the system prompt."
     )
     assert "no headers" in p.system.lower() or "no structure" in p.system.lower(), (
         "tldr system prompt should explicitly forbid structured output"

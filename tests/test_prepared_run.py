@@ -304,7 +304,11 @@ async def test_prepare_all_unread_forum_uses_per_topic_markers(repo, monkeypatch
     assert prepared.topic_titles == {1: "T1", 2: "T2"}
     assert prepared.topic_markers == {1: 50, 2: 250}
     assert {m.msg_id for m in prepared.messages} == {100, 300}
-    assert backfill_calls[0]["from_msg_id"] == 51
+    # With local_max above the topic floor (max msg_id > 50 is 300), the
+    # forward backfill anchors at local_max + 1 = 301 instead of re-walking
+    # from the floor. Saves re-fetching the 50..300 range from Telegram on
+    # every flat-forum analyze run.
+    assert backfill_calls[0]["from_msg_id"] == 301
 
 
 async def test_prepare_all_unread_clamps_stale_read_marker(repo, monkeypatch):
