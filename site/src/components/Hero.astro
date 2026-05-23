@@ -1,22 +1,38 @@
 ---
 import { GH_URL } from '../consts';
 import TerminalWindow from './TerminalWindow.astro';
+
+const demo = [
+  `<span class="m">$</span> <span class="b">unread</span> <span class="a">@thehackernews</span> <span class="m">--last-days 14</span>`,
+  `<span class="c">→</span> Resolved <span class="b">The Hacker News</span> <span class="c">(channel)</span>`,
+  `<span class="c">→</span> Fetched 99 new messages from Telegram`,
+  `<span class="c">→</span> Running analysis... 4 chunks <span class="c">(gpt-5.4-mini)</span>`,
+  `<span class="c">→</span> Wrote <span class="a">~/.unread/reports/the-hacker-news/<wbr/>summary-2026-05-23.md</span>`,
+  `   <span class="c">$0.016 · 18s</span>`,
+  ``,
+  `<span class="b">## TL;DR</span>`,
+  `Active exploitation and supply-chain compromise dominated`,
+  `the period: KEV-listed flaws, repeated abuse of npm/PyPI/`,
+  `GitHub workflows, attacker speed outpacing patching.`,
+  ``,
+  `<span class="b">## Worth checking</span>`,
+  `- <span class="a">[#8980]</span> Mini Shai-Hulud worm — GitHub OIDC + cache poisoning`,
+  `- <span class="a">[#9008]</span> Cisco SD-WAN CVE-2026-20182 — active exploit, CISA KEV`,
+  `- <span class="a">[#9063]</span> Megalodon — 5,561 repos compromised in 6 hours`,
+].join('\n');
 ---
 <section class="hero">
   <div class="container hero-inner">
     <div class="hero-text">
-      <div class="eyebrow">
-        <span class="dot"></span>
-        <span>Local-first · MIT · Beta</span>
-      </div>
-      <h1>Your unread is now read.</h1>
+      <h1>Read your unread.</h1>
       <p class="lead">
-        A local CLI that turns <strong>Telegram chats, YouTube videos, web pages, and files</strong>
-        into Markdown reports with citations — using whichever LLM you keep an API key for.
+        I had 50 Telegram channels I'd never read. Now I read one Markdown summary a week —
+        every claim links back to the message, paragraph, or timestamp it came from.
+        Same thing works on <strong>YouTube videos, web pages, PDFs, and stdin</strong>.
       </p>
       <div class="ctas">
         <a href="#quickstart" class="btn btn-primary">
-          Install in 90 seconds
+          Install in 30 seconds
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
         </a>
         <a href={GH_URL} class="btn btn-ghost" rel="noopener" target="_blank">
@@ -24,29 +40,12 @@ import TerminalWindow from './TerminalWindow.astro';
           Star on GitHub
         </a>
       </div>
-      <ul class="hero-bullets">
-        <li><span class="check">✓</span> Citations on every claim</li>
-        <li><span class="check">✓</span> SQLite on your disk</li>
-        <li><span class="check">✓</span> Any LLM provider</li>
-      </ul>
+      <p class="footnote">
+        Open source (Apache&nbsp;2.0). Runs on macOS, Linux, Windows. Your data stays on your disk.
+      </p>
     </div>
     <div class="hero-demo">
-      <TerminalWindow title="~/projects">
-<span class="m">$</span> <span class="b">unread</span> <span class="a">@ru_dev_news</span> <span class="m">--last-days 7 --report-language en</span>
-<span class="ok">✓</span> Fetched 1,284 messages from <span class="a">@ru_dev_news</span> <span class="c">(6.2s)</span>
-<span class="ok">✓</span> Map-reduce: 8 chunks → merged <span class="c">(12.4s · $0.07)</span>
-<span class="ok">✓</span> Wrote <span class="a">~/.unread/reports/ru_dev_news/digest-2026-05-23.md</span>
-
-<span class="c"># Top decisions</span>
-- Migrate analytics off Segment by Q3 <span class="a">[#1586]</span>
-- Roll out indexed funds policy in Q1 2026 <span class="a">[#1612]</span>
-
-<span class="c"># Open questions</span>
-- Who owns the migration runbook? <span class="a">[#1591]</span>
-
-<span class="m">$</span> <span class="b">unread ask</span> <span class="a">@ru_dev_news</span> <span class="m">"What did Anna propose?"</span>
-<span class="ok">✓</span> Anna proposed a phased migration with feature flags <span class="a">[#1604]</span>.
-      </TerminalWindow>
+      <TerminalWindow title="~"><Fragment set:html={demo} /></TerminalWindow>
     </div>
   </div>
 </section>
@@ -54,18 +53,6 @@ import TerminalWindow from './TerminalWindow.astro';
 <style>
   .hero {
     padding: 4.5rem 0 3rem;
-    position: relative;
-    overflow: hidden;
-  }
-  .hero::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background:
-      radial-gradient(700px 320px at 80% 0%, var(--accent-soft), transparent 70%),
-      radial-gradient(800px 380px at 10% 100%, var(--accent-soft), transparent 70%);
-    z-index: -1;
-    pointer-events: none;
   }
   .hero-inner {
     display: grid;
@@ -77,36 +64,13 @@ import TerminalWindow from './TerminalWindow.astro';
     .hero-inner { grid-template-columns: 1fr; gap: 2.5rem; }
     .hero { padding-top: 3rem; }
   }
-  .eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    color: var(--fg-muted);
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.3rem 0.8rem;
-    margin-bottom: 1.2rem;
-  }
-  .eyebrow .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--success);
-    box-shadow: 0 0 8px var(--success);
-  }
   h1 {
     font-size: clamp(2.4rem, 5vw, 3.6rem);
     line-height: 1.05;
     letter-spacing: -0.03em;
     margin: 0 0 1.1rem;
     font-weight: 800;
-    background: linear-gradient(180deg, var(--fg) 30%, color-mix(in oklab, var(--fg) 70%, var(--accent)));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--fg);
   }
   .lead {
     font-size: 1.12rem;
@@ -120,25 +84,12 @@ import TerminalWindow from './TerminalWindow.astro';
     display: flex;
     gap: 0.75rem;
     flex-wrap: wrap;
-    margin-bottom: 1.6rem;
+    margin-bottom: 1.4rem;
   }
-  .hero-bullets {
-    list-style: none;
-    padding: 0;
+  .footnote {
     margin: 0;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1.2rem;
     color: var(--fg-muted);
-    font-size: 0.9rem;
-  }
-  .hero-bullets li {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-  .check {
-    color: var(--success);
-    font-weight: 700;
+    font-size: 0.88rem;
+    max-width: 56ch;
   }
 </style>

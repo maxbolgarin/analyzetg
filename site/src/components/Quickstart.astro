@@ -1,48 +1,52 @@
 ---
 import { BASE } from '../consts';
+import CodeBlock from './CodeBlock.astro';
 
-const install = `# 1. Install uv (one line, all platforms)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install unread
-uv tool install unread
-
-# 3. Run
-unread init
-unread "https://paulgraham.com/greatwork.html"`;
+const steps = [
+  {
+    label: '1. Install uv',
+    note: 'one line, all platforms',
+    cmd: 'curl -LsSf https://astral.sh/uv/install.sh | sh',
+  },
+  {
+    label: '2. Install unread',
+    cmd: 'uv tool install unread',
+  },
+  {
+    label: '3. Set up',
+    note: 'pick your AI provider, paste your key, optionally connect Telegram',
+    cmd: 'unread init',
+  },
+  {
+    label: '4. Run something',
+    note: 'any URL, file path, or Telegram ref',
+    cmd: 'unread "https://paulgraham.com/greatwork.html"',
+  },
+];
 ---
 <section id="quickstart" class="quickstart">
   <div class="container">
     <header class="section-head">
-      <p class="kicker">Quickstart</p>
-      <h2>90 seconds. Three commands.</h2>
+      <h2>Install in four steps.</h2>
       <p class="sub">
-        No virtualenv to activate. No <code>pip</code> conflicts. No global Python pollution.
-        Works on macOS, Linux, and Windows.
+        <code>uv</code> installs the binary in an isolated env. No virtualenv to activate, no <code>pip</code>
+        conflicts, no global Python pollution. Works on macOS, Linux, and Windows.
       </p>
     </header>
 
-    <div class="code-wrap">
-      <button class="copy-btn" type="button" data-copy={install} aria-label="Copy install commands">
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="13" height="13" rx="2"/>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        <span class="copy-label">Copy</span>
-      </button>
-      <pre><code><span class="c"># 1. Install uv (one line, all platforms)</span>
-curl -LsSf <span class="a">https://astral.sh/uv/install.sh</span> | sh
-
-<span class="c"># 2. Install unread</span>
-uv tool install <span class="b">unread</span>
-
-<span class="c"># 3. Run</span>
-<span class="b">unread</span> init
-<span class="b">unread</span> <span class="a">"https://paulgraham.com/greatwork.html"</span></code></pre>
-    </div>
+    <ol class="steps">
+      {steps.map((s) => (
+        <li class="step">
+          <div class="step-head">
+            <span class="step-label">{s.label}</span>
+            {s.note && <span class="step-note">{s.note}</span>}
+          </div>
+          <CodeBlock lang="bash" copyText={s.cmd}>{s.cmd}</CodeBlock>
+        </li>
+      ))}
+    </ol>
 
     <p class="hint">
-      First run launches <code>unread init</code> — pick your AI provider, paste your key, optionally connect Telegram.
       Need more detail? See the <a href={`${BASE}/docs/install/`}>full install guide</a>.
     </p>
   </div>
@@ -51,14 +55,6 @@ uv tool install <span class="b">unread</span>
 <style>
   .quickstart { padding: 4rem 0; }
   .section-head { margin-bottom: 2rem; max-width: 62ch; }
-  .kicker {
-    font-family: var(--font-mono);
-    color: var(--accent);
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin: 0 0 0.5rem;
-  }
   .section-head h2 {
     font-size: clamp(1.8rem, 3.2vw, 2.4rem);
     line-height: 1.15;
@@ -71,7 +67,7 @@ uv tool install <span class="b">unread</span>
     font-size: 1.02rem;
     margin: 0;
   }
-  .section-head .sub code, .hint code {
+  .section-head .sub code, .hint code, .step-note code {
     background: var(--bg-code);
     border: 1px solid var(--border);
     border-radius: 5px;
@@ -79,45 +75,34 @@ uv tool install <span class="b">unread</span>
     font-size: 0.88em;
     color: var(--fg);
   }
-  .code-wrap {
-    position: relative;
-    background: var(--bg-code);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-  .copy-btn {
-    position: absolute;
-    top: 0.7rem;
-    right: 0.7rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.35rem 0.6rem;
-    background: var(--bg-elev);
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font-size: 0.78rem;
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
-  }
-  .copy-btn:hover { color: var(--accent); border-color: var(--accent); }
-  .copy-btn.copied { color: var(--success); border-color: var(--success); }
-  pre {
+  .steps {
+    list-style: none;
     margin: 0;
-    padding: 1.4rem 1.5rem;
-    overflow-x: auto;
-    color: var(--fg);
-    font-family: var(--font-mono);
-    font-size: 0.9rem;
-    line-height: 1.65;
+    padding: 0;
+    display: grid;
+    gap: 1.1rem;
   }
-  .a { color: var(--accent); }
-  .b { color: var(--fg); font-weight: 700; }
-  .c { color: var(--fg-dim); }
+  .step { margin: 0; }
+  .step-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-bottom: 0.4rem;
+  }
+  .step-label {
+    color: var(--fg);
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+  .step-note {
+    color: var(--fg-muted);
+    font-size: 0.85rem;
+  }
+  /* Tighten the CodeBlock margin inside a step */
+  .step :global(.code-wrap) { margin: 0; }
   .hint {
-    margin: 1rem 0 0;
+    margin: 1.4rem 0 0;
     color: var(--fg-muted);
     font-size: 0.92rem;
   }

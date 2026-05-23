@@ -1,6 +1,5 @@
 ---
-import { BASE, GH_URL, NAV } from '../consts';
-import ThemeToggle from './ThemeToggle.astro';
+import { BASE, NAV } from '../consts';
 
 const pathname = Astro.url.pathname.replace(/\/+$/, '/');
 function isActive(href: string) {
@@ -12,7 +11,11 @@ function isActive(href: string) {
 <header class="site-header">
   <div class="container header-inner">
     <a class="brand" href={`${BASE}/`} aria-label="unread — home">
-      <span class="brand-prompt">$</span>
+      <svg class="brand-mark" width="22" height="22" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M40 28 L28 28 L28 72 L40 72" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M60 28 L72 28 L72 72 L60 72" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="50" cy="50" r="8" fill="#3b82f6"/>
+      </svg>
       <span class="brand-name">unread</span>
     </a>
     <nav class="nav" aria-label="Primary">
@@ -34,15 +37,6 @@ function isActive(href: string) {
         );
       })}
     </nav>
-    <div class="actions">
-      <ThemeToggle />
-      <a href={GH_URL} class="gh-btn" aria-label="Star unread on GitHub" rel="noopener" target="_blank">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.5-1.4-1.3-1.7-1.3-1.7-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.9 2.9 1.3 3.6 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.3.5-2.4 1.2-3.3-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.3a11.5 11.5 0 0 1 6 0c2.3-1.6 3.3-1.3 3.3-1.3.7 1.7.3 2.9.1 3.2.8.9 1.2 2 1.2 3.3 0 4.7-2.8 5.7-5.5 6 .4.3.8 1 .8 2v3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"/>
-        </svg>
-        <span>Star</span>
-      </a>
-    </div>
   </div>
 </header>
 
@@ -51,9 +45,7 @@ function isActive(href: string) {
     position: sticky;
     top: 0;
     z-index: 50;
-    background: color-mix(in oklab, var(--bg) 80%, transparent);
-    backdrop-filter: saturate(140%) blur(12px);
-    -webkit-backdrop-filter: saturate(140%) blur(12px);
+    background: var(--bg);
     border-bottom: 1px solid var(--border);
   }
   .header-inner {
@@ -65,24 +57,20 @@ function isActive(href: string) {
   }
   .brand {
     display: inline-flex;
-    align-items: baseline;
-    gap: 0.4rem;
+    align-items: center;
+    gap: 0.5rem;
     color: var(--fg);
     font-weight: 700;
     font-size: 1.05rem;
     letter-spacing: -0.01em;
   }
   .brand:hover { color: var(--fg); }
-  .brand-prompt {
-    color: var(--accent);
-    font-family: var(--font-mono);
-  }
+  .brand-mark { display: block; flex-shrink: 0; }
   .brand-name { font-family: var(--font-mono); }
   .nav {
     display: flex;
     gap: 0.25rem;
-    margin-left: 1rem;
-    flex: 1;
+    margin-left: auto;
   }
   .nav-link {
     color: var(--fg-muted);
@@ -101,29 +89,8 @@ function isActive(href: string) {
     color: var(--accent);
     background: var(--accent-soft);
   }
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .gh-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    color: var(--fg);
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    padding: 0.4rem 0.7rem;
-    font-size: 0.88rem;
-    font-weight: 600;
-    background: var(--bg-elev);
-  }
-  .gh-btn:hover {
-    color: var(--fg);
-    border-color: var(--accent);
-  }
   @media (max-width: 640px) {
-    .nav { display: none; }
-    .gh-btn span { display: none; }
+    .nav { gap: 0; }
+    .nav-link { padding: 0.4rem 0.5rem; font-size: 0.85rem; }
   }
 </style>

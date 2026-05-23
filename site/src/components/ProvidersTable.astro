@@ -1,19 +1,18 @@
 ---
 const providers = [
-  { name: 'OpenAI',     models: 'gpt-5.x family',    extras: 'Whisper · vision · embeddings', notes: 'Default. Required for Whisper, vision, and embeddings.' },
-  { name: 'Anthropic',  models: 'Claude 4.x family', extras: 'Long-context champion',          notes: 'Excellent for big reduces and structured output.' },
-  { name: 'Google',     models: 'Gemini 2.x',        extras: 'Cheapest at scale',              notes: 'Long context with aggressive pricing.' },
-  { name: 'OpenRouter', models: 'Anything',          extras: 'One key, many models',           notes: 'Mix-and-match across providers without juggling keys.' },
-  { name: 'Local',      models: 'Ollama, LM Studio, vLLM', extras: 'Fully offline analysis',  notes: 'Air-gapped operation. Bring your own GPU.' },
+  { name: 'OpenAI',     models: 'gpt-5.x family',    extras: 'Whisper, vision, embeddings', notes: 'The full toolkit. Required if you also want audio transcription or image descriptions.' },
+  { name: 'Anthropic',  models: 'Claude 4.x family', extras: 'Long context',                notes: 'Pair with an OpenAI key if you want voice or image enrichment.' },
+  { name: 'Google',     models: 'Gemini 2.x',        extras: 'Long context, cheap',         notes: 'Same pairing note as Anthropic.' },
+  { name: 'OpenRouter', models: 'Anything',          extras: 'One key, many models',        notes: 'Handy for trying Llama / DeepSeek / Mistral without separate signups.' },
+  { name: 'Local',      models: 'Ollama, LM Studio, vLLM', extras: 'Offline',               notes: 'Zero cost, zero data leakage. Bring your own GPU.' },
 ];
 ---
 <section class="providers">
   <div class="container">
     <header class="section-head">
-      <p class="kicker">Providers</p>
-      <h2>Bring your own model.</h2>
+      <h2>Use whichever key you already have.</h2>
       <p class="sub">
-        Switch any time with <code>unread settings</code>. Caches and analyses persist across provider changes.
+        Switch any time with <code>unread settings</code>. Caches and reports persist across switches.
       </p>
     </header>
     <div class="table-wrap">
@@ -39,7 +38,7 @@ const providers = [
       </table>
     </div>
     <p class="footnote">
-      Whisper transcription, vision descriptions, and embeddings are OpenAI-only today. Everything else works on any provider.
+      Whisper, vision, and embeddings are OpenAI-only today. If you pick another chat provider and also want media enrichment, drop in an OpenAI key alongside — <code>unread init</code> offers it.
     </p>
   </div>
 </section>
@@ -47,14 +46,6 @@ const providers = [
 <style>
   .providers { padding: 4rem 0; background: var(--bg-elev); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
   .section-head { margin-bottom: 1.8rem; max-width: 60ch; }
-  .kicker {
-    font-family: var(--font-mono);
-    color: var(--accent);
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin: 0 0 0.5rem;
-  }
   .section-head h2 {
     font-size: clamp(1.8rem, 3.2vw, 2.4rem);
     line-height: 1.15;
@@ -112,6 +103,14 @@ const providers = [
     margin: 1rem 0 0;
     color: var(--fg-muted);
     font-size: 0.86rem;
+  }
+  .footnote code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.92em;
+    color: var(--fg);
   }
   @media (max-width: 720px) {
     .hide-sm { display: none; }

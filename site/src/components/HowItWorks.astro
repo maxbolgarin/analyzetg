@@ -1,0 +1,172 @@
+---
+const sources = [
+  {
+    name: 'Telegram',
+    example: 'unread @ru_dev_news --last-days 7',
+    note: 'Chats, channels, topic-threaded forums, channel comments. Voice notes are transcribed. Photos are described. Forwards are deduped — Whisper runs once across N chats. Citations are clickable t.me links.',
+  },
+  {
+    name: 'YouTube',
+    example: 'unread https://youtu.be/dQw4w9WgXcQ',
+    note: 'Captions if the video has them, Whisper if it doesn\'t. Every citation becomes a t=SECONDS deep link that jumps to the moment.',
+  },
+  {
+    name: 'Web pages',
+    example: 'unread "https://paulgraham.com/greatwork.html"',
+    note: 'trafilatura extracts the main content; your LLM does the rest. Paragraph-level citations. Cached locally so follow-up asks are free.',
+  },
+  {
+    name: 'Files & stdin',
+    example: 'unread ./meeting.mp3   |   cat notes.txt | unread',
+    note: 'PDF, DOCX, MD, audio, video, images. Audio and video go through Whisper; images go through vision. Stdin works too — pipe anything in.',
+  },
+];
+
+const verbs = [
+  {
+    cmd: 'unread <ref>',
+    name: 'analyze',
+    desc: 'Map-reduce the source into a Markdown report. Every claim links back to its message, paragraph, or timestamp.',
+  },
+  {
+    cmd: 'unread ask <ref> "Q"',
+    name: 'ask',
+    desc: 'One-shot Q&A over the same source, with citations. Multi-turn follow-ups stay in the same session.',
+  },
+  {
+    cmd: 'unread dump <ref>',
+    name: 'dump',
+    desc: 'Save the verbatim original — chat history, transcript, article. No LLM call, no cost.',
+  },
+];
+---
+<section class="how">
+  <div class="container">
+    <div class="intro">
+      <h2>One <code>&lt;ref&gt;</code>, three verbs.</h2>
+      <p>
+        I wanted the same command to work whether I point it at a Telegram channel,
+        a YouTube link, or a PDF on disk. So <code>&lt;ref&gt;</code> means any of those,
+        and the same three verbs (<code>analyze</code>, <code>ask</code>, <code>dump</code>)
+        run on each.
+      </p>
+    </div>
+
+    <div class="verbs">
+      {verbs.map((v) => (
+        <div class="verb">
+          <code class="verb-cmd">{v.cmd}</code>
+          <p><strong>{v.name}</strong> — {v.desc}</p>
+        </div>
+      ))}
+    </div>
+
+    <h3 class="sources-heading">A <code>&lt;ref&gt;</code> can be</h3>
+    <div class="sources">
+      {sources.map((s) => (
+        <div class="src">
+          <div class="src-name">{s.name}</div>
+          <code class="src-ex">{s.example}</code>
+          <p>{s.note}</p>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .how { padding: 4rem 0; }
+  .intro { max-width: 62ch; margin-bottom: 2.5rem; }
+  .intro h2 {
+    font-size: clamp(1.8rem, 3vw, 2.3rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.9rem;
+  }
+  .intro p {
+    color: var(--fg-muted);
+    font-size: 1.05rem;
+    line-height: 1.65;
+    margin: 0;
+  }
+  .intro code, .sources-heading code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.85em;
+    color: var(--accent);
+  }
+
+  .verbs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+    margin-bottom: 3rem;
+  }
+  @media (max-width: 800px) {
+    .verbs { grid-template-columns: 1fr; }
+  }
+  .verb {
+    border-left: 2px solid var(--border);
+    padding: 0.15rem 0 0.15rem 1rem;
+  }
+  .verb-cmd {
+    display: inline-block;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--fg);
+    margin-bottom: 0.55rem;
+  }
+  .verb p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.93rem;
+    line-height: 1.55;
+  }
+  .verb p strong { color: var(--fg); font-weight: 700; }
+
+  .sources-heading {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--fg);
+    margin: 0 0 1rem;
+  }
+
+  .sources {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.2rem 1.6rem;
+  }
+  @media (max-width: 700px) { .sources { grid-template-columns: 1fr; } }
+  .src {
+    display: grid;
+    gap: 0.45rem;
+  }
+  .src-name {
+    color: var(--fg);
+    font-weight: 700;
+    font-size: 0.98rem;
+  }
+  .src-ex {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.81rem;
+    color: var(--fg);
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .src p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.93rem;
+    line-height: 1.6;
+  }
+</style>

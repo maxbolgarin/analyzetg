@@ -24,25 +24,6 @@
   --shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.6);
 }
 
-:root[data-theme="light"] {
-  color-scheme: light;
-  --bg: #fafafa;
-  --bg-elev: #ffffff;
-  --bg-code: #f4f6f8;
-  --border: #e6e8ec;
-  --border-strong: #d1d5db;
-  --fg: #0f172a;
-  --fg-muted: #475467;
-  --fg-dim: #667085;
-  --accent: #0284c7;
-  --accent-strong: #0369a1;
-  --accent-soft: rgba(2, 132, 199, 0.10);
-  --success: #16a34a;
-  --warn: #ca8a04;
-  --danger: #dc2626;
-  --shadow: 0 12px 40px -12px rgba(15, 23, 42, 0.15);
-}
-
 * {
   box-sizing: border-box;
 }
@@ -59,10 +40,7 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(1200px 600px at 50% -200px, var(--accent-soft), transparent 70%),
-    var(--bg);
-  background-attachment: fixed;
+  background: var(--bg);
 }
 
 a {
@@ -105,22 +83,13 @@ pre.shiki {
   margin: 1.1rem 0;
 }
 
-/* Theme-aware Shiki swap */
-:root pre.shiki .line span,
-:root pre.astro-code span {
+pre.shiki .line span,
+pre.astro-code span {
   color: var(--shiki-dark) !important;
   background-color: var(--shiki-dark-bg) !important;
   font-style: var(--shiki-dark-font-style) !important;
   font-weight: var(--shiki-dark-font-weight) !important;
   text-decoration: var(--shiki-dark-text-decoration) !important;
-}
-:root[data-theme="light"] pre.shiki .line span,
-:root[data-theme="light"] pre.astro-code span {
-  color: var(--shiki-light) !important;
-  background-color: var(--shiki-light-bg) !important;
-  font-style: var(--shiki-light-font-style) !important;
-  font-weight: var(--shiki-light-font-weight) !important;
-  text-decoration: var(--shiki-light-text-decoration) !important;
 }
 
 /* Prose styling for docs content */

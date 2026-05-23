@@ -1,8 +1,8 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Hero from '../components/Hero.astro';
-import CommandsGrid from '../components/CommandsGrid.astro';
-import SourcesGrid from '../components/SourcesGrid.astro';
+import WhyThisExists from '../components/WhyThisExists.astro';
+import HowItWorks from '../components/HowItWorks.astro';
 import WhyUnread from '../components/WhyUnread.astro';
 import Quickstart from '../components/Quickstart.astro';
 import ProvidersTable from '../components/ProvidersTable.astro';
@@ -20,9 +20,9 @@ import {
 } from '../consts';
 import { faqItems } from '../faqData';
 
-const title = 'unread — Telegram, YouTube & web summarizer CLI with citations';
+const title = 'unread — Telegram, YouTube and web summarizer CLI';
 const description =
-  'Open-source local CLI that turns Telegram chats, YouTube videos, and web pages into Markdown reports with citations. OpenAI, Anthropic, Gemini, OpenRouter, or local LLMs.';
+  'A local CLI that turns Telegram chats, YouTube videos, web pages, and files into Markdown reports with citations. Use OpenAI, Anthropic, Gemini, OpenRouter, or a local model.';
 
 const homeUrl = new URL(`${BASE}/`, SITE_URL).toString();
 
@@ -60,8 +60,8 @@ const faqSchema = {
   jsonLd={[softwareSchema, faqSchema]}
 >
   <Hero />
-  <CommandsGrid />
-  <SourcesGrid />
+  <WhyThisExists />
+  <HowItWorks />
   <WhyUnread />
   <Quickstart />
   <ProvidersTable />

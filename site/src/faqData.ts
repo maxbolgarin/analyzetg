@@ -52,8 +52,8 @@ export const faqItems: FaqItem[] = [
   {
     q: 'Is it really free and open source?',
     aText:
-      'Yes. unread is MIT-licensed and developed in the open on GitHub. You only pay your LLM provider for the tokens you use. There is no service, no telemetry, no account.',
+      'Yes. unread is Apache 2.0 licensed and developed in the open on GitHub. You only pay your LLM provider for the tokens you use. No service, no telemetry, no account.',
     aHtml:
-      'Yes. <code>unread</code> is MIT-licensed and developed in the open on <a href="https://github.com/maxbolgarin/unread" rel="noopener" target="_blank">GitHub</a>. You only pay your LLM provider for the tokens you use. There is no service, no telemetry, no account.',
+      'Yes. <code>unread</code> is Apache 2.0 licensed and developed in the open on <a href="https://github.com/maxbolgarin/unread" rel="noopener" target="_blank">GitHub</a>. You only pay your LLM provider for the tokens you use. No service, no telemetry, no account.',
   },
 ];

@@ -1,0 +1,59 @@
+---
+import { AUTHOR, AUTHOR_URL } from '../consts';
+---
+<section class="why-exists">
+  <div class="container">
+    <div class="prose-block">
+      <h2>Why this exists</h2>
+      <p>
+        I have ~50 Telegram groups I genuinely want to follow and not enough hours
+        to read them. The same is true for the videos I bookmark and the articles
+        I save to "read later." Most days, my unread count just keeps climbing.
+      </p>
+      <p>
+        LLMs are now cheap enough that analyzing a week of group chat costs less
+        than a coffee. My time is not. So I built the CLI I wanted to use —
+        local-first, citation-backed, provider-agnostic — and now I open Telegram
+        a lot less.
+      </p>
+      <p>
+        It's not a service. There's no signup, no telemetry, no cloud. It runs on
+        your laptop or a VM, your data stays on your disk, and you pay your LLM
+        provider directly for the tokens you use. A week of group chat is usually
+        pennies.
+      </p>
+      <p class="sig">
+        — <a href={AUTHOR_URL} rel="noopener" target="_blank">{AUTHOR}</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+<style>
+  .why-exists { padding: 4rem 0; border-top: 1px solid var(--border); }
+  .prose-block {
+    max-width: 62ch;
+    margin: 0 auto;
+  }
+  .prose-block h2 {
+    font-size: clamp(1.6rem, 2.6vw, 2rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 1.2rem;
+    color: var(--fg);
+  }
+  .prose-block p {
+    color: var(--fg-muted);
+    font-size: 1.02rem;
+    line-height: 1.7;
+    margin: 0 0 1rem;
+  }
+  .prose-block p:last-of-type { margin-bottom: 0; }
+  .sig {
+    margin-top: 1.4rem !important;
+    font-style: italic;
+    color: var(--fg-dim) !important;
+  }
+  .sig a { color: var(--fg-muted); }
+  .sig a:hover { color: var(--accent); }
+</style>
