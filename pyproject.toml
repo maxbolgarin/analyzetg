@@ -90,6 +90,16 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
+# `unread bot` extras. `weasyprint` renders the analyze report as a PDF
+# so phone Telegram clients (which don't preview .md) get a readable
+# attachment. Optional — when missing, the bot gracefully falls back to
+# uploading the raw .md file. Requires the Pango system library
+# (Linux: `apt-get install libpango-1.0-0 libpangoft2-1.0-0`;
+#  macOS: `brew install pango`).
+bot = [
+    "weasyprint>=62",
+    "markdown-it-py>=3.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/maxbolgarin/unread"

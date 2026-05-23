@@ -16,11 +16,18 @@
 
 FROM python:3.11-slim AS base
 
-# ffmpeg powers audio/video transcoding for Whisper. Without it, the
-# bot can still serve files/URLs/YouTube text but voice/video uploads
-# fail with a friendly "ffmpeg required" message at request time.
+# System deps:
+# - ffmpeg: audio/video transcoding for Whisper. Without it, the bot
+#   can still serve files/URLs/YouTube text but voice/video uploads
+#   fail with a friendly "ffmpeg required" message at request time.
+# - libpango / libpangoft2: backs `weasyprint` for the
+#   markdown → PDF report rendering. The bot ships PDF instead of
+#   raw .md because phone Telegram clients don't preview markdown.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
  && rm -rf /var/lib/apt/lists/*
 
 # Install the project into the system site-packages. We don't use a
@@ -31,7 +38,7 @@ COPY unread ./unread
 COPY presets ./presets
 
 RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir .
+ && pip install --no-cache-dir ".[bot]"
 
 # The bot writes reports, cache, and (after /upload_session) the
 # user session into ~/.unread. Mounting this as a named volume keeps

@@ -1,16 +1,28 @@
-# unread
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark/wordmark-ondark.png">
+    <img alt="unread" src="assets/wordmark/wordmark-onlight.png" width="320">
+  </picture>
+</p>
+<p align="center"><em>Read your unread. Without reading it.</em></p>
 
-> Your unread is now read. A local CLI that turns Telegram chats,
-> YouTube videos, web pages, and files into Markdown reports with
-> citations — using whichever LLM you keep an API key for.
+<p align="center">
+  <a href="https://pypi.org/project/unread/"><img src="https://img.shields.io/pypi/v/unread.svg" alt="PyPI"></a>
+  <a href="https://github.com/maxbolgarin/unread/actions/workflows/ci.yml"><img src="https://github.com/maxbolgarin/unread/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/unread.svg)](https://pypi.org/project/unread/)
-[![CI](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml/badge.svg)](https://github.com/maxbolgarin/unread/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<p align="center">
+  <strong><a href="https://maxbolgarin.github.io/unread/">Website</a></strong> ·
+  <strong><a href="https://maxbolgarin.github.io/unread/docs/">Docs</a></strong> ·
+  <strong><a href="https://pypi.org/project/unread/">PyPI</a></strong>
+</p>
 
-**[Website](https://maxbolgarin.github.io/unread/)** · **[Docs](https://maxbolgarin.github.io/unread/docs/)** · **[PyPI](https://pypi.org/project/unread/)**
+> A local CLI that turns Telegram chats, YouTube videos, web pages,
+> and files into Markdown reports with citations — using whichever LLM
+> you keep an API key for.
 
 ---
 
@@ -18,8 +30,9 @@ You have 47 unread Telegram groups. You will never read them.
 You will now.
 
 ```bash
-uv tool install unread
-unread init
+uv tool install unread && unread init
+```
+```bash
 unread @somegroup --last-days 7
 ```
 
@@ -28,21 +41,15 @@ for, and hands you a Markdown report with clickable citations back to
 every claim. Same shape for YouTube videos, web pages, PDFs, voice
 notes, and stdin.
 
-<!--
-Record once and replace REPLACE_ME below:
-  asciinema rec demo.cast --title "unread: telegram → report"
-  asciinema upload demo.cast
--->
-[![asciicast](https://asciinema.org/a/REPLACE_ME.svg)](https://asciinema.org/a/REPLACE_ME)
+![unread analyzing a Telegram channel into a Markdown report](.github/examples/analyze-example.gif)
 
 ## What it does
 
-Four verbs. The same `<ref>` shape works on all of them.
+Three verbs. The same `<ref>` shape works on all of them.
 
 - `unread <ref>` — **analyze**. Map-reduce the source into a Markdown report. Every claim links back to its message / paragraph / timestamp.
 - `unread ask <ref> "Q"` — **ask**. One-shot Q&A with citations. Multi-turn follow-ups are one keystroke away.
 - `unread dump <ref>` — **dump**. Save the original — chat history, transcript, article — verbatim. No LLM call.
-- `unread doctor` — **doctor**. Preflight: keys, ffmpeg, DB, pricing, FDE, cloud-sync warnings. Run this first when something looks wrong.
 
 `<ref>` is any of:
 
@@ -89,6 +96,8 @@ What you get back, for a Russian chat with `--report-language en`:
 ```
 
 Every citation is a `t.me` link. Click → Telegram opens that message.
+
+See [a real report](.github/examples/summary.md) from `@thehackernews` — 99 messages over two weeks, four chunks, $0.016, every bullet linked back to its source.
 
 `unread` handles forums (topics), channel comments, voice notes
 (transcribed), photos (described), forwarded media (deduped — Whisper
@@ -162,6 +171,43 @@ those work with only an AI key.
 Full install matrix (Windows / ffmpeg / dev install / editable) is in
 [`docs/install.md`](docs/install.md).
 
+## Self-hosted Telegram bot
+
+Same pipeline, Telegram-side surface. Run it on a VM and message your own
+`@BotFather` bot with any file / URL / YouTube link / forwarded message
+— you get the Markdown report back as a document with a one-line cost
+caption.
+
+It's **single-user**: the bot only answers ONE Telegram user. The
+allowlist is auto-derived from the user session you give it (mounted
+or sent via `/upload_session`); `UNREAD_BOT_OWNER_ID` is only a
+bootstrap fallback for the case where no session is installed yet.
+Everyone else is silently dropped.
+
+```bash
+# 1. Get a token from @BotFather.
+# 2. Copy the env template and fill it in.
+cp .env.bot.example .env.bot
+```
+
+```bash
+unread bot run
+```
+
+Or you can use docker compose (e.g. on a server):
+```bash
+docker compose -f docker-compose.bot.yml --env-file .env.bot up -d --build
+```
+
+The first time you message the bot with a `t.me/...` link it'll ask
+for `/upload_session` — send your laptop's
+`~/.unread/storage/session.sqlite` as a Telegram document and it's
+ready. (Alternative: SCP that file into the `unread_state` volume at
+`/root/.unread/storage/session.sqlite` before starting the container —
+then you can leave `UNREAD_BOT_OWNER_ID` unset; the bot reads the
+owner ID from the session itself.)
+
+
 ## Why this exists
 
 I have ~50 Telegram groups I genuinely want to follow and not enough
@@ -228,37 +274,6 @@ reads `UNREAD_PASSPHRASE` for headless unlock.
 as the bundled ones in [`presets/`](presets/). Bump `prompt_version`
 in the frontmatter when you edit, otherwise the cache won't notice.
 
-## Self-hosted Telegram bot
-
-Same pipeline, Telegram-side surface. Run it on a VM and message your own
-`@BotFather` bot with any file / URL / YouTube link / forwarded message
-— you get the Markdown report back as a document with a one-line cost
-caption.
-
-It's **single-user**: the bot only answers ONE Telegram user. The
-allowlist is auto-derived from the user session you give it (mounted
-or sent via `/upload_session`); `UNREAD_BOT_OWNER_ID` is only a
-bootstrap fallback for the case where no session is installed yet.
-Everyone else is silently dropped.
-
-```bash
-# 1. Get a token from @BotFather.
-# 2. Copy the env template and fill it in.
-cp .env.bot.example .env.bot
-$EDITOR .env.bot
-# 3. Up.
-docker compose -f docker-compose.bot.yml --env-file .env.bot up -d --build
-```
-
-The first time you message the bot with a `t.me/...` link it'll ask
-for `/upload_session` — send your laptop's
-`~/.unread/storage/session.sqlite` as a Telegram document and it's
-ready. (Alternative: SCP that file into the `unread_state` volume at
-`/root/.unread/storage/session.sqlite` before starting the container —
-then you can leave `UNREAD_BOT_OWNER_ID` unset; the bot reads the
-owner ID from the session itself.)
-
-Logs: `docker compose -f docker-compose.bot.yml logs -f`.
 
 ## Deep docs
 
