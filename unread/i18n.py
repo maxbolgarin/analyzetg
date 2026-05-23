@@ -184,6 +184,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "cli_panel_main": {"en": "Main", "ru": "Основные"},
     "cli_panel_telegram": {"en": "Telegram", "ru": "Telegram"},
+    "cli_panel_bot": {"en": "Bot", "ru": "Бот"},
     "cli_panel_maint": {"en": "Maintenance", "ru": "Обслуживание"},
     # Command one-liners (Typer reads from each command's docstring; we
     # set `help=` explicitly so the i18n lookup wins). Keys mirror the
@@ -227,6 +228,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cmd_tg_group": {
         "en": "Telegram setup, inspection, and subscriptions. Bare `unread tg` opens the interactive chat picker.",
         "ru": "Настройка, просмотр и подписки Telegram. Команда `unread tg` без аргументов открывает интерактивный выбор чата.",
+    },
+    "cmd_bot_group": {
+        "en": "Self-hosted Telegram bot frontend. Forward files/URLs/YouTube/TG-messages to your bot and get a Markdown report back.",
+        "ru": "Само-хостящийся Telegram-бот. Перешли файлы/URL/YouTube/сообщения боту — получи Markdown-отчёт.",
+    },
+    "cmd_bot_run": {
+        "en": "Run the Telegram bot in long-polling mode (foreground).",
+        "ru": "Запустить Telegram-бот в режиме long-polling (foreground).",
     },
     "cmd_folders": {
         "en": "List your Telegram folders (for use with `unread --folder NAME` / `unread dump --folder NAME`). Invoke as `unread tg describe folders`.",

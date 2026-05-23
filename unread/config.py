@@ -376,6 +376,67 @@ class LocaleCfg(_StrictCfg):
     content_language: str = ""
 
 
+def _default_bot_session_path() -> Path:
+    """Default location for the operator-mounted user session file.
+
+    Lives OUTSIDE `~/.unread/` so a docker-compose deploy can mount the
+    session as its own named volume (read-write, owner-only) without
+    sharing a volume with the much larger `~/.unread/` state tree.
+    Operators who prefer to point this at their existing
+    `~/.unread/storage/session.sqlite` override via `[bot] session_path`
+    or `UNREAD_BOT_SESSION_PATH`.
+    """
+    return Path("/var/lib/unread-bot/session.sqlite")
+
+
+class BotCfg(_StrictCfg):
+    """Settings for `unread bot` — the self-hosted Telegram bot frontend.
+
+    Read precedence is the standard `Settings` chain: shell env
+    (`UNREAD_BOT_*`) → `~/.unread/.env` → `~/.unread/config.toml`
+    `[bot]` block → persisted secrets DB (for `token` only) → defaults.
+
+    `token` is sensitive and flows through `data.sqlite::secrets` as
+    `telegram.bot_token` — same surface as the other API keys.
+    Everything else is plain config. The operator deploying the bot on
+    a VM is expected to set `owner_id`, `session_path`, and `token`
+    once at deploy time.
+
+    The bot is single-user by design: every event from a sender other
+    than `owner_id` is silently dropped (no reply, no log spam). To
+    read the owner's private chats — which a bot_token cannot do — the
+    bot opens a SECOND Telethon client against `session_path`, the
+    owner's already-bootstrapped user session, and uses it for any
+    `t.me/...` link the owner sends.
+    """
+
+    # @BotFather token. Persisted as `telegram.bot_token` in the secrets
+    # table; loaded back here via the layer-4 overlay in `load_settings`.
+    # Env var: `UNREAD_BOT_TOKEN`.
+    token: str = ""
+
+    # Owner's Telegram numeric user ID. Find it by messaging
+    # @userinfobot once. Env var: `UNREAD_BOT_OWNER_ID`.
+    owner_id: int = 0
+
+    # Path to the owner's already-authorized Telethon user session.
+    # Operator copies it onto the VM at deploy time; the
+    # `/upload_session` command is the fallback when forgotten.
+    session_path: Path = Field(default_factory=_default_bot_session_path)
+
+    # Max concurrent analyses. Each analyze pipeline already
+    # parallelizes internally — 2 is plenty for a single user.
+    concurrency: int = 2
+
+    # Default preset for every analyze the bot dispatches. Empty =
+    # fall back to the analyzer's own default (currently "summary").
+    default_preset: str = ""
+
+    # Max single-file size the bot will accept (MiB). Above this it
+    # refuses up-front instead of pulling tens of MB through MTProto.
+    max_file_mb: int = 100
+
+
 class InteractiveCfg(_StrictCfg):
     """Knobs for wizard ergonomics (no effect outside the interactive shell).
 
@@ -426,6 +487,7 @@ class Settings(BaseSettings):
     logging: LoggingCfg = Field(default_factory=LoggingCfg)
     locale: LocaleCfg = Field(default_factory=LocaleCfg)
     interactive: InteractiveCfg = Field(default_factory=InteractiveCfg)
+    bot: BotCfg = Field(default_factory=BotCfg)
     pricing: PricingCfg = Field(default_factory=PricingCfg)
 
     # Resolved at load time by `load_settings()`. Field default is the
@@ -629,6 +691,38 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
     if api_key := _env("OPENROUTER_API_KEY"):
         raw["openrouter"]["api_key"] = api_key
 
+    # `unread bot` operator-supplied values. None of these belong in
+    # `~/.unread/.env` as a primary surface — they're docker-compose
+    # env vars on a VM. But the env-var route is the cleanest way to
+    # configure a container without baking secrets into the image.
+    if "bot" not in raw:
+        raw["bot"] = {}
+    if bot_token := _env("UNREAD_BOT_TOKEN"):
+        raw["bot"]["token"] = bot_token
+    if bot_owner := _env("UNREAD_BOT_OWNER_ID"):
+        try:
+            raw["bot"]["owner_id"] = int(bot_owner)
+        except ValueError as e:
+            raise ValueError(f"UNREAD_BOT_OWNER_ID must be an integer, got: {bot_owner!r}") from e
+    if bot_session := _env("UNREAD_BOT_SESSION_PATH"):
+        raw["bot"]["session_path"] = bot_session
+    if bot_concurrency := _env("UNREAD_BOT_CONCURRENCY"):
+        try:
+            raw["bot"]["concurrency"] = int(bot_concurrency)
+        except ValueError as e:
+            raise ValueError(
+                f"UNREAD_BOT_CONCURRENCY must be an integer, got: {bot_concurrency!r}"
+            ) from e
+    if bot_preset := _env("UNREAD_BOT_DEFAULT_PRESET"):
+        raw["bot"]["default_preset"] = bot_preset
+    if bot_max_file := _env("UNREAD_BOT_MAX_FILE_MB"):
+        try:
+            raw["bot"]["max_file_mb"] = int(bot_max_file)
+        except ValueError as e:
+            raise ValueError(
+                f"UNREAD_BOT_MAX_FILE_MB must be an integer, got: {bot_max_file!r}"
+            ) from e
+
     # Back-compat: mirror legacy [media].transcribe_* into [enrich] when the
     # user hasn't declared [enrich] yet. Keeps existing configs working without
     # a forced rewrite.
@@ -707,6 +801,8 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
             settings.anthropic.api_key = k
         if not settings.google.api_key and (k := persisted.get("google.api_key")):
             settings.google.api_key = k
+        if not settings.bot.token and (t := persisted.get("telegram.bot_token")):
+            settings.bot.token = t
 
     # Layer 5 (final): overlay persisted `app_settings` rows (locale, models,
     # AI routing, enrich toggles, …). Without this, a `reset_settings()`

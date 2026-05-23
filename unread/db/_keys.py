@@ -38,6 +38,12 @@ SECRET_KEYS: frozenset[str] = frozenset(
         # `keychain`; the read path in `tg/client.py` falls back to
         # the SQLiteSession file in those cases.
         "telegram.session_string",
+        # @BotFather token for the self-hosted `unread bot`. Distinct
+        # from `telegram.api_id` / `telegram.api_hash`, which auth the
+        # owner's user-mode Telethon session. The bot uses the API
+        # credentials AND the bot token to start a second client
+        # alongside the user one.
+        "telegram.bot_token",
     }
 )
 
