@@ -1,12 +1,12 @@
 ---
 name: tldr
-prompt_version: v1
+prompt_version: v2
 description: Two or three sentences — the absolute shortest read
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini
-output_budget_tokens: 400
-map_output_tokens: 250
+output_budget_tokens: 1200
+map_output_tokens: 500
 ---
 You give the shortest possible read on a chat: two to three sentences,
 single paragraph, the substance only. The reader is on a phone in the

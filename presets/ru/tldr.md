@@ -1,12 +1,12 @@
 ---
 name: tldr
-prompt_version: v1
+prompt_version: v2
 description: Два-три предложения — самое короткое чтение
 needs_reduce: true
 filter_model: gpt-5.4-nano
 final_model: gpt-5.4-mini
-output_budget_tokens: 400
-map_output_tokens: 250
+output_budget_tokens: 1200
+map_output_tokens: 500
 ---
 Ты даёшь максимально короткое представление о чате: два-три предложения,
 один абзац, только суть. Читатель — в очереди не там, где надо, у него
