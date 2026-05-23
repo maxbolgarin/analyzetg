@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
+
+# Strip ANSI control sequences before substring checks. Rich highlights
+# option flags by inserting reset codes mid-token (`--chat` renders as
+# `\x1b[1;33m-\x1b[0m\x1b[1;33m-chat\x1b[0m`), so a literal `'--chat' in
+# output` check fails on CI where `FORCE_COLOR=1` is set by GitHub
+# Actions. Stripping ANSI first restores the plain-text invariant.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(s: str) -> str:
+    return _ANSI_RE.sub("", s).lower()
 
 
 @pytest.fixture
@@ -122,7 +134,7 @@ def test_ask_doc_ref_with_chat_flag_is_rejected(runner, tmp_path) -> None:
 
     result = runner.invoke(app, ["ask", str(f), "Q", "--chat", "@somegroup"])
     assert result.exit_code != 0
-    out = (result.output + (result.stderr or "")).lower()
+    out = _plain(result.output + (result.stderr or ""))
     assert "--chat" in out
     assert "pick one scope" in out or "doc ref" in out
 
@@ -133,5 +145,5 @@ def test_ask_doc_ref_with_global_flag_is_rejected(runner) -> None:
 
     result = runner.invoke(app, ["ask", "https://youtu.be/X", "Q", "--global"])
     assert result.exit_code != 0
-    out = (result.output + (result.stderr or "")).lower()
+    out = _plain(result.output + (result.stderr or ""))
     assert "--global" in out

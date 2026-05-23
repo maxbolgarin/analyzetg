@@ -15,6 +15,7 @@ file pins the file-specific surface:
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,6 +30,19 @@ from unread.files.extractors import (
     extract_text_from_bytes,
 )
 from unread.files.paths import file_report_path
+
+# Rich enables colors on CI (the `CI=true` env GitHub Actions sets is
+# treated like `FORCE_COLOR`), which splits literal substrings like
+# `kind=text` across ANSI resets (`\x1b[1;33mkind\x1b[0m\x1b[1m=\x1b[0m\x1b[1;33mtext\x1b[0m`).
+# Strip ANSI before substring checks so the assertions hold in both
+# environments without forcing color off globally (some other tests
+# explicitly assert on ANSI codes).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*(\x07|\x1b\\)")
+
+
+def _plain(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
 
 # --- routing ------------------------------------------------------------
 
@@ -218,7 +232,8 @@ def test_cmd_analyze_file_rejects_telegram_only_flags(tmp_path: Path) -> None:
     with patch("unread.cli._ensure_ready_for_analyze", return_value=True):
         result = runner.invoke(app, [str(p), "--folder", "Work"])
     assert result.exit_code != 0
-    assert "do not support" in result.output.lower() or "--folder" in result.output
+    plain = _plain(result.output)
+    assert "do not support" in plain.lower() or "--folder" in plain
 
 
 # --- end-to-end (mocked LLM) -------------------------------------------
@@ -234,8 +249,9 @@ def test_cmd_analyze_file_runs_dry_run(tmp_path: Path) -> None:
     with patch("unread.cli._ensure_ready_for_analyze", return_value=True):
         result = runner.invoke(app, [str(p), "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert "Dry run" in result.output
-    assert "kind=text" in result.output
+    plain = _plain(result.output)
+    assert "Dry run" in plain
+    assert "kind=text" in plain
 
 
 def test_cmd_analyze_stdin_dry_run() -> None:
@@ -246,4 +262,4 @@ def test_cmd_analyze_stdin_dry_run() -> None:
     with patch("unread.cli._ensure_ready_for_analyze", return_value=True):
         result = runner.invoke(app, ["-", "--dry-run"], input="Some piped content for analysis.\n")
     assert result.exit_code == 0, result.output
-    assert "kind=stdin" in result.output
+    assert "kind=stdin" in _plain(result.output)

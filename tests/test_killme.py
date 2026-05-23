@@ -45,6 +45,11 @@ def fresh_install_home(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
     monkeypatch.setenv("UNREAD_HOME", str(home))
+    # `XDG_RUNTIME_DIR` is set on Linux CI (typically /run/user/$UID). Without
+    # this delenv, `runtime_key_cache_path()` resolves to the XDG path instead
+    # of `<home>/.runtime/key` that the test creates, so the plan reports
+    # `runtime_key_path=None` on Linux and the assertion below fails.
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     from unread.config import reset_settings
 
     reset_settings()
