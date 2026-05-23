@@ -48,6 +48,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ffmpeg
+        # `cmd_analyze` preflights ffmpeg before opening a Telegram session
+        # when voice / video enrichment is enabled (the default). Without
+        # this, `cmd_analyze`-touching tests (e.g. test_regressions_deep_review
+        # dispatch unit tests with a stubbed tg_client) trip `require_ffmpeg`
+        # and exit before reaching the assertions. ffmpeg is a real runtime
+        # dep — `doctor` checks for it — so installing it in CI matches the
+        # documented install shape rather than papering over the gate.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
@@ -60,7 +70,12 @@ jobs:
         run: uv sync --extra dev --python ${{ matrix.python-version }}
 
       - name: Run pytest
-        run: uv run pytest -q
+        # `uv run` without `--python` re-resolves Python from `requires-python`
+        # and recreates `.venv` for the lowest matching version (3.11), wiping
+        # out the matrix-pinned 3.12 / 3.13 venv along with the `--extra dev`
+        # install — pytest then fails to spawn. Pin the matrix version on the
+        # run too so the synced venv survives.
+        run: uv run --python ${{ matrix.python-version }} pytest -q
 
   # Provider-matrix smoke tests. Pre-prod hardening: the alternative AI
   # adapters (Anthropic, Google) only ran their "dispatch" assertion

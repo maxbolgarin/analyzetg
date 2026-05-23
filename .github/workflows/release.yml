@@ -15,6 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ffmpeg
+        # Matches the test job in ci.yml — `cmd_analyze` preflights ffmpeg
+        # for Telegram refs with voice/video enrichment (the default), so
+        # the release gate needs a real ffmpeg on PATH to mirror the
+        # documented user install shape.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
