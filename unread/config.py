@@ -419,6 +419,17 @@ class BotCfg(_StrictCfg):
     # refuses up-front instead of pulling tens of MB through MTProto.
     max_file_mb: int = 100
 
+    # Report-file format the bot uploads to Telegram. `"pdf"` (default)
+    # renders the markdown report via weasyprint — phone Telegram
+    # clients don't preview .md, so PDFs are much more readable on
+    # mobile. `"md"` skips PDF rendering entirely and uploads the raw
+    # `.md` instead — useful when libpango isn't installed on the host
+    # (weasyprint's native dep) or when the operator prefers .md for
+    # post-processing. Soft preference: runtime falls back to `.md`
+    # anyway if `weasyprint.HTML(...)` fails to import (see
+    # `unread/bot/pdf.py:is_available`). Env: `UNREAD_BOT_REPORT_FORMAT`.
+    report_format: Literal["pdf", "md"] = "pdf"
+
 
 class InteractiveCfg(_StrictCfg):
     """Knobs for wizard ergonomics (no effect outside the interactive shell).
@@ -746,6 +757,11 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
             raw["bot"]["max_file_mb"] = int(bot_max_file)
         except ValueError as e:
             raise ValueError(f"UNREAD_BOT_MAX_FILE_MB must be an integer, got: {bot_max_file!r}") from e
+    if bot_report_format := _env("UNREAD_BOT_REPORT_FORMAT"):
+        fmt = bot_report_format.strip().lower()
+        if fmt not in ("pdf", "md"):
+            raise ValueError(f"UNREAD_BOT_REPORT_FORMAT must be 'pdf' or 'md', got: {bot_report_format!r}")
+        raw["bot"]["report_format"] = fmt
 
     # Back-compat: mirror legacy [media].transcribe_* into [enrich] when the
     # user hasn't declared [enrich] yet. Keeps existing configs working without

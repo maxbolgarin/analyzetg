@@ -286,11 +286,17 @@ async def _send_full_report(
     md_text: str,
     caption: str,
 ) -> None:
-    """Send the full report as PDF (preferred) or .md (fallback)."""
+    """Send the full report as PDF (preferred) or .md (fallback).
+
+    `settings.bot.report_format` chooses the preferred format:
+        - `"pdf"` (default): render via weasyprint, fall back to .md
+          when libpango isn't installed at runtime.
+        - `"md"`: skip the PDF render entirely; just upload the .md.
+    """
     from unread.bot import pdf as pdf_helper
 
     pdf_bytes: bytes | None = None
-    if pdf_helper.is_available():
+    if get_settings().bot.report_format == "pdf" and pdf_helper.is_available():
         try:
             pdf_bytes = pdf_helper.markdown_to_pdf_bytes(md_text, title=report.stem)
         except Exception:
