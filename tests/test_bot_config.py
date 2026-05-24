@@ -11,6 +11,7 @@ def test_bot_env_vars_overlay_settings(monkeypatch):
     monkeypatch.setenv("UNREAD_BOT_CONCURRENCY", "5")
     monkeypatch.setenv("UNREAD_BOT_MAX_FILE_MB", "250")
     monkeypatch.setenv("UNREAD_BOT_DEFAULT_PRESET", "detailed")
+    monkeypatch.setenv("UNREAD_BOT_REPORT_FORMAT", "md")
     reset_settings()
     try:
         s = load_settings()
@@ -19,6 +20,30 @@ def test_bot_env_vars_overlay_settings(monkeypatch):
         assert s.bot.concurrency == 5
         assert s.bot.max_file_mb == 250
         assert s.bot.default_preset == "detailed"
+        assert s.bot.report_format == "md"
+    finally:
+        reset_settings()
+
+
+def test_bot_report_format_defaults_to_pdf():
+    """Reports default to PDF — weasyprint is a base dep since v1.x."""
+    reset_settings()
+    try:
+        s = load_settings()
+        assert s.bot.report_format == "pdf"
+    finally:
+        reset_settings()
+
+
+def test_bot_report_format_rejects_garbage(monkeypatch):
+    """Anything other than 'pdf' / 'md' is a loud error at load time."""
+    import pytest
+
+    monkeypatch.setenv("UNREAD_BOT_REPORT_FORMAT", "docx")
+    reset_settings()
+    try:
+        with pytest.raises(ValueError, match="UNREAD_BOT_REPORT_FORMAT"):
+            load_settings()
     finally:
         reset_settings()
 
@@ -52,6 +77,7 @@ def test_botcfg_defaults_are_safe():
     assert cfg.concurrency == 2
     assert cfg.max_file_mb == 100
     assert cfg.default_preset == ""
+    assert cfg.report_format == "pdf"
 
 
 def test_botcfg_rejects_unknown_keys():
