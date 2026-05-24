@@ -22,7 +22,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ENV_FILE:-${HERE}/.env.bot}"
-COMPOSE_FILE="${COMPOSE_FILE:-${HERE}/docker-compose.bot.prod.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-${HERE}/docker-compose.bot.yml}"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 user@host[:port] [/remote/path]" >&2
