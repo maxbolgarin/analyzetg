@@ -216,13 +216,18 @@ or sent via `/upload_session`); `UNREAD_BOT_OWNER_ID` is only a
 bootstrap fallback for the case where no session is installed yet.
 Everyone else is silently dropped.
 
+**On a fresh Linux VM**, one line gets you from blank disk to a running bot — installs Python / ffmpeg / pipx, runs `unread init`, asks for your `@BotFather` token, drops a `systemd --user` unit that auto-restarts on crash:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh | bash
+```
+
+**Running it manually** (already-set-up box, local dev, or you want to see what's happening):
+
 ```bash
 # 1. Get a token from @BotFather.
 # 2. Copy the env template and fill it in.
 cp .env.bot.example .env.bot
-```
-
-```bash
 unread bot run
 ```
 

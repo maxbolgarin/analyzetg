@@ -91,9 +91,35 @@ if [[ "$PKG" != "brew" ]] && [[ "$EUID" -ne 0 ]]; then
   fi
 fi
 
+# Suppress every interactive prompt apt might raise. Without these, a
+# `curl … | bash` run gets stuck on whiptail dialogs like "Daemons using
+# outdated libraries: which services should be restarted?" — whiptail
+# needs a real TTY, which the pipe doesn't provide, and the user can't
+# interact with arrow keys.
+#
+# - DEBIAN_FRONTEND=noninteractive   silences debconf prompts (postfix
+#                                    config wizard, MySQL root password, …)
+# - NEEDRESTART_MODE=a               needrestart auto-restarts daemons
+#                                    instead of asking which to restart
+# - NEEDRESTART_SUSPEND=1            also covers the "restart now?" dialog
+# - APT_LISTCHANGES_FRONTEND=none    suppresses the changelog viewer
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+export APT_LISTCHANGES_FRONTEND=none
+
 pkg_install() {
   case "$PKG" in
-    apt)    $SUDO apt-get update -y && $SUDO apt-get install -y "$@" ;;
+    apt)
+      # `-o Dpkg::Options::=--force-confnew` — keep the package's new
+      # config without prompting on conffile conflicts. Combined with
+      # the env vars above, every interactive dialog is suppressed.
+      $SUDO -E apt-get update -y -qq \
+        && $SUDO -E apt-get install -y -qq \
+             -o Dpkg::Options::="--force-confnew" \
+             -o Dpkg::Options::="--force-confdef" \
+             "$@"
+      ;;
     dnf)    $SUDO dnf install -y "$@" ;;
     pacman) $SUDO pacman -Sy --noconfirm "$@" ;;
     brew)   brew install "$@" ;;
