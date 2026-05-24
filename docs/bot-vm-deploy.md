@@ -1,23 +1,65 @@
-# Deploying `unread bot` to a VM
+# Installing `unread` and deploying the bot
 
-Two supported install paths on a fresh Linux VM:
+Three supported install paths. All three share the same `unread` PyPI
+package — only the runtime differs.
 
-| Path | Best for | One-line install |
-|---|---|---|
-| **A. Native (systemd)** | Single-VM hobbyist / small ops; no Docker needed | `curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh \| bash` |
-| **B. Docker** | Already running Docker; want image-pinned versions; bigger deploys | See "Docker deploy" below |
+| # | Path | Best for | One-line install |
+|---|---|---|---|
+| **1** | **Local (uv)** | Laptop / dev / running the bot manually for testing | `uv tool install unread` |
+| **2** | **Native VM (script + systemd)** | Always-on bot on a Linux VM, no Docker | `curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh \| bash` |
+| **3** | **Docker** | Containerized bot OR ad-hoc CLI in a container | `docker compose -f docker-compose.bot.yml up -d` |
+
+`unread` is a single PyPI package. Weasyprint (PDF report rendering)
+is part of the base install since v1.x — no `[bot]` extras dance.
+Reports default to PDF; set `UNREAD_BOT_REPORT_FORMAT=md` to skip the
+render entirely.
 
 ---
 
-## A. Native install (systemd, no Docker)
+## 1. Local install (uv)
 
-For when you want the simplest possible setup: PyPI install, a
-`systemd --user` service that auto-restarts on crash and survives
-logout. No Docker daemon, no GHCR auth, no compose files.
+For local development, your laptop, or running the bot in the
+foreground for testing.
 
-### The one-liner
+```bash
+# One-time: install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-On the VM (as a non-root user with sudo):
+# Install unread itself
+uv tool install unread
+
+# First-time setup wizard: AI key + Telegram creds + user session
+unread init
+
+# Run the bot in the foreground (Ctrl-C to stop)
+export UNREAD_BOT_TOKEN=123:abc...       # from @BotFather
+unread bot run
+```
+
+**Optional system deps** (CLI works without them, bot degrades
+gracefully):
+
+- `ffmpeg` — Whisper voice/video transcription. Without it, voice
+  uploads / YouTube audio fallbacks fail at request time.
+- `libpango` (Linux) or `pango` (macOS) — runtime dep for weasyprint
+  PDF rendering. Without it, bot uploads `.md` instead of PDF.
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo apt-get install -y ffmpeg libpango-1.0-0 libpangoft2-1.0-0
+# macOS
+brew install ffmpeg pango
+```
+
+This path is also the right one for using the bare CLI (`unread analyze`,
+`unread ask`, `unread dump`) — same install, no extra steps.
+
+---
+
+## 2. Native VM (script + systemd)
+
+For a long-running bot on a Linux VM without Docker. The one-line
+installer is idempotent and handles everything:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh | bash
@@ -25,25 +67,22 @@ curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/ins
 
 What it does:
 
-1. **System deps** — installs Python 3.11+ if missing, plus `ffmpeg`
-   (apt / dnf / pacman / brew autodetected).
-2. **`unread[bot]` via pipx** — isolated venv, won't conflict with
-   system Python. Includes weasyprint so the bot ships PDF reports
-   (falls back to `.md` if weasyprint can't import).
-3. **`unread init`** runs interactively — walks you through AI
-   provider (OpenAI / Anthropic / Google / OpenRouter), Telegram
-   credentials (`api_id`/`api_hash` from my.telegram.org), and the
-   user-session login (you'll get a phone code from Telegram).
-4. **Bot token prompt** — paste the token from [@BotFather](https://t.me/botfather);
-   it's appended to `~/.unread/.env`.
-5. **`systemd --user` unit** — written to
+1. **uv** — installs the single-binary uv (manages its own Python 3.11+).
+2. **System deps** — `ffmpeg` + libpango via apt / dnf / pacman / brew.
+3. **`uv tool install unread`** — isolated tool venv; `unread` on PATH.
+4. **`unread init`** — interactive wizard for AI provider + Telegram
+   credentials + user-session login (you'll get a phone code from
+   Telegram).
+5. **Bot token prompt** — paste the token from
+   [@BotFather](https://t.me/botfather); appended to `~/.unread/.env`
+   with mode `0600`.
+6. **`systemd --user` service** — written to
    `~/.config/systemd/user/unread-bot.service`, enabled + started.
-   Enables linger (`loginctl enable-linger $USER`) so the service
-   keeps running after SSH disconnect.
+   Also runs `loginctl enable-linger $USER` so the service survives
+   SSH disconnect (and auto-restarts on crash in 5s).
 
-Re-run anytime — idempotent: skips Python/ffmpeg if already installed,
-keeps existing `~/.unread/` config, only re-prompts for the bot token
-when missing.
+Re-run anytime — idempotent: skips uv/ffmpeg if present, keeps existing
+`~/.unread/` config, only re-prompts for the bot token when missing.
 
 ### Flags
 
@@ -51,28 +90,18 @@ when missing.
 # Wipe ~/.unread/ first (deletes session + reports + cache)
 bash install-bot.sh --reset
 
-# Skip the wizard (assume ~/.unread/.env is already populated via SCP / Ansible)
+# Skip the wizard (assume ~/.unread/.env is pre-provisioned via Ansible / SCP)
 bash install-bot.sh --skip-init
 ```
 
 ### Day-to-day
 
 ```bash
-# Status
 systemctl --user status unread-bot
-
-# Tail logs
-journalctl --user -u unread-bot -f
-
-# Restart after a config change
-systemctl --user restart unread-bot
-
-# Stop
-systemctl --user stop unread-bot
-
-# Upgrade to the latest release on PyPI
-pipx upgrade 'unread[bot]'
-systemctl --user restart unread-bot
+journalctl --user -u unread-bot -f      # tail logs
+systemctl --user restart unread-bot     # after a config change
+uv tool upgrade unread                  # pull the latest PyPI release
+systemctl --user restart unread-bot     # ...and reload
 ```
 
 The bot's data — reports, cache, secrets DB, Telegram session — lives
@@ -87,163 +116,105 @@ sudo loginctl enable-linger $USER
 ```
 Without linger, the systemd service stops when you log out.
 
-**"Can't locate the 'unread' binary"** — pipx put it in
-`~/.local/bin/`, which isn't on PATH for the systemd shell. The
-script tries `command -v unread` at install time and bakes the full
-path into the unit file, so this should only happen if you moved the
-binary after running the script. Re-run the script — it'll re-create
-the unit with the new path.
-
 **Voice / video uploads fail** — `ffmpeg` not on PATH. The script
 installs it; if it failed silently, install manually
 (`sudo apt-get install ffmpeg` or distro equivalent), then
 `systemctl --user restart unread-bot`.
 
----
-
-## B. Docker deploy
-
-For Docker fans, or anyone wanting **image-pinned versions** via GHCR.
-
-End-to-end recipe with **no source checkout on the remote** — the
-image is built by GitHub Actions, pulled from GHCR; the VM only needs
-a compose file, an env file, and a Docker daemon.
-
-The three moving pieces:
-
-1. **GitHub Actions builds + pushes the image** to GHCR on every tagged
-   release (`.github/workflows/bot-image.yml`).
-2. **`scripts/deploy-bot.sh`** rsync's the compose + env file from your
-   laptop to the VM and triggers `docker compose pull && up -d`
-   remotely. No git clone happens on the VM.
-3. **`docker-compose.bot.prod.yml`** points at `ghcr.io/<you>/unread-bot`
-   and only pulls — never builds — so the VM doesn't need the source.
+**Reports come as `.md` instead of PDF** — libpango isn't installed
+(weasyprint's native dep). Install it
+(`sudo apt-get install libpango-1.0-0 libpangoft2-1.0-0` on Debian)
+and restart the service. The bot auto-detects and switches to PDF.
 
 ---
 
-## One-time setup
+## 3. Docker
 
-### 1. Publish the image (GitHub Actions)
+Pull a pre-built image from GHCR — no source checkout on the remote.
+The image is generic: no `ENTRYPOINT`, the `CMD` defaults to
+`unread --help`. Pass `command:` (compose) or `unread bot run`
+(`docker run`) to launch the bot. The same image works for one-off
+CLI commands too.
 
-The workflow at `.github/workflows/bot-image.yml` is already wired up.
-First push to GHCR happens automatically the next time you:
+### Bot service via compose
 
-- Push a `v*` tag (semantic-release does this on every shipped release), OR
-- Push to `main`, OR
-- Trigger it manually: **Actions → Bot Docker Image → Run workflow**.
+The shipped `docker-compose.bot.yml` is what you want. From your
+laptop, the `scripts/deploy-bot.sh` helper rsyncs it + your env file
+to the VM and triggers `docker compose pull && up -d`:
 
-Image tags produced:
+```bash
+cp .env.bot.example .env.bot
+$EDITOR .env.bot                       # fill in API ids / openai / bot token
+scripts/deploy-bot.sh deploy@my-vm     # ssh user@host, then docker compose up
+```
 
-| Trigger          | Tags                                             |
-| ---------------- | ------------------------------------------------ |
-| `v1.4.2` tag     | `:1.4.2`, `:1.4`, `:latest`                      |
-| push to `main`   | `:main`                                          |
-| `workflow_dispatch` from a tag | same as the tag                    |
+Or directly on the VM, no laptop helper:
 
-### 2. Make the GHCR package public
+```bash
+cp .env.bot.example .env.bot && $EDITOR .env.bot
+docker compose -f docker-compose.bot.yml --env-file .env.bot pull
+docker compose -f docker-compose.bot.yml --env-file .env.bot up -d
+docker compose -f docker-compose.bot.yml logs -f
+```
 
-GitHub publishes new packages as **private** by default. Until you flip
-this once, any `docker pull` on the VM has to authenticate.
+The compose file specifies `command: ["unread", "bot", "run"]` since
+the image has no entrypoint.
 
-1. Go to <https://github.com/users/maxbolgarin/packages/container/unread-bot/settings>
+### Bot service without compose
+
+```bash
+docker run -d --name unread-bot \
+  -e TELEGRAM_API_ID=... -e TELEGRAM_API_HASH=... \
+  -e OPENAI_API_KEY=... -e UNREAD_BOT_TOKEN=... \
+  -v unread_state:/root/.unread \
+  --restart unless-stopped \
+  ghcr.io/maxbolgarin/unread:latest \
+  unread bot run
+```
+
+### Ad-hoc CLI inside the container
+
+The same image is a full `unread` CLI runtime — useful when you don't
+want a local Python install but need a one-off `unread doctor` or
+`unread analyze <url>`:
+
+```bash
+docker run --rm -v unread_state:/root/.unread \
+  ghcr.io/maxbolgarin/unread:latest \
+  unread doctor
+
+docker run --rm -v unread_state:/root/.unread \
+  ghcr.io/maxbolgarin/unread:latest \
+  unread analyze https://example.com/article
+```
+
+### One-time GHCR setup
+
+GitHub publishes new packages as **private** by default. Until you
+flip this once, any `docker pull` has to authenticate.
+
+1. Go to <https://github.com/users/maxbolgarin/packages/container/unread/settings>
    (change the username if you forked).
 2. Scroll to **Danger zone → Change package visibility → Public**.
 3. Confirm the package name.
 
-After this, the VM's `docker compose pull` works with no `docker login`.
+After this, `docker compose pull` works with no `docker login`.
 
-### 3. Prep the VM
+### Image tags
 
-Bare minimum on the VM:
+`.github/workflows/image.yml` publishes on every tag and `main` push:
 
-```bash
-# Docker Engine + Compose plugin
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER   # log out + back in to pick up the group
+| Trigger | Tags |
+|---|---|
+| `v1.4.2` tag | `:1.4.2`, `:1.4`, `:latest` |
+| push to `main` | `:main` |
+| `workflow_dispatch` from a tag | same as the tag |
 
-# Verify
-docker --version
-docker compose version
-```
-
-That's it. **No Python, no git, no source clone.** The deploy script
-puts everything else in place.
-
-### 4. Prep `.env.bot` on your laptop
-
-```bash
-cp .env.bot.example .env.bot
-$EDITOR .env.bot
-```
-
-Fill in `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `OPENAI_API_KEY`,
-`UNREAD_BOT_TOKEN`. The other env vars have sensible defaults — see
-the comments in `.env.bot.example`.
-
----
-
-## First deploy
-
-From the repo root on your laptop:
-
-```bash
-scripts/deploy-bot.sh deploy@bot.example.com
-```
-
-That single command:
-
-1. Creates `/srv/unread-bot/` on the VM (mode `0700`).
-2. rsyncs `docker-compose.bot.prod.yml` → `/srv/unread-bot/docker-compose.yml`.
-3. rsyncs `.env.bot` → `/srv/unread-bot/.env.bot` atomically (temp +
-   rename), mode `0600`.
-4. SSHes in and runs `docker compose pull && docker compose up -d &&
-   docker compose ps` against the new files.
-
-You should see the container come up. Tail logs to confirm:
-
-```bash
-ssh deploy@bot.example.com 'cd /srv/unread-bot && docker compose logs -f'
-```
-
-### Custom paths / ports
-
-```bash
-# Non-standard SSH port + custom remote dir
-scripts/deploy-bot.sh deploy@bot.example.com:2222 /opt/unread-bot
-
-# Use a different env file (e.g. .env.bot.staging)
-ENV_FILE=.env.bot.staging scripts/deploy-bot.sh deploy@staging.example.com
-
-# Push files only, don't restart (e.g. you want to edit before going live)
-SKIP_RESTART=1 scripts/deploy-bot.sh deploy@bot.example.com
-```
-
-### Pinning to a specific version
-
-Track `:latest` by default. To pin a known-good version, set in `.env.bot`:
+Pin a version in `.env.bot`:
 
 ```
-UNREAD_BOT_IMAGE=ghcr.io/maxbolgarin/unread-bot:1.4.2
+UNREAD_BOT_IMAGE=ghcr.io/maxbolgarin/unread:1.4.2
 ```
-
-Then re-run the deploy script — `docker compose` will pull the pinned
-tag instead of `:latest`.
-
----
-
-## Updating
-
-When a new release lands:
-
-```bash
-scripts/deploy-bot.sh deploy@bot.example.com
-```
-
-That's it. The same script is idempotent — it always re-pulls the image
-(`pull_policy: always` is set in the compose file) and recreates the
-container if the image hash changed. The `unread_state` named volume
-preserves your reports, cache, secrets DB, and Telegram session across
-the rolling update.
 
 ---
 
@@ -271,63 +242,24 @@ If you have one already, skip the in-chat upload by dropping the file
 straight into the volume's mountpoint:
 
 ```bash
-ssh deploy@bot.example.com '
-  docker compose -f /srv/unread-bot/docker-compose.yml stop
+# Docker
+ssh deploy@my-vm '
+  docker compose -f docker-compose.bot.yml stop
   VOL=$(docker volume inspect unread-bot_unread_state --format "{{.Mountpoint}}")
   sudo mkdir -p "$VOL/storage"
   sudo chmod 700 "$VOL/storage"
 '
 scp ~/.unread/storage/session.sqlite \
-    deploy@bot.example.com:/tmp/session.sqlite
-ssh deploy@bot.example.com '
+    deploy@my-vm:/tmp/session.sqlite
+ssh deploy@my-vm '
   VOL=$(docker volume inspect unread-bot_unread_state --format "{{.Mountpoint}}")
   sudo mv /tmp/session.sqlite "$VOL/storage/session.sqlite"
   sudo chmod 600 "$VOL/storage/session.sqlite"
-  cd /srv/unread-bot && docker compose start
+  docker compose -f docker-compose.bot.yml start
 '
+
+# Native (systemd)
+scp ~/.unread/storage/session.sqlite \
+    deploy@my-vm:~/.unread/storage/session.sqlite
+ssh deploy@my-vm 'systemctl --user restart unread-bot'
 ```
-
----
-
-## Operations cheat sheet
-
-All commands run on the VM after `cd /srv/unread-bot`.
-
-| Action               | Command                                           |
-| -------------------- | ------------------------------------------------- |
-| Start                | `docker compose up -d`                            |
-| Stop                 | `docker compose down`                             |
-| Restart              | `docker compose restart`                          |
-| Tail logs            | `docker compose logs -f`                          |
-| Pull new image       | `docker compose pull && docker compose up -d`     |
-| Show running state   | `docker compose ps`                               |
-| Shell into container | `docker compose exec unread-bot bash`             |
-| Inspect named volume | `docker volume inspect unread-bot_unread_state`   |
-| Run `unread doctor`  | `docker compose exec unread-bot unread doctor`    |
-
----
-
-## Troubleshooting
-
-**`unauthorized: authentication required` on `docker compose pull`**
-
-The GHCR package is still private. Either flip it public (see step 2
-above) or `docker login ghcr.io -u <user> -p <PAT_with_read:packages>`
-on the VM once.
-
-**Bot exits with "no owner allowlist"**
-
-There's no `UNREAD_BOT_OWNER_ID` set AND no authorized user session
-mounted yet. Either fill in `UNREAD_BOT_OWNER_ID` in `.env.bot` (find
-your numeric ID via [@userinfobot](https://t.me/userinfobot)) and
-redeploy, or message the bot `/upload_session` and drop the file.
-
-**"Pre-run confirm panel" never appears**
-
-Someone set `/confirm off` in this chat. Send `/confirm on` to
-re-enable.
-
-**Image build is slow on first push to GHCR**
-
-The Buildx GHA cache is empty on the first run. Subsequent builds
-share the cache and only rebuild the layers that actually changed.
