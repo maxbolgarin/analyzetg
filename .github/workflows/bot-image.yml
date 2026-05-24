@@ -1,0 +1,97 @@
+name: Bot Docker Image
+
+# Builds Dockerfile.bot and pushes the resulting image to GHCR so the
+# VM can `docker compose pull` it without cloning the repo.
+#
+# Triggers:
+# - `push: tags v*` — every semantic-release tag publishes a versioned
+#   image alongside `:latest`. Matches the PyPI flow in release.yml.
+# - `workflow_dispatch` — manual ad-hoc rebuild, useful when the
+#   Dockerfile / base image changed but no code release is due.
+# - `push: main` — refreshes `:main` so adventurous operators can run
+#   ahead of the tagged releases. Not tagged as `:latest`.
+#
+# After the first push, mark the package public at:
+#   https://github.com/users/maxbolgarin/packages/container/unread-bot/settings
+# (one-time; the package is private by default).
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: bot-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # GHCR push requires the GITHUB_TOKEN to have `packages: write`.
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/unread-bot
+
+jobs:
+  build-and-push:
+    name: Build + push to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        # Needed only for multi-arch builds. Kept here so the same
+        # workflow can be flipped to `platforms: linux/amd64,linux/arm64`
+        # without restructuring.
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        # Mirrors the semantics in release.yml: a `v1.2.3` tag publishes
+        # both `:1.2.3` (canonical version pin) and `:latest`. A push to
+        # `main` produces `:main` only — never `:latest`.
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=unread-bot
+            org.opencontainers.image.description=Self-hosted Telegram bot for the unread CLI
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.bot
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions cache backend keeps Buildx layers across runs
+          # so a one-line change in Dockerfile.bot doesn't reinstall the
+          # apt + pip stack from scratch.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Single-arch for now. Add `linux/arm64` here when there's a
+          # real arm64 VM that needs it — QEMU emulation roughly doubles
+          # build time so we don't pay for it speculatively.
+          platforms: linux/amd64
