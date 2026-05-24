@@ -1,9 +1,113 @@
 # Deploying `unread bot` to a VM
 
-End-to-end recipe for running the self-hosted Telegram bot on a Linux
-VM with **no source checkout on the remote**. The image is built by
-GitHub Actions and pulled from GHCR; everything the VM needs is a
-compose file, an env file, and a Docker daemon.
+Two supported install paths on a fresh Linux VM:
+
+| Path | Best for | One-line install |
+|---|---|---|
+| **A. Native (systemd)** | Single-VM hobbyist / small ops; no Docker needed | `curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh \| bash` |
+| **B. Docker** | Already running Docker; want image-pinned versions; bigger deploys | See "Docker deploy" below |
+
+---
+
+## A. Native install (systemd, no Docker)
+
+For when you want the simplest possible setup: PyPI install, a
+`systemd --user` service that auto-restarts on crash and survives
+logout. No Docker daemon, no GHCR auth, no compose files.
+
+### The one-liner
+
+On the VM (as a non-root user with sudo):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh | bash
+```
+
+What it does:
+
+1. **System deps** — installs Python 3.11+ if missing, plus `ffmpeg`
+   (apt / dnf / pacman / brew autodetected).
+2. **`unread[bot]` via pipx** — isolated venv, won't conflict with
+   system Python. Includes weasyprint so the bot ships PDF reports
+   (falls back to `.md` if weasyprint can't import).
+3. **`unread init`** runs interactively — walks you through AI
+   provider (OpenAI / Anthropic / Google / OpenRouter), Telegram
+   credentials (`api_id`/`api_hash` from my.telegram.org), and the
+   user-session login (you'll get a phone code from Telegram).
+4. **Bot token prompt** — paste the token from [@BotFather](https://t.me/botfather);
+   it's appended to `~/.unread/.env`.
+5. **`systemd --user` unit** — written to
+   `~/.config/systemd/user/unread-bot.service`, enabled + started.
+   Enables linger (`loginctl enable-linger $USER`) so the service
+   keeps running after SSH disconnect.
+
+Re-run anytime — idempotent: skips Python/ffmpeg if already installed,
+keeps existing `~/.unread/` config, only re-prompts for the bot token
+when missing.
+
+### Flags
+
+```bash
+# Wipe ~/.unread/ first (deletes session + reports + cache)
+bash install-bot.sh --reset
+
+# Skip the wizard (assume ~/.unread/.env is already populated via SCP / Ansible)
+bash install-bot.sh --skip-init
+```
+
+### Day-to-day
+
+```bash
+# Status
+systemctl --user status unread-bot
+
+# Tail logs
+journalctl --user -u unread-bot -f
+
+# Restart after a config change
+systemctl --user restart unread-bot
+
+# Stop
+systemctl --user stop unread-bot
+
+# Upgrade to the latest release on PyPI
+pipx upgrade 'unread[bot]'
+systemctl --user restart unread-bot
+```
+
+The bot's data — reports, cache, secrets DB, Telegram session — lives
+in `~/.unread/`. Back that directory up, you've backed up everything.
+
+### Troubleshooting
+
+**"Couldn't enable linger"** — the script needed sudo for the
+`loginctl enable-linger $USER` step. Run it manually:
+```bash
+sudo loginctl enable-linger $USER
+```
+Without linger, the systemd service stops when you log out.
+
+**"Can't locate the 'unread' binary"** — pipx put it in
+`~/.local/bin/`, which isn't on PATH for the systemd shell. The
+script tries `command -v unread` at install time and bakes the full
+path into the unit file, so this should only happen if you moved the
+binary after running the script. Re-run the script — it'll re-create
+the unit with the new path.
+
+**Voice / video uploads fail** — `ffmpeg` not on PATH. The script
+installs it; if it failed silently, install manually
+(`sudo apt-get install ffmpeg` or distro equivalent), then
+`systemctl --user restart unread-bot`.
+
+---
+
+## B. Docker deploy
+
+For Docker fans, or anyone wanting **image-pinned versions** via GHCR.
+
+End-to-end recipe with **no source checkout on the remote** — the
+image is built by GitHub Actions, pulled from GHCR; the VM only needs
+a compose file, an env file, and a Docker daemon.
 
 The three moving pieces:
 

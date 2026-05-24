@@ -46,6 +46,14 @@
 | `unread reports prune --older-than 30d` | Move stale report files to `reports/.trash/`. |
 | `unread watch --interval 1h <inner cmd>` | Run an inner `unread` command on a fixed cadence. |
 
+## Bot
+
+| Command | Purpose |
+|---|---|
+| `unread bot run` | Start the self-hosted Telegram bot (long-polling, single-user). Reads `UNREAD_BOT_TOKEN` from the environment and uses the Telegram user session at `~/.unread/storage/session.sqlite` for `t.me/…` reads. |
+
+Full user-facing reference (what you can send, slash commands, confirm panel, `/upload_session` flow) lives in [bot.md](bot.md). End-to-end VM deployment via GHCR + docker-compose is in [bot-vm-deploy.md](bot-vm-deploy.md).
+
 ## Hidden (still callable, not in `--help`)
 
 `unread download-media [<ref>]` — kept for back-compat. Use `unread dump --save-media` instead.

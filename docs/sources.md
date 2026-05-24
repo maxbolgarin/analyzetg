@@ -224,8 +224,13 @@ capped dialog-level forum counts by summing per-topic counts via
 
 ## Media enrichment
 
-Telegram chats carry more than text. `unread` turns each non-text message
-into something the LLM can read:
+Telegram chats carry more than text — voice notes, video circles,
+photos, forwarded documents, external links. `unread` turns each
+non-text message into something the LLM can read, so the analysis
+covers the whole conversation, not just the typed portion. The same
+Whisper / vision / extraction steps power raw-file analysis: `unread
+./voice.ogg` reuses the voice path, `unread ./scan.png` reuses the
+photo-description path.
 
 | Kind | What happens | Default |
 |---|---|---|
