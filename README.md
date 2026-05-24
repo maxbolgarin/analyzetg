@@ -216,37 +216,40 @@ or sent via `/upload_session`); `UNREAD_BOT_OWNER_ID` is only a
 bootstrap fallback for the case where no session is installed yet.
 Everyone else is silently dropped.
 
-**On a fresh Linux VM**, one line gets you from blank disk to a running bot — installs Python / ffmpeg / pipx, runs `unread init`, asks for your `@BotFather` token, drops a `systemd --user` unit that auto-restarts on crash:
+Three install paths — pick by environment:
 
+**1. Local laptop / dev** (`unread bot run` foreground):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh | bash
-```
-
-**Running it manually** (already-set-up box, local dev, or you want to see what's happening):
-
-```bash
-# 1. Get a token from @BotFather.
-# 2. Copy the env template and fill it in.
-cp .env.bot.example .env.bot
+uv tool install unread
+export UNREAD_BOT_TOKEN=123:abc...   # from @BotFather
 unread bot run
 ```
 
-Or use docker compose (e.g. on a server):
+**2. Fresh Linux VM** — one line, blank disk to running systemd service:
 ```bash
-docker compose -f docker-compose.bot.yml --env-file .env.bot up -d --build
+curl -fsSL https://raw.githubusercontent.com/maxbolgarin/unread/main/scripts/install-bot.sh | bash
+```
+Installs uv + ffmpeg + libpango, runs `unread init`, asks for the
+`@BotFather` token, drops a `systemd --user` unit that auto-restarts
+on crash and survives SSH disconnect.
+
+**3. Docker** — pull the generic `unread` image from GHCR (same image
+can also run one-off CLI commands; `command: ["unread","bot","run"]`
+in the compose file specifies the bot mode):
+```bash
+cp .env.bot.example .env.bot && $EDITOR .env.bot
+docker compose -f docker-compose.bot.yml --env-file .env.bot up -d
 ```
 
-The first time you message the bot with a `t.me/...` link it'll ask
-for `/upload_session` — send your laptop's
-`~/.unread/storage/session.sqlite` as a Telegram document and it's
-ready. (Alternative: SCP that file into the `unread_state` volume at
-`/root/.unread/storage/session.sqlite` before starting the container —
-then you can leave `UNREAD_BOT_OWNER_ID` unset; the bot reads the
-owner ID from the session itself.)
+Reports default to PDF; set `UNREAD_BOT_REPORT_FORMAT=md` in `.env.bot`
+to skip PDF rendering (`.md` upload instead). The first time you
+message the bot with a `t.me/...` link it'll ask for `/upload_session`
+— send your laptop's `~/.unread/storage/session.sqlite` as a Telegram
+document and it's ready.
 
 Full feature reference (slash commands, the confirm panel, what each
 input kind does) is in [`docs/bot.md`](docs/bot.md). End-to-end VM
-deployment via GHCR + docker-compose is in
+deployment guide covering all three paths is in
 [`docs/bot-vm-deploy.md`](docs/bot-vm-deploy.md).
 
 

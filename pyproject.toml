@@ -82,6 +82,16 @@ dependencies = [
     # pulled by other deps but pinned here so the update path doesn't
     # silently break if the chain shifts.
     "packaging>=24",
+    # Markdown → PDF rendering for `unread bot` so phone Telegram clients
+    # (which don't preview .md) get a readable attachment. Now part of
+    # the base install so `pip install unread` Just Works for both CLI
+    # and bot uses. Requires the Pango system library at runtime
+    # (Linux: `apt-get install libpango-1.0-0 libpangoft2-1.0-0`;
+    #  macOS: `brew install pango`). When Pango is missing the bot
+    # gracefully falls back to uploading the raw .md file — see
+    # `unread/bot/pdf.py:is_available` and `bot.report_format` config.
+    "weasyprint>=62",
+    "markdown-it-py>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -90,16 +100,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
-# `unread bot` extras. `weasyprint` renders the analyze report as a PDF
-# so phone Telegram clients (which don't preview .md) get a readable
-# attachment. Optional — when missing, the bot gracefully falls back to
-# uploading the raw .md file. Requires the Pango system library
-# (Linux: `apt-get install libpango-1.0-0 libpangoft2-1.0-0`;
-#  macOS: `brew install pango`).
-bot = [
-    "weasyprint>=62",
-    "markdown-it-py>=3.0",
-]
+# Legacy alias kept so `pip install 'unread[bot]'` still parses for
+# anyone with that command in their install scripts. Bot-needed deps
+# moved into the base install above — this slot is intentionally empty.
+bot = []
 
 [project.urls]
 Homepage = "https://github.com/maxbolgarin/unread"

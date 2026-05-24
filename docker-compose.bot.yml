@@ -1,54 +1,56 @@
-# Self-hosted `unread bot`, single container.
+# Run `unread bot` as a long-running container via the generic
+# `unread` image. Pulls from GHCR — does NOT build from source. The
+# image is published by .github/workflows/image.yml on every
+# semantic-release tag and on pushes to main.
 #
-# Quick start:
-#   1. Copy `.env.bot.example` to `.env.bot` and fill in the four
-#      required env vars (TELEGRAM_API_ID / TELEGRAM_API_HASH /
-#      OPENAI_API_KEY / UNREAD_BOT_TOKEN / UNREAD_BOT_OWNER_ID).
-#   2. `docker compose -f docker-compose.bot.yml --env-file .env.bot up -d`
-#   3. Message your bot. If it complains "send /upload_session", do that
-#      and drop your `~/.unread/storage/session.sqlite` from your
-#      laptop in as a document.
+# Quick start on a fresh VM:
+#   1. docker login ghcr.io   # only needed if you kept the image private
+#   2. cp .env.bot.example .env.bot && $EDITOR .env.bot
+#   3. docker compose -f docker-compose.bot.yml --env-file .env.bot pull
+#   4. docker compose -f docker-compose.bot.yml --env-file .env.bot up -d
+#
+# Updates:
+#   docker compose -f docker-compose.bot.yml --env-file .env.bot pull
+#   docker compose -f docker-compose.bot.yml --env-file .env.bot up -d
 #
 # Logs:    docker compose -f docker-compose.bot.yml logs -f
-# Update:  docker compose -f docker-compose.bot.yml pull && ... up -d --build
+# Stop:    docker compose -f docker-compose.bot.yml down
 
 services:
   unread-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
-    image: unread-bot:latest
+    # Override with UNREAD_BOT_IMAGE in the env file to pin a specific
+    # version (e.g. ghcr.io/maxbolgarin/unread:1.4.2). Default tracks
+    # `:latest`, which moves on every semantic-release.
+    image: "${UNREAD_BOT_IMAGE:-ghcr.io/maxbolgarin/unread:latest}"
+    # Image has no ENTRYPOINT — it's a generic CLI runtime. Tell
+    # compose to run the bot subcommand.
+    command: ["unread", "bot", "run"]
     restart: unless-stopped
+    pull_policy: always
     environment:
-      # Telegram app credentials (my.telegram.org). Same values you'd
-      # set on a laptop running `unread tg login`.
       TELEGRAM_API_ID: "${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}"
       TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}"
 
-      # AI provider — at least one. The bot uses whatever's configured;
-      # OpenAI is recommended for full feature coverage (Whisper /
-      # vision are OpenAI-only inside unread today).
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
 
-      # Bot-specific.
       UNREAD_BOT_TOKEN: "${UNREAD_BOT_TOKEN:?UNREAD_BOT_TOKEN is required}"
-      # Optional: derived from the mounted user session when one is
-      # present at /root/.unread/storage/session.sqlite. Only required
-      # for the first /upload_session bootstrap when no session is
-      # mounted yet. When both are present, the session-derived ID
-      # wins and the env var is logged as a warning.
       UNREAD_BOT_OWNER_ID: "${UNREAD_BOT_OWNER_ID:-0}"
       UNREAD_BOT_CONCURRENCY: "${UNREAD_BOT_CONCURRENCY:-2}"
       UNREAD_BOT_DEFAULT_PRESET: "${UNREAD_BOT_DEFAULT_PRESET:-}"
       UNREAD_BOT_MAX_FILE_MB: "${UNREAD_BOT_MAX_FILE_MB:-100}"
+      # "pdf" (default) or "md" — choose the bot's report attachment
+      # format. Runtime auto-falls-back to "md" when weasyprint can't
+      # render (e.g. libpango missing); set this to "md" explicitly to
+      # skip the render attempt entirely.
+      UNREAD_BOT_REPORT_FORMAT: "${UNREAD_BOT_REPORT_FORMAT:-pdf}"
     volumes:
-      # Persists reports, cache, secrets DB, and the uploaded user
-      # session across restarts. Drop your existing
-      # ~/.unread/storage/session.sqlite in here ahead of time to skip
-      # the /upload_session step.
+      # Reports, cache, secrets DB, and the uploaded user session
+      # persist across container restarts and image updates. SCP your
+      # existing ~/.unread/storage/session.sqlite onto the VM into this
+      # named volume's mountpoint to skip the /upload_session bootstrap.
       - unread_state:/root/.unread
 
 volumes:
