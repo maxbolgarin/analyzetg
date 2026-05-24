@@ -22,6 +22,7 @@ import structlog
 import typer
 from telethon import events
 
+from unread.bot.confirm import RunOptions, enrich_csv
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -39,11 +40,13 @@ _TME_PARSE = re.compile(
 )
 
 
-async def handle(
+async def execute(
     event: events.NewMessage.Event,
     payload: dict,
+    options: RunOptions,
     *,
     app: BotApp,
+    progress_msg=None,
 ) -> None:
     if not app.user_session_ready:
         await event.reply(
@@ -81,11 +84,22 @@ async def handle(
     if from_msg is None:
         last_days = s.sync.default_lookback_days
 
-    progress = await event.reply(f"⏳ Resolving `{ref}`…")
+    if progress_msg is None:
+        progress_msg = await event.reply(f"⏳ Resolving `{ref}`…")
+    else:
+        with contextlib.suppress(Exception):
+            await progress_msg.edit(f"⏳ Resolving `{ref}`…", buttons=None)
     try:
-        await progress.edit("⏳ Pulling messages…")
+        await progress_msg.edit("⏳ Pulling messages…")
         language = s.locale.language or "en"
         report_language = s.locale.report_language or language
+
+        # User-toggled enrich kinds become a comma-joined extra list.
+        # The CLI's `--enrich a,b,c` semantics mean: turn on a/b/c on
+        # top of whatever's already enabled in settings. `cmd_analyze`
+        # parses this the same way — voice/videonote stay on by default
+        # via settings.enrich, and we add image/doc/link/video here.
+        extra_enrich = enrich_csv(options)
 
         await cmd_analyze(
             ref=ref,
@@ -107,15 +121,16 @@ async def handle(
             no_console=True,
             mark_read=False,
             no_cache=False,
+            enrich=extra_enrich or None,
             yes=True,
             language=language,
             report_language=report_language,
             source_language=s.locale.content_language or "",
         )
-        await progress.edit("📄 Sending report…")
+        await progress_msg.edit("📄 Sending report…")
         await _upload_latest_tg_report(event, preset=preset, started=started)
         with contextlib.suppress(Exception):
-            await progress.delete()
+            await progress_msg.delete()
     except typer.Exit as e:
         # `cmd_analyze` uses `typer.Exit(0)` to bail gracefully — most
         # commonly "no unread messages in this chat", but also "nothing
@@ -124,18 +139,18 @@ async def handle(
         code = getattr(e, "exit_code", 0)
         if code == 0:
             with contextlib.suppress(Exception):
-                await progress.edit(
+                await progress_msg.edit(
                     f"✓ Nothing to analyze in `{ref}` for the requested window. "
                     "Try a `t.me/<chat>/<msg>` link to anchor on a specific message.",
                 )
             return
         log.warning("bot.tg_handler_typer_exit", ref=ref, exit_code=code)
         with contextlib.suppress(Exception):
-            await progress.edit(f"⚠️ Analyze exited with code {code}.")
+            await progress_msg.edit(f"⚠️ Analyze exited with code {code}.")
     except Exception as e:
         log.exception("bot.tg_handler_failed", ref=ref)
         with contextlib.suppress(Exception):
-            await progress.edit(f"⚠️ {type(e).__name__}: {e}")
+            await progress_msg.edit(f"⚠️ {type(e).__name__}: {e}")
         raise
 
 

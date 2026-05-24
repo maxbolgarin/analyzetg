@@ -3,6 +3,11 @@
 Owns: size-gating against `settings.bot.max_file_mb`, download to a
 per-request temp dir, dispatch into the existing files pipeline,
 report upload via `unread.bot.reply.send_report`, and tmp cleanup.
+
+`execute` is the only public entry point — called from the bot's
+batch dispatch (Run separately) and from the confirm-disabled
+fast path. The per-message confirm panel went away when bursts
+landed; the batch panel in `unread.bot.burst` covers everything.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from typing import TYPE_CHECKING
 import structlog
 from telethon import events
 
+from unread.bot.confirm import RunOptions
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -29,25 +35,27 @@ log = structlog.get_logger(__name__)
 _ACCEPTED_KINDS = frozenset({"text", "pdf", "docx", "audio", "video", "image"})
 
 
-async def handle(
+async def execute(
     event: events.NewMessage.Event,
     payload: dict,
+    options: RunOptions,
     *,
     app: BotApp,
+    progress_msg=None,
 ) -> None:
     """Process a file-shaped event end-to-end.
 
-    Branches on `payload["source"]`:
-    * ``"media"`` — a TG document/photo/audio/video. Downloads via
-      `bot_client.download_media`, then routes to `cmd_analyze_file`.
-    * ``"text"`` — plain text from the message body. Writes to a
-      `.txt` file in the per-request temp dir and routes to
-      `cmd_analyze_file`. (Going through the file path rather than the
-      stdin sentinel keeps the bot uncoupled from `_read_stdin_bytes`,
-      which reads from `sys.stdin` of the bot process.)
+    `progress_msg` is the message handle used for status edits — when
+    None, a fresh one is created via `event.reply`. When called from the
+    callback handler the panel message is passed in so the user sees a
+    single status line instead of a panel + a new progress message.
     """
     s = get_settings()
-    progress = await event.reply("⏳ Working…")
+    if progress_msg is None:
+        progress_msg = await event.reply("⏳ Working…")
+    else:
+        with contextlib.suppress(Exception):
+            await progress_msg.edit("⏳ Working…", buttons=None)
     started = time.time()
     tmp_dir = _make_tmp_dir()
     try:
@@ -55,9 +63,9 @@ async def handle(
         if local_path is None:
             return  # _materialize_input has already replied with the reason.
         preset = _effective_preset(s, app, event.chat_id)
-        await progress.edit(f"⏳ Analyzing `{local_path.name}`…")
+        await progress_msg.edit(f"⏳ Analyzing `{local_path.name}`…")
         await _dispatch_analyze_file(local_path, preset=preset, s=s)
-        await progress.edit("📄 Sending report…")
+        await progress_msg.edit("📄 Sending report…")
         from unread.bot import reply
 
         await reply.send_file_report(
@@ -68,15 +76,13 @@ async def handle(
             kind=payload.get("kind", "text") if payload.get("source") == "media" else "text",
         )
         with contextlib.suppress(Exception):
-            await progress.delete()
+            await progress_msg.delete()
     except Exception as e:
         log.exception("bot.file_handler_failed")
         with contextlib.suppress(Exception):
-            await progress.edit(f"⚠️ {type(e).__name__}: {e}")
+            await progress_msg.edit(f"⚠️ {type(e).__name__}: {e}")
         raise
     finally:
-        # Drop the downloaded payload — the report has been delivered;
-        # keeping the raw file would just grow the bot's disk.
         with contextlib.suppress(Exception):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

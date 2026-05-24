@@ -226,18 +226,38 @@ class BotApp:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
+        # `events.CallbackQuery` has no `from_users=` (unlike NewMessage)
+        # — it accepts `chats=` only. For a single-owner private bot the
+        # owner's user_id IS the chat_id of the 1:1 conversation, so
+        # `chats=[owner_id]` filters out callbacks from any other chat
+        # (groups, other DMs). The `event.sender_id != owner_id` check
+        # inside `_handle_callback` is the defense-in-depth fallback.
+        @self.bot_client.on(events.CallbackQuery(chats=[owner_id]))
+        async def _on_owner_callback(event: events.CallbackQuery.Event) -> None:
+            if event.sender_id != owner_id:
+                return
+            task = asyncio.create_task(self._handle_callback(event))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
     # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------
 
     async def _handle(self, event: events.NewMessage.Event) -> None:
-        """Per-message worker. Classify → run handler → reply.
+        """Per-message worker. Classify → show confirm OR execute → reply.
 
         Wrapped in a top-level try/except so a handler raising never
-        kills the event loop or leaves the bot silent. The semaphore
-        gates the *real work* (analyze pipeline) but not the
-        classification step, so quick replies like `/help` go out
-        immediately even when 2 analyses are running.
+        kills the event loop or leaves the bot silent.
+
+        Two paths for analysis-shaped messages:
+        * Default: show the confirm panel (cheap, no semaphore) and
+          stash a `PendingRun`. The actual analyze runs later when the
+          user taps ▶ Run on the panel (semaphore-gated in
+          `_handle_callback`).
+        * `/confirm off` chat state: skip the panel and run analyze
+          immediately (today's pre-panel behavior, semaphore-gated
+          here in `_handle`).
         """
         # Pending `/upload_session`: the very next document from the
         # owner is consumed by the upload state machine, never routed
@@ -269,21 +289,33 @@ class BotApp:
             await self._handle_cmd(event, payload)
             return
 
-        async with self._semaphore:
-            try:
-                await self._run_analysis_handler(event, kind, payload)
-            except Exception as e:
-                # `typer.Exit(0)` is a graceful "nothing to do" bail
-                # from inside the analyze pipeline (e.g. "no unread
-                # messages since your read marker"). Handlers that
-                # know about it surface a friendly progress-message
-                # edit; the outer catch here intentionally swallows
-                # it without a "⚠️ Exit: 0" reply that would confuse
-                # the user.
-                if _is_clean_exit(e):
-                    return
-                log.exception("bot.handler_failed", kind=kind)
-                await _safe_reply(event, f"⚠️ {type(e).__name__}: {e}")
+        if chat_state.get("confirm_disabled"):
+            # No panel — straight to execute. Same path the original
+            # pre-confirm bot took. Semaphore gates the analyze work.
+            from unread.bot.confirm import default_options
+
+            options = default_options(kind, self.settings)
+            async with self._semaphore:
+                try:
+                    await self._run_execute(event, kind, payload, options, progress_msg=None)
+                except Exception as e:
+                    if _is_clean_exit(e):
+                        return
+                    log.exception("bot.handler_failed", kind=kind)
+                    await _safe_reply(event, f"⚠️ {type(e).__name__}: {e}")
+            return
+
+        # Default: append to the chat's burst and let the debounce
+        # timer flush it into one consolidated `▶ Run separately /
+        # ▶ Run combined` panel. Multiple links pasted in quick
+        # succession produce ONE panel, not N.
+        from unread.bot.burst import add_to_burst
+
+        try:
+            await add_to_burst(self, event, kind, payload)
+        except Exception:
+            log.exception("bot.add_to_burst_failed", kind=kind)
+            await _safe_reply(event, "⚠️ Couldn't queue the message.")
 
     async def _handle_cmd(self, event: events.NewMessage.Event, payload: dict) -> None:
         """Trivial-reply slash commands. Imported lazily."""
@@ -291,31 +323,186 @@ class BotApp:
 
         await cmds.handle(event, payload, app=self)
 
-    async def _run_analysis_handler(self, event: events.NewMessage.Event, kind: str, payload: dict) -> None:
-        """Dispatch to the kind-specific handler module.
-
-        Imports are lazy: a bot that only ever sees web URLs never
-        pulls the youtube transcript machinery into memory.
-        """
+    async def _run_execute(
+        self,
+        event: events.NewMessage.Event,
+        kind: str,
+        payload: dict,
+        options,
+        *,
+        progress_msg=None,
+    ) -> None:
+        """Dispatch to the kind-specific `execute`. Lazy-imports the module."""
         if kind == "file":
             from unread.bot.handlers import file as file_handler
 
-            await file_handler.handle(event, payload, app=self)
+            await file_handler.execute(event, payload, options, app=self, progress_msg=progress_msg)
         elif kind == "youtube":
             from unread.bot.handlers import youtube as yt_handler
 
-            await yt_handler.handle(event, payload, app=self)
+            await yt_handler.execute(event, payload, options, app=self, progress_msg=progress_msg)
         elif kind == "url":
             from unread.bot.handlers import url as url_handler
 
-            await url_handler.handle(event, payload, app=self)
+            await url_handler.execute(event, payload, options, app=self, progress_msg=progress_msg)
         elif kind == "tg":
             from unread.bot.handlers import tg as tg_handler
 
-            await tg_handler.handle(event, payload, app=self)
+            await tg_handler.execute(event, payload, options, app=self, progress_msg=progress_msg)
         else:
-            # Should be unreachable — classifier covers every branch.
             await _safe_reply(event, f"⚠️ Unknown message kind: {kind!r}")
+
+    # ------------------------------------------------------------------
+    # Callback handling (inline-keyboard taps)
+    # ------------------------------------------------------------------
+
+    async def _handle_callback(self, event: events.CallbackQuery.Event) -> None:
+        """Route a confirm-panel button tap.
+
+        The only action is `R` (Run) — the panel exists solely to gate
+        analyze on an explicit tap. Per-run tuning is via slash
+        commands (`/preset <name>`), not buttons.
+
+        Stale panels (TTL-expired or post-restart) reply with a
+        "session expired" toast — user sends the link again.
+        """
+        from unread.bot.confirm import parse_callback, prune_pending_runs
+
+        if event.sender_id != self.owner_id:
+            return
+        chat_state = self._chat_state.setdefault(event.chat_id, {})
+        prune_pending_runs(chat_state)
+        try:
+            action, panel_msg_id, _arg = parse_callback(event.data)
+        except ValueError:
+            log.warning("bot.callback.bad_data", data=event.data)
+            with contextlib.suppress(Exception):
+                await event.answer("Invalid request.", alert=True)
+            return
+
+        pending_runs = chat_state.get("pending_runs") or {}
+        pending = pending_runs.get(panel_msg_id)
+        if pending is None:
+            with contextlib.suppress(Exception):
+                await event.answer("Session expired — send again.", alert=True)
+            with contextlib.suppress(Exception):
+                await event.edit("✖ Session expired.", buttons=None)
+            return
+
+        # Drop the pending before kicking off — prevents a double-tap
+        # from running twice while the first is in flight.
+        if action in ("R", "A", "M"):
+            pending_runs.pop(panel_msg_id, None)
+            with contextlib.suppress(Exception):
+                await event.answer("Running…")
+            try:
+                panel_msg = await event.get_message()
+            except Exception:
+                panel_msg = None
+
+        if action == "R":
+            async with self._semaphore:
+                try:
+                    await self._run_execute(
+                        pending.event,
+                        pending.kind,
+                        pending.payload,
+                        pending.options,
+                        progress_msg=panel_msg,
+                    )
+                except Exception as e:
+                    if _is_clean_exit(e):
+                        return
+                    log.exception("bot.handler_failed", kind=pending.kind)
+                    await _safe_reply(pending.event, f"⚠️ {type(e).__name__}: {e}")
+            return
+
+        if action == "A":
+            await self._run_batch_separately(pending, panel_msg)
+            return
+
+        if action == "M":
+            await self._run_batch_combined(pending, panel_msg)
+            return
+
+        # Unknown action — log and ignore so a single bad button doesn't
+        # leave the user staring at a frozen panel.
+        log.warning("bot.callback.unknown_action", action=action)
+        with contextlib.suppress(Exception):
+            await event.answer()
+
+    # ------------------------------------------------------------------
+    # Batch (burst) execution
+    # ------------------------------------------------------------------
+
+    async def _run_batch_separately(self, pending, panel_msg) -> None:
+        """Loop items, run each through its kind-specific `execute`.
+
+        Sequential — the analyze pipeline is heavy enough that fanning
+        out N parallel runs would just thrash the semaphore + the AI
+        provider's rate limit. The panel message is edited to a
+        progress line ("⏳ 2/5 …") between items so the user can see
+        forward progress without watching the logs.
+        """
+        from unread.bot.confirm import default_options
+
+        items = pending.payload.get("items") or []
+        total = len(items)
+        if total == 0:
+            return
+        for idx, item in enumerate(items, start=1):
+            if panel_msg is not None:
+                with contextlib.suppress(Exception):
+                    await panel_msg.edit(
+                        f"⏳ Running {idx}/{total}: {_burst_item_label(item)}",
+                        buttons=None,
+                    )
+            options = default_options(item.kind, self.settings)
+            async with self._semaphore:
+                try:
+                    await self._run_execute(
+                        item.event,
+                        item.kind,
+                        item.payload,
+                        options,
+                        progress_msg=None,
+                    )
+                except Exception as e:
+                    if _is_clean_exit(e):
+                        continue
+                    log.exception("bot.batch.item_failed", kind=item.kind, idx=idx)
+                    await _safe_reply(item.event, f"⚠️ Item {idx}/{total} failed: {type(e).__name__}: {e}")
+        if panel_msg is not None:
+            with contextlib.suppress(Exception):
+                await panel_msg.edit(f"✓ Finished {total} items.", buttons=None)
+
+    async def _run_batch_combined(self, pending, panel_msg) -> None:
+        """Concat extracted text from every combinable item → one analyze."""
+        from unread.bot.combined import run_combined
+
+        items = pending.payload.get("items") or []
+        if not items:
+            return
+        async with self._semaphore:
+            try:
+                await run_combined(self, items=items, panel_msg=panel_msg, original_event=pending.event)
+            except Exception as e:
+                if _is_clean_exit(e):
+                    return
+                log.exception("bot.batch.combined_failed")
+                if panel_msg is not None:
+                    with contextlib.suppress(Exception):
+                        await panel_msg.edit(f"⚠️ Combined run failed: {type(e).__name__}: {e}", buttons=None)
+
+
+def _burst_item_label(item) -> str:
+    """One-line description for the in-progress edit. Mirrors burst.summary_line
+    but available here without importing the burst module up-top (avoids a
+    circular import — burst imports confirm which is fine, but app already
+    imports burst lazily inside `_handle`)."""
+    from unread.bot.burst import summary_line
+
+    return summary_line(item)
 
 
 # ----------------------------------------------------------------------

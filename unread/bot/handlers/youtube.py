@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import structlog
 from telethon import events
 
+from unread.bot.confirm import RunOptions
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -17,11 +18,13 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 
-async def handle(
+async def execute(
     event: events.NewMessage.Event,
     payload: dict,
+    options: RunOptions,
     *,
     app: BotApp,
+    progress_msg=None,
 ) -> None:
     from unread.bot.handlers.file import _effective_preset
     from unread.youtube.commands import cmd_analyze_youtube
@@ -38,9 +41,13 @@ async def handle(
         await event.reply(f"⚠️ Not a recognizable YouTube video URL: {e}")
         return
 
-    progress = await event.reply(f"⏳ Pulling transcript for `{video_id}`…")
+    if progress_msg is None:
+        progress_msg = await event.reply(f"⏳ Pulling transcript for `{video_id}`…")
+    else:
+        with contextlib.suppress(Exception):
+            await progress_msg.edit(f"⏳ Pulling transcript for `{video_id}`…", buttons=None)
     try:
-        await progress.edit("⏳ Analyzing video…")
+        await progress_msg.edit("⏳ Analyzing video…")
         language = s.locale.language or "en"
         report_language = s.locale.report_language or language
         await cmd_analyze_youtube(
@@ -62,17 +69,17 @@ async def handle(
             language=language,
             report_language=report_language,
             source_language=s.locale.content_language or "",
-            youtube_source="auto",
+            youtube_source=options.youtube_source or "auto",
             yes=True,
         )
-        await progress.edit("📄 Sending report…")
+        await progress_msg.edit("📄 Sending report…")
         from unread.bot import reply
 
         await reply.send_youtube_report(event, preset=preset, started=started, hint=video_id)
         with contextlib.suppress(Exception):
-            await progress.delete()
+            await progress_msg.delete()
     except Exception as e:
         log.exception("bot.youtube_handler_failed", url=url)
         with contextlib.suppress(Exception):
-            await progress.edit(f"⚠️ {type(e).__name__}: {e}")
+            await progress_msg.edit(f"⚠️ {type(e).__name__}: {e}")
         raise

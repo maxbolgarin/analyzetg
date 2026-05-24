@@ -20,6 +20,7 @@ Slash commands:
 `/ping` — health check
 `/preset <name>` — sticky preset for the next analyses in this chat
 `/preset` — clear the sticky preset
+`/confirm on|off` — toggle the pre-run confirm panel (default: on)
 `/upload_session` — install your Telegram user session (one-time)
 `/cancel` — drop any pending `/upload_session`
 """
@@ -82,6 +83,30 @@ async def handle(
             preset = args[0].strip()
             chat_state["preset"] = preset
             await event.reply(f"Sticky preset → `{preset}` (used until you clear it).")
+        return
+
+    if cmd == "confirm":
+        chat_state = app._chat_state.setdefault(event.chat_id, {})
+        if not args:
+            state = "off" if chat_state.get("confirm_disabled") else "on"
+            await event.reply(
+                f"Pre-run confirm panel is currently `{state}`. Use `/confirm on|off` to change.",
+                parse_mode="md",
+            )
+            return
+        choice = args[0].strip().lower()
+        if choice == "off":
+            chat_state["confirm_disabled"] = True
+            await event.reply(
+                "Pre-run confirm panel disabled. Messages will run immediately with sticky defaults."
+            )
+        elif choice == "on":
+            chat_state.pop("confirm_disabled", None)
+            await event.reply(
+                "Pre-run confirm panel re-enabled. Each message will get a ▶ Run / ⚙ Change / ✖ Cancel panel."
+            )
+        else:
+            await event.reply("Usage: `/confirm on` or `/confirm off`.", parse_mode="md")
         return
 
     if cmd == "cancel":
