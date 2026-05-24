@@ -30,5 +30,6 @@ export const DOCS_NAV: { label: string; href: string; slug: string }[] = [
   { label: 'Sources', href: `${BASE}/docs/sources/`, slug: 'sources' },
   { label: 'CLI reference', href: `${BASE}/docs/reference/`, slug: 'reference' },
   { label: 'Configuration', href: `${BASE}/docs/configuration/`, slug: 'configuration' },
+  { label: 'Telegram bot', href: `${BASE}/docs/bot/`, slug: 'bot' },
   { label: 'Security', href: `${BASE}/docs/security/`, slug: 'security' },
 ];

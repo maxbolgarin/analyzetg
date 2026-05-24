@@ -56,4 +56,18 @@ export const faqItems: FaqItem[] = [
     aHtml:
       'Yes. <code>unread</code> is Apache 2.0 licensed and developed in the open on <a href="https://github.com/maxbolgarin/unread" rel="noopener" target="_blank">GitHub</a>. You only pay your LLM provider for the tokens you use. No service, no telemetry, no account.',
   },
+  {
+    q: 'Can I run this as a Telegram bot?',
+    aText:
+      'Yes. unread bot run turns the CLI inside out — message your own @BotFather bot with a file, web URL, YouTube link, forwarded message, or a t.me/ link and get a Markdown summary back as a document with a cost-and-timing caption. It is single-user by design: allowlisted to one Telegram ID (yours), everyone else is silently dropped. Run it locally or deploy on a VM with docker-compose; see the bot guide for details.',
+    aHtml:
+      'Yes. <code>unread bot run</code> turns the CLI inside out — message your own <code>@BotFather</code> bot with a file, web URL, YouTube link, forwarded message, or a <code>t.me/</code> link and get a Markdown summary back as a document with a cost-and-timing caption. It is single-user by design: allowlisted to one Telegram ID (yours), everyone else is silently dropped. Run it locally or deploy on a VM with docker-compose — see the <a href="/unread/docs/bot/">bot guide</a> for details.',
+  },
+  {
+    q: 'Can it transcribe voice messages and videos?',
+    aText:
+      'Yes — both standalone files (unread ./voice.ogg, unread ./meeting.mp4) and voice notes / video circles inside Telegram chats. Speech-to-text runs through OpenAI Whisper at roughly $0.006 per minute. Video files have their audio track extracted by ffmpeg first. Forwarded voice messages dedupe across chats — Whisper runs once and the result is cached by Telegram document_id.',
+    aHtml:
+      'Yes — both standalone files (<code>unread ./voice.ogg</code>, <code>unread ./meeting.mp4</code>) and voice notes / video circles inside Telegram chats. Speech-to-text runs through OpenAI <strong>Whisper</strong> at roughly <strong>$0.006 per minute</strong>. Video files have their audio track extracted by <code>ffmpeg</code> first. Forwarded voice messages dedupe across chats — Whisper runs once and the result is cached by Telegram <code>document_id</code>.',
+  },
 ];

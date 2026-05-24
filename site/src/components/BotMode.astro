@@ -1,0 +1,138 @@
+---
+import { BASE, GH_URL } from '../consts';
+---
+<section class="bot">
+  <div class="container bot-inner">
+    <div class="bot-text">
+      <header>
+        <h2>There's a bot, too.</h2>
+        <p class="lead">
+          Run the same pipeline as a self-hosted Telegram bot.
+          Forward a voice message, a PDF, a YouTube link, a stranger's
+          <code>t.me/</code> post, or that suspicious file someone
+          just sent you — get a Markdown summary back as a document,
+          with cost and timing in the caption.
+        </p>
+      </header>
+
+      <ul class="points">
+        <li>
+          <strong>Voice & video.</strong>
+          Drop a 12-minute voice or a 45-minute recorded meeting — get a TL;DR in roughly the time it takes to put your phone down.
+        </li>
+        <li>
+          <strong>Anything weird.</strong>
+          Forward suspicious links, long PDFs, or channel posts you'd rather not read. The bot reads them for you and replies with the gist.
+        </li>
+        <li>
+          <strong>Single-user, your hardware.</strong>
+          Allowlisted to one Telegram ID (yours). Runs on your laptop or a $5 VM via docker-compose.
+        </li>
+      </ul>
+
+      <div class="ctas">
+        <a href={`${BASE}/docs/bot/`} class="btn btn-primary">
+          Bot guide
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+        <a href={`${GH_URL}/blob/main/docs/bot-vm-deploy.md`} class="btn btn-ghost" rel="noopener" target="_blank">
+          Deploy on a VM
+        </a>
+      </div>
+    </div>
+
+    <div class="bot-frame">
+      <img
+        src={`${BASE}/bot.jpg`}
+        alt="The unread Telegram bot replying to a forwarded voice message with a TL;DR and attaching a Markdown report as a document."
+        loading="lazy"
+        width="603"
+        height="1228"
+      />
+    </div>
+  </div>
+</section>
+
+<style>
+  .bot {
+    padding: 4rem 0;
+    border-top: 1px solid var(--border);
+  }
+  .bot-inner {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 3rem;
+    align-items: center;
+  }
+  @media (max-width: 960px) {
+    .bot-inner { grid-template-columns: 1fr; gap: 2.5rem; }
+  }
+
+  header { margin-bottom: 1.4rem; }
+  h2 {
+    font-size: clamp(1.8rem, 3vw, 2.3rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.7rem;
+  }
+  .lead {
+    color: var(--fg-muted);
+    font-size: 1.05rem;
+    line-height: 1.65;
+    margin: 0;
+    max-width: 56ch;
+  }
+  .lead code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.88em;
+    color: var(--fg);
+  }
+
+  .points {
+    list-style: none;
+    margin: 0 0 1.6rem;
+    padding: 0;
+    display: grid;
+    gap: 0.75rem;
+    max-width: 60ch;
+  }
+  .points li {
+    position: relative;
+    padding-left: 1.1rem;
+    color: var(--fg-muted);
+    font-size: 0.98rem;
+    line-height: 1.6;
+  }
+  .points li::before {
+    content: "›";
+    position: absolute;
+    left: 0;
+    top: 0;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .points strong { color: var(--fg); font-weight: 700; }
+
+  .ctas {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .bot-frame {
+    display: flex;
+    justify-content: center;
+  }
+  .bot-frame img {
+    max-width: 100%;
+    height: auto;
+    width: min(360px, 100%);
+    border-radius: 18px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    background: var(--bg-elev);
+  }
+</style>

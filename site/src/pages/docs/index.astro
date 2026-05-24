@@ -28,6 +28,11 @@ const cards = [
     body: 'config.toml, language settings, cost guardrails, two-layer cache.',
   },
   {
+    href: `${BASE}/docs/bot/`,
+    title: 'Telegram bot',
+    body: 'Run unread as a self-hosted Telegram bot. Forward files, URLs, voice messages — get summaries back.',
+  },
+  {
     href: `${BASE}/docs/security/`,
     title: 'Security & privacy',
     body: 'Local-first storage, three credential backends, PII redaction.',
@@ -52,7 +57,7 @@ const breadcrumb = {
   <div class="container docs-index">
     <header>
       <h1>Documentation</h1>
-      <p class="lead">Five short guides. Start with <a href={`${BASE}/docs/install/`}>Install</a>, run <code>unread doctor</code>, then explore the rest.</p>
+      <p class="lead">Six short guides. Start with <a href={`${BASE}/docs/install/`}>Install</a>, run <code>unread doctor</code>, then explore the rest.</p>
     </header>
     <div class="grid">
       {cards.map((c) => (

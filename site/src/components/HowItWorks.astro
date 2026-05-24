@@ -16,9 +16,9 @@ const sources = [
     note: 'trafilatura extracts the main content; your LLM does the rest. Paragraph-level citations. Cached locally so follow-up asks are free.',
   },
   {
-    name: 'Files & stdin',
-    example: 'unread ./meeting.mp3   |   cat notes.txt | unread',
-    note: 'PDF, DOCX, MD, audio, video, images. Audio and video go through Whisper; images go through vision. Stdin works too — pipe anything in.',
+    name: 'Files, audio & video',
+    example: 'unread ./voice-message.ogg   |   cat notes.txt | unread',
+    note: 'Audio (mp3 / m4a / ogg / opus) and video (mp4 / mov) go through Whisper — drop in a 10-minute voice or a 45-minute meeting recording, get a summary. Also PDF, DOCX, images (vision), source code, and Markdown. Pipe stdin in too.',
   },
 ];
 
