@@ -206,7 +206,9 @@ want to subscribe to, or that suspicious link a friend just sent —
 you get a Markdown summary back as a document, with cost and timing
 in the caption.
 
-![Bot replying with a voice-message summary, attaching the PDF report](.github/examples/bot.jpg)
+<p align="center">
+  <img src=".github/examples/bot.jpg" alt="Bot replying with a voice-message summary, attaching the PDF report" width="320">
+</p>
 
 Single-user by design: the bot only answers ONE Telegram ID. The
 allowlist is auto-derived from the user session you give it (mounted
