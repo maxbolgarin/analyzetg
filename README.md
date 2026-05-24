@@ -38,8 +38,10 @@ unread @somegroup --last-days 7
 
 It pulls the chat, runs it through whichever LLM you keep an API key
 for, and hands you a Markdown report with clickable citations back to
-every claim. Same shape for YouTube videos, web pages, PDFs, voice
-notes, and stdin.
+every claim. Same shape for YouTube videos, web pages, voice messages,
+recorded meetings, podcasts, PDFs, and stdin. Or run it as a
+self-hosted Telegram bot and forward anything weird at it — see
+[Self-hosted Telegram bot](#self-hosted-telegram-bot) below.
 
 ![unread analyzing a Telegram channel into a Markdown report](.github/examples/analyze-example.gif)
 
@@ -128,6 +130,30 @@ and images all use the same `<ref>` syntax. See
 [`docs/sources.md`](docs/sources.md) for the full list of supported
 extensions and the cache rules.
 
+## Voice, video, and any file — talk-to-text in one command
+
+That 12-minute voice message someone sent you. The 45-minute meeting
+recording you'll never play back. The hour-long lecture you wanted to
+skim. Drop any of them in and get a Markdown summary:
+
+```bash
+unread ./meeting.mp3                 # audio → Whisper → summary
+unread ./standup.mp4                 # video → ffmpeg → Whisper → summary
+unread ./voice-note.ogg              # forwarded voice message saved to disk
+unread ./report.pdf                  # PDF
+unread ./screenshot.png              # image (vision)
+```
+
+Inside a Telegram chat the same step runs invisibly: voice notes and
+video circles are transcribed, photos are described, the analysis
+treats them as text. Forward a voice across five chats — Whisper runs
+once, cached by Telegram's stable `document_id`.
+
+Whisper is roughly **$0.006 per minute of audio**. A 30-minute podcast
+costs less than two cents. Re-running on the same file is free (cache
+hit). The full kind matrix and cache rules are in
+[`docs/sources.md#media-enrichment`](docs/sources.md#media-enrichment).
+
 ## Bring your own model
 
 Drop in a key for any of these. Switch at any time with
@@ -173,12 +199,16 @@ Full install matrix (Windows / ffmpeg / dev install / editable) is in
 
 ## Self-hosted Telegram bot
 
-Same pipeline, Telegram-side surface. Run it on a VM and message your own
-`@BotFather` bot with any file / URL / YouTube link / forwarded message
-— you get the Markdown report back as a document with a one-line cost
-caption.
+Run the same pipeline as a Telegram bot. Forward it a voice message
+you don't feel like listening to, a PDF you don't feel like reading, a
+YouTube link, a `t.me/...` post from a channel you're not sure you
+want to subscribe to, or that suspicious link a friend just sent —
+you get a Markdown summary back as a document, with cost and timing
+in the caption.
 
-It's **single-user**: the bot only answers ONE Telegram user. The
+![Bot replying with a voice-message summary, attaching the PDF report](.github/examples/bot.jpg)
+
+Single-user by design: the bot only answers ONE Telegram ID. The
 allowlist is auto-derived from the user session you give it (mounted
 or sent via `/upload_session`); `UNREAD_BOT_OWNER_ID` is only a
 bootstrap fallback for the case where no session is installed yet.
@@ -194,7 +224,7 @@ cp .env.bot.example .env.bot
 unread bot run
 ```
 
-Or you can use docker compose (e.g. on a server):
+Or use docker compose (e.g. on a server):
 ```bash
 docker compose -f docker-compose.bot.yml --env-file .env.bot up -d --build
 ```
@@ -206,6 +236,11 @@ ready. (Alternative: SCP that file into the `unread_state` volume at
 `/root/.unread/storage/session.sqlite` before starting the container —
 then you can leave `UNREAD_BOT_OWNER_ID` unset; the bot reads the
 owner ID from the session itself.)
+
+Full feature reference (slash commands, the confirm panel, what each
+input kind does) is in [`docs/bot.md`](docs/bot.md). End-to-end VM
+deployment via GHCR + docker-compose is in
+[`docs/bot-vm-deploy.md`](docs/bot-vm-deploy.md).
 
 
 ## Why this exists
