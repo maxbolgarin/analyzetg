@@ -8,9 +8,10 @@
 #   bash scripts/install-bot.sh
 #
 # What this does, in order:
-#   1. Verifies Python 3.11+ is present (installs via apt/dnf if missing).
-#   2. Installs system deps (ffmpeg).
-#   3. Installs pipx if absent, then `unread[bot]` into an isolated venv.
+#   1. Installs uv (single static binary; manages its own Python 3.11+).
+#   2. Installs system deps (ffmpeg, libpango — the latter is needed by
+#      weasyprint for PDF report rendering, which is now a base feature).
+#   3. `uv tool install unread` — isolated tool venv, `unread` on PATH.
 #   4. Runs `unread init` interactively (AI key + Telegram creds + session).
 #   5. Prompts for the bot's `@BotFather` token, writes it to `~/.unread/.env`.
 #   6. Drops a `systemd --user` unit that auto-restarts on crash + survives
@@ -67,7 +68,7 @@ for arg in "$@"; do
     --reset)      RESET=1 ;;
     --skip-init)  SKIP_INIT=1 ;;
     -h|--help)
-      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -96,7 +97,7 @@ if [[ -z "$PKG" && "$(uname -s)" == "Darwin" ]]; then
   PKG="brew"
 fi
 if [[ -z "$PKG" ]]; then
-  err "Unsupported OS — install ffmpeg + Python 3.11+ manually, then 'pipx install unread[bot]'."
+  err "Unsupported OS — install ffmpeg + libpango manually, then 'uv tool install unread'."
   exit 1
 fi
 
@@ -110,7 +111,7 @@ if [[ "$PKG" != "brew" ]] && [[ "$EUID" -ne 0 ]]; then
   if command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
   else
-    warn "No sudo and not root — system package installs will fail. Re-run as root or pre-install ffmpeg + python."
+    warn "No sudo and not root — system package installs will fail. Re-run as root or pre-install ffmpeg + libpango."
   fi
 fi
 
@@ -149,6 +150,20 @@ pkg_install() {
   esac
 }
 
+# Per-OS package name set for the runtime stack we need:
+# - ffmpeg            — Whisper voice/video transcription
+# - libpango / cairo  — weasyprint PDF rendering (base dep since v1.x;
+#                      missing libs → bot still works but falls back to
+#                      .md upload via the runtime guard)
+runtime_packages() {
+  case "$PKG" in
+    apt)    echo "ffmpeg libpango-1.0-0 libpangoft2-1.0-0" ;;
+    dnf)    echo "ffmpeg pango" ;;
+    pacman) echo "ffmpeg pango" ;;
+    brew)   echo "ffmpeg pango" ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Optional reset
 # ---------------------------------------------------------------------------
@@ -160,57 +175,41 @@ if [[ "$RESET" == "1" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Python 3.11+
+# 1. uv (manages its own Python — no system Python install needed)
 # ---------------------------------------------------------------------------
-step "Checking Python 3.11+"
-PYTHON=""
-for candidate in python3.13 python3.12 python3.11 python3; do
-  if command -v "$candidate" >/dev/null 2>&1; then
-    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)'; then
-      PYTHON="$candidate"
-      break
-    fi
-  fi
-done
-if [[ -z "$PYTHON" ]]; then
-  warn "No Python 3.11+ found — installing"
-  case "$PKG" in
-    apt)    pkg_install python3.11 python3.11-venv python3-pip ;;
-    dnf)    pkg_install python3.11 ;;
-    pacman) pkg_install python ;;
-    brew)   pkg_install python@3.11 ;;
-  esac
-  PYTHON="$(command -v python3.11 || command -v python3)"
-fi
-ok "Python: $PYTHON ($($PYTHON --version))"
-
-# ---------------------------------------------------------------------------
-# 2. System deps: ffmpeg
-# ---------------------------------------------------------------------------
-step "Checking ffmpeg"
-if command -v ffmpeg >/dev/null 2>&1; then
-  ok "ffmpeg already present: $(ffmpeg -version | head -n1)"
+step "Installing uv"
+if command -v uv >/dev/null 2>&1; then
+  ok "uv already present: $(uv --version)"
 else
-  pkg_install ffmpeg
-  ok "ffmpeg installed."
-fi
-
-# ---------------------------------------------------------------------------
-# 3. pipx + unread[bot]
-# ---------------------------------------------------------------------------
-step "Installing unread[bot] via pipx"
-if ! command -v pipx >/dev/null 2>&1; then
-  $PYTHON -m pip install --user --quiet pipx
-  $PYTHON -m pipx ensurepath
-  # Make pipx available in THIS shell without re-login.
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  # uv installer drops the binary at ~/.local/bin/uv; make it visible
+  # in THIS shell without a re-login.
   export PATH="$HOME/.local/bin:$PATH"
+  ok "uv installed: $(uv --version 2>/dev/null || echo 'installed')"
 fi
-if pipx list 2>/dev/null | grep -q '^   package unread '; then
-  warn "unread already installed via pipx — upgrading"
-  pipx upgrade 'unread[bot]'
+
+# ---------------------------------------------------------------------------
+# 2. System deps (ffmpeg + libpango)
+# ---------------------------------------------------------------------------
+step "Installing system deps (ffmpeg + libpango)"
+# shellcheck disable=SC2086
+pkg_install $(runtime_packages)
+ok "System deps in place."
+
+# ---------------------------------------------------------------------------
+# 3. unread via uv tool
+# ---------------------------------------------------------------------------
+step "Installing unread via 'uv tool'"
+if uv tool list 2>/dev/null | grep -qE '^unread\s'; then
+  warn "unread already installed via uv — upgrading"
+  uv tool upgrade unread
 else
-  pipx install --force 'unread[bot]'
+  # --force lets us re-run after a partial earlier install.
+  uv tool install --force unread
 fi
+# uv tool puts the entry point in ~/.local/bin which we already added
+# to PATH above. Re-export defensively in case the shell missed it.
+export PATH="$HOME/.local/bin:$PATH"
 ok "unread installed: $(unread --version 2>/dev/null || echo 'installed')"
 
 # ---------------------------------------------------------------------------
@@ -251,7 +250,7 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null 2>&1; then
   warn "systemd not detected — start the bot manually: 'unread bot run'"
-  warn "Or use the Docker setup in docker-compose.bot.prod.yml."
+  warn "Or use the Docker setup in docker-compose.bot.yml."
   exit 0
 fi
 
@@ -263,7 +262,7 @@ mkdir -p "$UNIT_DIR"
 # Resolve `unread` to a full path — systemd doesn't read your shell rc.
 UNREAD_BIN="$(command -v unread)"
 if [[ -z "$UNREAD_BIN" ]]; then
-  err "Can't locate the 'unread' binary on PATH — check that pipx finished."
+  err "Can't locate the 'unread' binary on PATH — check that 'uv tool install' finished."
   exit 1
 fi
 
@@ -311,6 +310,7 @@ Useful commands:
   Logs:    journalctl --user -u unread-bot -f
   Restart: systemctl --user restart unread-bot
   Stop:    systemctl --user stop unread-bot
+  Upgrade: uv tool upgrade unread && systemctl --user restart unread-bot
 
 Open Telegram and message your bot — it should reply.
 ${C_GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}
