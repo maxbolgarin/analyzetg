@@ -1,0 +1,50 @@
+# Production deployment of `unread bot`.
+#
+# Pulls a pre-built image from GHCR — does NOT build from source. The
+# image is published by .github/workflows/bot-image.yml on every
+# semantic-release tag and on pushes to main.
+#
+# Quick start on a fresh VM:
+#   1. docker login ghcr.io   # only needed if you kept the image private
+#   2. cp .env.bot.example .env.bot && $EDITOR .env.bot
+#   3. docker compose -f docker-compose.bot.prod.yml --env-file .env.bot pull
+#   4. docker compose -f docker-compose.bot.prod.yml --env-file .env.bot up -d
+#
+# Updates:
+#   docker compose -f docker-compose.bot.prod.yml --env-file .env.bot pull
+#   docker compose -f docker-compose.bot.prod.yml --env-file .env.bot up -d
+#
+# Logs:    docker compose -f docker-compose.bot.prod.yml logs -f
+# Stop:    docker compose -f docker-compose.bot.prod.yml down
+
+services:
+  unread-bot:
+    # Override with UNREAD_BOT_IMAGE in the env file to pin to a
+    # specific version (e.g. ghcr.io/maxbolgarin/unread-bot:1.4.2).
+    # Default tracks `:latest`, which moves on every semantic-release.
+    image: "${UNREAD_BOT_IMAGE:-ghcr.io/maxbolgarin/unread-bot:latest}"
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}"
+
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+
+      UNREAD_BOT_TOKEN: "${UNREAD_BOT_TOKEN:?UNREAD_BOT_TOKEN is required}"
+      UNREAD_BOT_OWNER_ID: "${UNREAD_BOT_OWNER_ID:-0}"
+      UNREAD_BOT_CONCURRENCY: "${UNREAD_BOT_CONCURRENCY:-2}"
+      UNREAD_BOT_DEFAULT_PRESET: "${UNREAD_BOT_DEFAULT_PRESET:-}"
+      UNREAD_BOT_MAX_FILE_MB: "${UNREAD_BOT_MAX_FILE_MB:-100}"
+    volumes:
+      # Reports, cache, secrets DB, and the uploaded user session
+      # persist across container restarts and image updates. SCP your
+      # existing ~/.unread/storage/session.sqlite onto the VM into this
+      # named volume's mountpoint to skip the /upload_session bootstrap.
+      - unread_state:/root/.unread
+
+volumes:
+  unread_state:
