@@ -22,6 +22,29 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Reassign stdin to the user's terminal.
+#
+# `curl … | bash` pipes the script's body in on stdin, leaving no TTY
+# for interactive prompts. `unread init` and our own bot-token read
+# both need keyboard input, so reattach stdin to /dev/tty up front.
+# Without this, the init wizard bails with
+#     "Missing: TELEGRAM_API_ID / TELEGRAM_API_HASH, OPENAI_API_KEY"
+# instead of asking for them.
+#
+# When run as plain `bash scripts/install-bot.sh`, stdin is already
+# the TTY and this is a no-op.
+# ---------------------------------------------------------------------------
+if [[ ! -t 0 ]]; then
+  if [[ -r /dev/tty ]]; then
+    exec </dev/tty
+  else
+    echo "✖ No TTY available — interactive prompts won't work." >&2
+    echo "  Re-run as 'bash scripts/install-bot.sh' (downloaded first) or run on a real shell." >&2
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Color helpers
 # ---------------------------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -213,7 +236,7 @@ if grep -qE '^UNREAD_BOT_TOKEN=.+' "$ENV_PATH"; then
 else
   step "Bot token (from @BotFather)"
   printf "Paste your bot token: "
-  read -r BOT_TOKEN < /dev/tty
+  read -r BOT_TOKEN
   if [[ -z "$BOT_TOKEN" ]]; then
     err "Empty token — aborting. Re-run when you have one from @BotFather."
     exit 1
