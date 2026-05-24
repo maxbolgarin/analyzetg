@@ -391,7 +391,11 @@ class BotApp:
 
         # Drop the pending before kicking off — prevents a double-tap
         # from running twice while the first is in flight.
-        if action in ("R", "A", "M"):
+        from unread.bot.confirm import tg_window_for_action
+
+        is_tg_window = tg_window_for_action(action) is not None
+        is_forward = action in ("F_FULL", "F_TXT", "F_FROM", "F_DAY", "F_WK", "F_MO")
+        if action in ("R", "A", "M") or is_tg_window or is_forward:
             pending_runs.pop(panel_msg_id, None)
             with contextlib.suppress(Exception):
                 await event.answer("Running…")
@@ -400,29 +404,31 @@ class BotApp:
             except Exception:
                 panel_msg = None
 
-        if action == "R":
-            async with self._semaphore:
-                try:
-                    await self._run_execute(
-                        pending.event,
-                        pending.kind,
-                        pending.payload,
-                        pending.options,
-                        progress_msg=panel_msg,
-                    )
-                except Exception as e:
-                    if _is_clean_exit(e):
-                        return
-                    log.exception("bot.handler_failed", kind=pending.kind)
-                    await _safe_reply(pending.event, f"⚠️ {type(e).__name__}: {e}")
-            return
-
-        if action == "A":
+        # Every panel coming out of the burst flow is `kind="batch"`,
+        # whether the burst held 1 item or N. R and A both mean "run
+        # each item under its own handler"; the only difference is the
+        # button label in build_batch_panel. Route both through the
+        # same loop so a single-item batch doesn't trip the kind
+        # dispatch in _run_execute.
+        if action in ("R", "A"):
             await self._run_batch_separately(pending, panel_msg)
             return
 
         if action == "M":
             await self._run_batch_combined(pending, panel_msg)
+            return
+
+        if is_tg_window:
+            # Stamp the chosen window onto pending.options so the TG
+            # handler's execute() reads it and overrides its default
+            # from_msg / last_days computation, then go through the
+            # normal single-item run path.
+            pending.options.tg_window = tg_window_for_action(action)
+            await self._run_batch_separately(pending, panel_msg)
+            return
+
+        if is_forward:
+            await self._run_forward_action(action, pending, panel_msg)
             return
 
         # Unknown action — log and ignore so a single bad button doesn't
@@ -440,9 +446,13 @@ class BotApp:
 
         Sequential — the analyze pipeline is heavy enough that fanning
         out N parallel runs would just thrash the semaphore + the AI
-        provider's rate limit. The panel message is edited to a
-        progress line ("⏳ 2/5 …") between items so the user can see
-        forward progress without watching the logs.
+        provider's rate limit.
+
+        For a single-item batch, the panel itself becomes the progress
+        message — avoids spawning a second "⏳ Working…" reply right
+        next to the panel. For N≥2, the panel is edited to a
+        "⏳ Running k/N …" status line between items and each item's
+        execute() spawns its own progress reply.
         """
         from unread.bot.confirm import default_options
 
@@ -450,13 +460,30 @@ class BotApp:
         total = len(items)
         if total == 0:
             return
-        for idx, item in enumerate(items, start=1):
-            if panel_msg is not None:
-                with contextlib.suppress(Exception):
-                    await panel_msg.edit(
-                        f"⏳ Running {idx}/{total}: {_burst_item_label(item)}",
-                        buttons=None,
+
+        if total == 1:
+            item = items[0]
+            options = default_options(item.kind, self.settings)
+            async with self._semaphore:
+                try:
+                    await self._run_execute(
+                        item.event,
+                        item.kind,
+                        item.payload,
+                        options,
+                        progress_msg=panel_msg,
                     )
+                except Exception as e:
+                    if _is_clean_exit(e):
+                        return
+                    log.exception("bot.batch.item_failed", kind=item.kind)
+                    await _safe_reply(item.event, f"⚠️ {type(e).__name__}: {e}")
+            return
+
+        from unread.bot.progress import edit_progress
+
+        for idx, item in enumerate(items, start=1):
+            await edit_progress(panel_msg, f"⏳ Running {idx}/{total}: {_burst_item_label(item)}")
             options = default_options(item.kind, self.settings)
             async with self._semaphore:
                 try:
@@ -472,13 +499,118 @@ class BotApp:
                         continue
                     log.exception("bot.batch.item_failed", kind=item.kind, idx=idx)
                     await _safe_reply(item.event, f"⚠️ Item {idx}/{total} failed: {type(e).__name__}: {e}")
-        if panel_msg is not None:
-            with contextlib.suppress(Exception):
-                await panel_msg.edit(f"✓ Finished {total} items.", buttons=None)
+        await edit_progress(panel_msg, f"✓ Finished {total} items.")
+
+    async def _run_forward_action(self, action: str, pending, panel_msg) -> None:
+        """Execute a forward-picker button tap.
+
+        F_FULL → analyze the forwarded message in place. File handler
+        already reads `payload["caption"]` to combine image extract +
+        caption text when both are present.
+        F_TXT  → analyze just the caption / inner text (skip vision).
+        F_DAY/F_WK/F_MO → synthesize a `t.me/c/<channel_id>` ref and
+        dispatch to the TG handler with the matching window override.
+        """
+        from unread.bot.burst import BurstItem
+        from unread.bot.confirm import RunOptions
+
+        items = pending.payload.get("items") or []
+        if not items:
+            return
+        item = items[0]
+        payload = item.payload
+
+        if action == "F_FULL":
+            # Existing burst-separately path handles this perfectly —
+            # the payload already carries `caption` for file.execute to
+            # combine with the image extraction.
+            await self._run_batch_separately(pending, panel_msg)
+            return
+
+        from unread.bot.progress import edit_progress
+
+        if action == "F_TXT":
+            # Synthesize a text-only file payload from the caption (for
+            # media+caption forwards) or from the inner text (for
+            # text-only forwards), then run as a fresh file item.
+            text_content = (payload.get("caption") or payload.get("text") or "").strip()
+            if not text_content:
+                await edit_progress(panel_msg, "✖ Nothing to analyze (no caption).")
+                return
+            text_payload = {
+                "source": "text",
+                "text": text_content,
+                "name": "forwarded",
+            }
+            text_item = BurstItem(kind="file", payload=text_payload, event=item.event)
+            options = RunOptions()
+            async with self._semaphore:
+                try:
+                    await self._run_execute(
+                        text_item.event,
+                        "file",
+                        text_payload,
+                        options,
+                        progress_msg=panel_msg,
+                    )
+                except Exception as e:
+                    if _is_clean_exit(e):
+                        return
+                    log.exception("bot.forward.text_failed")
+                    await _safe_reply(text_item.event, f"⚠️ {type(e).__name__}: {e}")
+            return
+
+        # F_FROM / F_DAY / F_WK / F_MO → open the source channel.
+        channel_id = payload.get("fwd_channel_id")
+        if not channel_id:
+            await edit_progress(panel_msg, "✖ No source channel ID on this forward.")
+            return
+        if not self.user_session_ready:
+            await edit_progress(
+                panel_msg,
+                "I don't have your Telegram user session — needed to read "
+                "private channels. Send `/upload_session` first.",
+            )
+            return
+
+        # F_FROM additionally anchors on the forwarded msg's id in the
+        # source channel — analyze "what was posted from here forward"
+        # without a time window. The other window actions ignore msg id
+        # and apply last_days only.
+        if action == "F_FROM":
+            fwd_msg_id = payload.get("fwd_msg_id")
+            if not fwd_msg_id:
+                await edit_progress(
+                    panel_msg,
+                    "✖ No msg id on this forward — can't anchor 'from this message'.",
+                )
+                return
+            tg_payload = {"url": f"https://t.me/c/{int(channel_id)}/{int(fwd_msg_id)}"}
+            options = RunOptions(tg_window="from_msg")
+        else:
+            window_by_action = {"F_DAY": "1d", "F_WK": "7d", "F_MO": "30d"}
+            tg_payload = {"url": f"https://t.me/c/{int(channel_id)}"}
+            options = RunOptions(tg_window=window_by_action[action])
+
+        async with self._semaphore:
+            try:
+                await self._run_execute(
+                    item.event,
+                    "tg",
+                    tg_payload,
+                    options,
+                    progress_msg=panel_msg,
+                )
+            except Exception as e:
+                if _is_clean_exit(e):
+                    return
+                log.exception("bot.forward.channel_failed", action=action)
+                await _safe_reply(item.event, f"⚠️ {type(e).__name__}: {e}")
 
     async def _run_batch_combined(self, pending, panel_msg) -> None:
         """Concat extracted text from every combinable item → one analyze."""
         from unread.bot.combined import run_combined
+        from unread.bot.progress import edit_progress
 
         items = pending.payload.get("items") or []
         if not items:
@@ -490,9 +622,7 @@ class BotApp:
                 if _is_clean_exit(e):
                     return
                 log.exception("bot.batch.combined_failed")
-                if panel_msg is not None:
-                    with contextlib.suppress(Exception):
-                        await panel_msg.edit(f"⚠️ Combined run failed: {type(e).__name__}: {e}", buttons=None)
+                await edit_progress(panel_msg, f"⚠️ Combined run failed: {type(e).__name__}: {e}")
 
 
 def _burst_item_label(item) -> str:

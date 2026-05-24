@@ -873,6 +873,28 @@ async def cmd_analyze(
             f"{', thread=' + str(thread_id) if thread_id else ''})[/]"
         )
 
+        # For forum chats, the URL's single trailing path id is a
+        # *topic* id, not a message id (Telegram uses identical URL
+        # shapes for both; only the chat type disambiguates). The bot
+        # and CLI both extract that id into `msg` or `from_msg` based
+        # on the caller's window choice. If the chat turned out to be
+        # a forum and no explicit `thread` was passed, promote that
+        # URL-derived id into `thread` so the analysis targets the
+        # right topic instead of trying to fetch a non-existent
+        # message at the topic-creation id.
+        if resolved.kind == "forum" and thread_id == 0:
+            url_path_id = resolved.msg_id
+            if url_path_id:
+                thread_id = int(url_path_id)
+                if msg_id == url_path_id:
+                    msg_id = None
+                if from_msg_id == url_path_id:
+                    from_msg_id = None
+                _status(
+                    f"[grey70]→ Forum chat — treating /{url_path_id} as topic id "
+                    f"(use --msg / --from-msg only with explicit --thread).[/]"
+                )
+
         # `--repeat-last`: load saved kwargs and use them as defaults for
         # everything the user didn't explicitly set on this run. We can't
         # tell "explicit" from "default" perfectly without Typer's source
@@ -1009,7 +1031,10 @@ async def cmd_analyze(
         is_forum = resolved.kind == "forum"
         if is_forum and thread_id == 0 and not all_flat and not all_per_topic:
             # No explicit topic / mode. Decide via interactive picker or bail.
-            all_flat, all_per_topic, thread_id = await _forum_pick_mode(client, chat_id, title)
+            # `yes=True` skips the picker and defaults to all-flat — the bot
+            # always passes yes=True so a forum link doesn't hang on a
+            # terminal prompt the user can't reach.
+            all_flat, all_per_topic, thread_id = await _forum_pick_mode(client, chat_id, title, yes=yes)
 
         if is_forum and all_per_topic:
             await _run_forum_per_topic(
@@ -1801,13 +1826,33 @@ async def _run_forum_per_topic(
             console.print(f"[red]{_tf('topic_failed', title=prepared.thread_title, err=e)}[/]")
 
 
-async def _forum_pick_mode(client, chat_id: int, chat_title: str | None) -> tuple[bool, bool, int]:
-    """Interactively pick a forum mode. Returns (all_flat, all_per_topic, thread_id)."""
+async def _forum_pick_mode(
+    client,
+    chat_id: int,
+    chat_title: str | None,
+    *,
+    yes: bool = False,
+) -> tuple[bool, bool, int]:
+    """Interactively pick a forum mode. Returns (all_flat, all_per_topic, thread_id).
+
+    `yes=True` means "no interactive prompts" — the bot always sets
+    this so a forum link doesn't hang waiting on a terminal picker
+    that can never receive input from the Telegram client. In that
+    case we default to all-flat (analyze the whole forum as one chat)
+    since it's the most useful no-knob behavior.
+    """
     _status(f"[grey70]{_t('listing_forum_topics')}[/]")
     topics = await list_forum_topics(client, chat_id)
     if not topics:
         console.print(f"[yellow]{_t('no_topics_in_forum')}[/]")
         raise typer.Exit(0)
+
+    if yes:
+        console.print(
+            "[grey70]Forum detected — defaulting to all-flat (whole forum as one chat). "
+            "Pass --thread <id> or --all-per-topic to override.[/]"
+        )
+        return (True, False, 0)
 
     if not sys.stdin.isatty():
         _print_topics_table(topics, with_unread=True)

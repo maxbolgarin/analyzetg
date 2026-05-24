@@ -109,11 +109,18 @@ async def _flush_burst(app: BotApp, chat_id: int) -> None:
     within a chat, so this is safe without locks). If the burst was
     cancelled out from under us — items already drained, no items, or
     the chat state vanished — the call is a no-op.
+
+    Single-TG-link bursts get a dedicated choice panel
+    (`build_tg_choice_panel`) instead of the generic batch panel —
+    private-channel users can only address the channel via a msg link,
+    so we ask them up front how much of the channel to pull.
     """
     from unread.bot.confirm import (
         PendingRun,
         RunOptions,
         build_batch_panel,
+        build_forward_choice_panel,
+        build_tg_choice_panel,
     )
 
     chat_state = app._chat_state.get(chat_id)
@@ -126,12 +133,39 @@ async def _flush_burst(app: BotApp, chat_id: int) -> None:
     state.items.clear()
     state.debounce_task = None
 
+    # Telegram albums / media groups arrive as N separate events that
+    # share a `grouped_id`. Collapse them into a single logical item
+    # BEFORE building the panel so a forwarded album shows the forward
+    # picker once instead of a 3-item batch panel.
+    items = merge_album_items(items)
+
     last_event = items[-1].event
+
     # First send the panel with a placeholder ID so the buttons exist;
     # then edit with the real ID once Telethon returns the sent message.
-    text, buttons = build_batch_panel(items=items, panel_msg_id=0)
+    def _render(panel_id: int):
+        if len(items) == 1:
+            item = items[0]
+            # Forward-from-channel takes priority over the generic
+            # batch / tg-link paths — picker offers "analyze this msg"
+            # vs "analyze the source channel" options.
+            if item.payload.get("fwd_channel_id"):
+                return build_forward_choice_panel(
+                    payload=item.payload,
+                    panel_msg_id=panel_id,
+                )
+            if item.kind == "tg":
+                url = item.payload.get("url", "")
+                return build_tg_choice_panel(
+                    url=url,
+                    msg_id=_extract_tg_msg_id(url),
+                    panel_msg_id=panel_id,
+                )
+        return build_batch_panel(items=items, panel_msg_id=panel_id)
+
+    text, buttons = _render(0)
     panel = await last_event.reply(text, buttons=buttons, parse_mode="md")
-    text, buttons = build_batch_panel(items=items, panel_msg_id=panel.id)
+    text, buttons = _render(panel.id)
     with contextlib.suppress(Exception):
         await panel.edit(text, buttons=buttons, parse_mode="md")
 
@@ -144,11 +178,31 @@ async def _flush_burst(app: BotApp, chat_id: int) -> None:
     )
 
 
+# Same regex shape as `unread.bot.handlers.tg._TME_PARSE` — pulled in
+# here to avoid a circular import (tg.py already imports confirm.py).
+import re  # noqa: E402  (top-of-file imports are above)
+
+_TME_MSG_RE = re.compile(
+    r"^https?://(?:t\.me|telegram\.me)/(?:[A-Za-z0-9_]+|c/\d+)/(?P<msg>\d+)/?$",
+    re.IGNORECASE,
+)
+
+
+def _extract_tg_msg_id(url: str) -> str | None:
+    """Return the trailing `/<msg_id>` from a t.me URL, or None."""
+    m = _TME_MSG_RE.match(url)
+    return m.group("msg") if m else None
+
+
 def summary_line(item: BurstItem) -> str:
     """One-line description for the panel's bullet list."""
     if item.kind == "file":
         if item.payload.get("source") == "text":
             return "📄 text message"
+        album_size = item.payload.get("album_size")
+        if album_size:
+            label = "album" if album_size > 1 else "media"
+            return f"📷 {label} ({album_size} items)"
         return f"📄 {item.payload.get('name') or 'file'}"
     if item.kind == "url":
         return f"🌐 {item.payload.get('url', '')}"
@@ -157,6 +211,65 @@ def summary_line(item: BurstItem) -> str:
     if item.kind == "tg":
         return f"💬 {item.payload.get('url', '')}"
     return f"? {item.kind}"
+
+
+def merge_album_items(items: list[BurstItem]) -> list[BurstItem]:
+    """Collapse burst items sharing `grouped_id` into one album item.
+
+    Telegram albums (media groups with a shared caption) are delivered
+    as one `NewMessage` per attachment. The burst's debounce window
+    naturally catches them all because they arrive within ~100ms of
+    each other; this helper then merges them so the panel treats the
+    album as one logical thing.
+
+    The merged item:
+      * uses the first event as `event` (so reply / download anchors
+        to the first attachment),
+      * picks up the caption from whichever member carried it (usually
+        the first, but Telethon doesn't guarantee that),
+      * tags `album_size` for handlers / summary text,
+      * preserves fwd_* metadata from the first item (all members of a
+        forwarded album share the same source channel anyway).
+
+    Non-grouped items pass through unchanged.
+    """
+    from collections import defaultdict
+
+    by_group: dict[int, list[BurstItem]] = defaultdict(list)
+    standalone: list[BurstItem] = []
+    for it in items:
+        gid = it.payload.get("grouped_id")
+        if gid is not None:
+            by_group[int(gid)].append(it)
+        else:
+            standalone.append(it)
+
+    merged: list[BurstItem] = list(standalone)
+    for gid, group in by_group.items():
+        if len(group) == 1:
+            # Single-attachment "album" — unusual but possible. No merging
+            # needed; just drop the grouped_id marker so downstream code
+            # doesn't think there's more to come.
+            merged.append(group[0])
+            continue
+        first = group[0]
+        merged_payload = dict(first.payload)
+        # Caption lives on whichever member sent it. Find the first non-empty.
+        for it in group:
+            cap = (it.payload.get("caption") or "").strip()
+            if cap:
+                merged_payload["caption"] = cap
+                break
+        merged_payload["album_size"] = len(group)
+        merged_payload["grouped_id"] = gid
+        merged.append(
+            BurstItem(
+                kind=first.kind,
+                payload=merged_payload,
+                event=first.event,
+            )
+        )
+    return merged
 
 
 def combinable_items(items: list[BurstItem]) -> list[BurstItem]:

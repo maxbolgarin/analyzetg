@@ -24,6 +24,7 @@ from telethon.tl.types import (
     MessageMediaDocument,
     MessageMediaPhoto,
     MessageMediaWebPage,
+    PeerChannel,
 )
 
 # URL grabber. Intentionally permissive — we re-validate with the
@@ -44,6 +45,9 @@ _BARE_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{5,32}$")
 def classify(event: events.NewMessage.Event) -> tuple[str, dict[str, Any]]:
     """Single-level classifier. Recurses once for forwards."""
     msg = event.message
+    fwd_info = _extract_forward_info(msg)
+    caption = (msg.message or "").strip()
+    grouped_id = _extract_grouped_id(msg)
 
     # `MessageMediaWebPage` is Telegram's auto-generated link preview
     # that fires whenever a user sends a URL — every YouTube / web URL
@@ -52,9 +56,22 @@ def classify(event: events.NewMessage.Event) -> tuple[str, dict[str, Any]]:
     # classifier branch below. Real downloadable media (documents,
     # photos) keep the file branch.
     if msg.media is not None and not isinstance(msg.media, MessageMediaWebPage):
-        return ("file", _classify_media(msg.media))
-
-    text = (msg.message or "").strip()
+        payload = _classify_media(msg.media)
+        # Preserve the caption text — until the forward picker landed,
+        # this was being silently dropped along with anything written
+        # alongside an image. Handlers can now optionally combine the
+        # caption with the media's vision extract.
+        if caption:
+            payload["caption"] = caption
+        if fwd_info:
+            payload.update(fwd_info)
+        # Telegram delivers album / media-group messages as separate
+        # NewMessage events bundled by `grouped_id`. The burst flush
+        # uses this to merge them into one logical item so the user
+        # sees the forward picker (or whatever) once, not N times.
+        if grouped_id is not None:
+            payload["grouped_id"] = grouped_id
+        return ("file", payload)
 
     # Forwarded text-only message: treat the inner text the same way.
     # Telethon exposes the original-sender metadata on `fwd_from` but
@@ -63,10 +80,11 @@ def classify(event: events.NewMessage.Event) -> tuple[str, dict[str, Any]]:
     # arrived directly or as a forward. (Forwards WITH media follow
     # the media branch above and don't reach here.)
 
-    if not text:
+    if not caption:
         # Empty, no media — nothing actionable. Treat as a malformed
         # command so the handler responds with the help text.
         return ("cmd", {"name": "help", "args": [], "raw": ""})
+    text = caption
 
     if text.startswith("/"):
         parts = text[1:].split()
@@ -90,10 +108,50 @@ def classify(event: events.NewMessage.Event) -> tuple[str, dict[str, Any]]:
         return ("url", {"url": url})
 
     # Plain text, no URL, no command — treat as stdin-style file input.
-    return (
-        "file",
-        {"source": "text", "text": text, "name": "stdin"},
-    )
+    # A forwarded text-only message from a channel additionally carries
+    # the source-channel metadata so the burst flush can offer
+    # "analyze the channel" options alongside "analyze this msg".
+    payload: dict[str, Any] = {"source": "text", "text": text, "name": "stdin"}
+    if fwd_info:
+        payload.update(fwd_info)
+    return ("file", payload)
+
+
+def _extract_grouped_id(msg: Any) -> int | None:
+    """Return Telethon's `grouped_id` for album members, else None."""
+    gid = getattr(msg, "grouped_id", None)
+    if gid is None:
+        return None
+    try:
+        return int(gid)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_forward_info(msg: Any) -> dict[str, Any] | None:
+    """Return `{fwd_channel_id, fwd_msg_id, fwd_title}` for channel forwards.
+
+    User-to-user forwards (DM → bot) and anonymous "from name only"
+    forwards return None — neither has a channel we can pull more
+    messages from, so the forward picker has nothing to offer.
+    """
+    fwd = getattr(msg, "fwd_from", None)
+    if fwd is None:
+        return None
+    from_id = getattr(fwd, "from_id", None)
+    if not isinstance(from_id, PeerChannel):
+        return None
+    channel_id = getattr(from_id, "channel_id", None)
+    if not channel_id:
+        return None
+    info: dict[str, Any] = {"fwd_channel_id": int(channel_id)}
+    channel_post = getattr(fwd, "channel_post", None)
+    if channel_post:
+        info["fwd_msg_id"] = int(channel_post)
+    title = (getattr(fwd, "from_name", "") or "").strip()
+    if title:
+        info["fwd_title"] = title
+    return info
 
 
 def _classify_media(media: Any) -> dict[str, Any]:

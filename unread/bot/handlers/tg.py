@@ -23,6 +23,7 @@ import typer
 from telethon import events
 
 from unread.bot.confirm import RunOptions, enrich_csv
+from unread.bot.progress import edit_progress
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -58,41 +59,64 @@ async def execute(
         return
 
     from unread.analyzer.commands import cmd_analyze
-    from unread.bot.handlers.file import _effective_preset
+    from unread.bot.runtime import (
+        effective_preset,
+        effective_report_language,
+        effective_source_language,
+        resolve_options,
+    )
 
     s = get_settings()
     ref = payload["url"]
-    preset = _effective_preset(s, app, event.chat_id)
+    chat_state = app._chat_state.get(event.chat_id) or {}
+    preset = effective_preset(chat_state, s)
+    # Sticky `/window` and `/enrich` defaults get folded into the
+    # picker's per-run choices so a no-tap run uses what the user has
+    # already configured for this chat.
+    options = resolve_options(chat_state=chat_state, settings=s, options=options)
     started = time.time()
 
-    # Parse out a specific msg_id when the link points to a single
-    # message inside a chat — the analyze pipeline uses it as the
-    # window anchor (analyze from that message backward / forward
-    # depending on cmd_analyze's defaults).
-    from_msg: str | None = None
+    # Parsed once, consumed by both the explicit-window branch and the
+    # legacy default branch below.
+    parsed_msg: str | None = None
     if (m := _TME_PARSE.match(ref)) is not None and m.group("msg"):
-        from_msg = m.group("msg")
+        parsed_msg = m.group("msg")
 
-    # Window: when the user pinned a specific message via `t.me/.../<msg>`,
-    # let `cmd_analyze` use that as the anchor and walk from there. For
-    # a bare `@chat` / `t.me/chat` ref, the CLI default "since the read
-    # marker" usually produces nothing for bot users (they typically
-    # read chats on their phone before asking the bot to summarize) —
-    # surface the last N days instead, matching the CLI's
-    # `default_lookback_days` setting.
+    # Window selection priority:
+    #   1. options.tg_window — set by the TG-link choice panel.
+    #   2. legacy default — use msg as from_msg anchor; bare chat
+    #      falls back to `s.sync.default_lookback_days`.
+    msg: str | None = None
+    from_msg: str | None = None
     last_days: int | None = None
-    if from_msg is None:
-        last_days = s.sync.default_lookback_days
+    last_msgs: int | None = None
+
+    window = options.tg_window
+    if window == "msg":
+        msg = parsed_msg
+    elif window == "from_msg":
+        from_msg = parsed_msg
+    elif window == "1d":
+        last_days = 1
+    elif window == "7d":
+        last_days = 7
+    elif window == "30d":
+        last_days = 30
+    else:
+        # Legacy default — preserves today's behavior for bursts
+        # that never touched the choice panel.
+        from_msg = parsed_msg
+        if from_msg is None:
+            last_days = s.sync.default_lookback_days
 
     if progress_msg is None:
         progress_msg = await event.reply(f"⏳ Resolving `{ref}`…")
     else:
-        with contextlib.suppress(Exception):
-            await progress_msg.edit(f"⏳ Resolving `{ref}`…", buttons=None)
+        await edit_progress(progress_msg, f"⏳ Resolving `{ref}`…")
     try:
-        await progress_msg.edit("⏳ Pulling messages…")
+        await edit_progress(progress_msg, _pulling_status(window, parsed_msg))
         language = s.locale.language or "en"
-        report_language = s.locale.report_language or language
+        report_language = effective_report_language(chat_state, s)
 
         # User-toggled enrich kinds become a comma-joined extra list.
         # The CLI's `--enrich a,b,c` semantics mean: turn on a/b/c on
@@ -104,13 +128,13 @@ async def execute(
         await cmd_analyze(
             ref=ref,
             thread=None,
-            msg=None,
+            msg=msg,
             from_msg=from_msg,
             full_history=False,
             since=None,
             until=None,
             last_days=last_days,
-            last_msgs=None,
+            last_msgs=last_msgs,
             preset=preset or None,
             prompt_file=None,
             model=None,
@@ -125,9 +149,9 @@ async def execute(
             yes=True,
             language=language,
             report_language=report_language,
-            source_language=s.locale.content_language or "",
+            source_language=effective_source_language(chat_state, s),
         )
-        await progress_msg.edit("📄 Sending report…")
+        await edit_progress(progress_msg, "📄 Sending report…")
         await _upload_latest_tg_report(event, preset=preset, started=started)
         with contextlib.suppress(Exception):
             await progress_msg.delete()
@@ -138,20 +162,40 @@ async def execute(
         # a friendly status. Non-zero exits surface as warnings.
         code = getattr(e, "exit_code", 0)
         if code == 0:
-            with contextlib.suppress(Exception):
-                await progress_msg.edit(
-                    f"✓ Nothing to analyze in `{ref}` for the requested window. "
-                    "Try a `t.me/<chat>/<msg>` link to anchor on a specific message.",
-                )
+            await edit_progress(
+                progress_msg,
+                f"✓ Nothing to analyze in `{ref}` for the requested window. "
+                "The chat / topic may be quiet — try a longer window "
+                "(Last week / Last month).",
+            )
             return
         log.warning("bot.tg_handler_typer_exit", ref=ref, exit_code=code)
-        with contextlib.suppress(Exception):
-            await progress_msg.edit(f"⚠️ Analyze exited with code {code}.")
+        await edit_progress(progress_msg, f"⚠️ Analyze exited with code {code}.")
     except Exception as e:
         log.exception("bot.tg_handler_failed", ref=ref)
-        with contextlib.suppress(Exception):
-            await progress_msg.edit(f"⚠️ {type(e).__name__}: {e}")
+        await edit_progress(progress_msg, f"⚠️ {type(e).__name__}: {e}")
         raise
+
+
+def _pulling_status(window: str | None, parsed_msg: str | None) -> str:
+    """Status text shown while `cmd_analyze` is pulling messages.
+
+    Translates the chosen window into something concrete the user can
+    read in the chat, instead of a generic "Pulling messages…".
+    """
+    if window == "msg":
+        return f"⏳ Pulling message `{parsed_msg or '?'}`…"
+    if window == "from_msg":
+        return f"⏳ Pulling messages from `{parsed_msg or '?'}` onward…"
+    if window == "1d":
+        return "⏳ Pulling messages from the last day…"
+    if window == "7d":
+        return "⏳ Pulling messages from the last week…"
+    if window == "30d":
+        return "⏳ Pulling messages from the last month…"
+    if parsed_msg:
+        return f"⏳ Pulling messages around `{parsed_msg}`…"
+    return "⏳ Pulling recent messages…"
 
 
 async def _upload_latest_tg_report(

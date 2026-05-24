@@ -10,6 +10,7 @@ import structlog
 from telethon import events
 
 from unread.bot.confirm import RunOptions
+from unread.bot.progress import edit_progress
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -27,11 +28,17 @@ async def execute(
     progress_msg=None,
 ) -> None:
     from unread.bot.handlers.file import _effective_preset
+    from unread.bot.runtime import (
+        effective_language,
+        effective_report_language,
+        effective_source_language,
+    )
     from unread.youtube.commands import cmd_analyze_youtube
     from unread.youtube.urls import extract_video_id
 
     s = get_settings()
     url = payload["url"]
+    chat_state = app._chat_state.get(event.chat_id) or {}
     preset = _effective_preset(s, app, event.chat_id)
     started = time.time()
 
@@ -44,12 +51,11 @@ async def execute(
     if progress_msg is None:
         progress_msg = await event.reply(f"⏳ Pulling transcript for `{video_id}`…")
     else:
-        with contextlib.suppress(Exception):
-            await progress_msg.edit(f"⏳ Pulling transcript for `{video_id}`…", buttons=None)
+        await edit_progress(progress_msg, f"⏳ Pulling transcript for `{video_id}`…")
     try:
-        await progress_msg.edit("⏳ Analyzing video…")
-        language = s.locale.language or "en"
-        report_language = s.locale.report_language or language
+        await edit_progress(progress_msg, "⏳ Analyzing video…")
+        language = effective_language(chat_state, s)
+        report_language = effective_report_language(chat_state, s)
         await cmd_analyze_youtube(
             url=url,
             preset=preset or None,
@@ -68,11 +74,11 @@ async def execute(
             post_saved=False,
             language=language,
             report_language=report_language,
-            source_language=s.locale.content_language or "",
+            source_language=effective_source_language(chat_state, s),
             youtube_source=options.youtube_source or "auto",
             yes=True,
         )
-        await progress_msg.edit("📄 Sending report…")
+        await edit_progress(progress_msg, "📄 Sending report…")
         from unread.bot import reply
 
         await reply.send_youtube_report(event, preset=preset, started=started, hint=video_id)
@@ -80,6 +86,5 @@ async def execute(
             await progress_msg.delete()
     except Exception as e:
         log.exception("bot.youtube_handler_failed", url=url)
-        with contextlib.suppress(Exception):
-            await progress_msg.edit(f"⚠️ {type(e).__name__}: {e}")
+        await edit_progress(progress_msg, f"⚠️ {type(e).__name__}: {e}")
         raise

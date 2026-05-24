@@ -21,12 +21,52 @@ from telethon import Button
 
 from unread.config import Settings
 
-# Actions for callback-data encoding. Single char keeps the payload
-# comfortably under Telegram's 64-byte cap.
-#   R = run single (legacy — pre-burst path)
-#   A = run all separately (one report per burst item)
-#   M = run merged / combined (concat extracted text, single report)
-_ACTIONS = frozenset({"R", "A", "M"})
+# Actions for callback-data encoding. Telegram caps callback data at
+# 64 bytes — well within reach even with 5-char action names.
+#   R     = run single (used by single-item burst panel)
+#   A     = run all separately (one report per burst item)
+#   M     = run merged / combined (concat text → single report)
+#   T_ONE = TG link: analyze just this one message
+#   T_FRM = TG link: analyze from this message (cmd_analyze --from-msg)
+#   T_DAY = TG link: last 1 day
+#   T_WK  = TG link: last 7 days
+#   T_MO  = TG link: last 30 days
+_ACTIONS = frozenset(
+    {
+        "R",
+        "A",
+        "M",
+        "T_ONE",
+        "T_FRM",
+        "T_DAY",
+        "T_WK",
+        "T_MO",
+        # Forward-picker actions (single forwarded msg from a channel):
+        "F_FULL",  # analyze the forwarded msg as-is (image + caption / image only / text)
+        "F_TXT",  # analyze only the caption / inner text — skip vision
+        "F_FROM",  # open the source channel and analyze from this msg onward
+        "F_DAY",  # analyze the SOURCE CHANNEL — last 1 day
+        "F_WK",  # — last 7 days
+        "F_MO",  # — last 30 days
+    }
+)
+
+# Action → `RunOptions.tg_window` value the callback handler should
+# stamp before kicking off `_run_batch_separately`. None for the
+# generic Run/A/M actions; only the T_* actions touch tg_window.
+_TG_WINDOW_BY_ACTION: dict[str, str] = {
+    "T_ONE": "msg",
+    "T_FRM": "from_msg",
+    "T_DAY": "1d",
+    "T_WK": "7d",
+    "T_MO": "30d",
+}
+
+
+def tg_window_for_action(action: str) -> str | None:
+    """Public lookup the callback handler uses to translate a tap → window."""
+    return _TG_WINDOW_BY_ACTION.get(action)
+
 
 # Kind → preset name that `cmd_analyze*` would fall back to if the
 # caller passes `preset=None`. Mirrors the `preset or "<name>"` lines
@@ -52,8 +92,14 @@ class RunOptions:
     """Per-run knobs the confirm panel exposes.
 
     Only fields meaningful for the kind in question are populated:
-    YouTube uses `youtube_source`; TG uses the `enrich_*` flags. File
-    and URL ignore all of them today.
+    YouTube uses `youtube_source`; TG uses the `enrich_*` flags plus
+    `tg_window`. File and URL ignore all of them today.
+
+    `tg_window` is set by the TG-link choice panel — one of
+    `"msg" | "from_msg" | "1d" | "7d" | "30d"`. `tg.execute` reads it
+    to override the default lookback (which today uses
+    `s.sync.default_lookback_days`). When None, the legacy default
+    applies.
     """
 
     youtube_source: str | None = None
@@ -61,6 +107,7 @@ class RunOptions:
     enrich_doc: bool = False
     enrich_link: bool = False
     enrich_video: bool = False
+    tg_window: str | None = None
 
 
 @dataclass
@@ -214,6 +261,97 @@ def _enabled_enrich_labels(options: RunOptions) -> list[str]:
     if options.enrich_video:
         out.append("video")
     return out
+
+
+def build_forward_choice_panel(
+    *,
+    payload: dict,
+    panel_msg_id: int,
+) -> tuple[str, list[list[Any]]]:
+    """Picker shown when a single forwarded-from-channel message arrives.
+
+    Layout depends on what the forward carries:
+      * media + caption  → [Full] [Caption only]   + [Channel · day/week/month]
+      * media, no caption → [This image]            + [Channel · day/week/month]
+      * text only         → [This message]          + [Channel · day/week/month]
+
+    Caller must have detected `payload["fwd_channel_id"]` before
+    calling — that's what makes the channel-window options meaningful
+    (otherwise there's no source channel to pull more from).
+    """
+    title = payload.get("fwd_title") or "channel"
+    text = f"↩ **Forwarded from {title}**\nWhat to analyze?"
+
+    rows: list[list[Any]] = []
+    has_media = payload.get("source") == "media"
+    has_caption = bool(payload.get("caption"))
+    has_text = payload.get("source") == "text"
+    has_fwd_msg_id = bool(payload.get("fwd_msg_id"))
+
+    # Row 1 — analyze the forwarded message itself.
+    if has_media and has_caption:
+        rows.append(
+            [
+                Button.inline("🖼 Image + caption", encode_callback("F_FULL", panel_msg_id)),
+                Button.inline("📝 Caption only", encode_callback("F_TXT", panel_msg_id)),
+            ]
+        )
+    elif has_media:
+        rows.append([Button.inline("🖼 This media", encode_callback("F_FULL", panel_msg_id))])
+    elif has_text:
+        rows.append([Button.inline("📝 This message", encode_callback("F_FULL", panel_msg_id))])
+
+    # Row 2 — open the source channel from this anchor message. Only
+    # shown when Telegram gave us the channel-post id; otherwise the
+    # bot has no anchor to walk forward from.
+    if has_fwd_msg_id:
+        rows.append([Button.inline("📜 From this msg in channel", encode_callback("F_FROM", panel_msg_id))])
+
+    # Row 3 — time-window picks on the source channel.
+    rows.append(
+        [
+            Button.inline("💬 Channel · day", encode_callback("F_DAY", panel_msg_id)),
+            Button.inline("💬 Channel · week", encode_callback("F_WK", panel_msg_id)),
+            Button.inline("💬 Channel · month", encode_callback("F_MO", panel_msg_id)),
+        ]
+    )
+    return text, rows
+
+
+def build_tg_choice_panel(
+    *,
+    url: str,
+    msg_id: str | None,
+    panel_msg_id: int,
+) -> tuple[str, list[list[Any]]]:
+    """Picker shown when a single TG link arrives in a burst.
+
+    A private-channel `t.me/c/<id>/<msg>` link is often the only handle
+    the user has on the channel — the msg id is just an incidental
+    locator. This panel lets them pick what "many messages" means
+    instead of defaulting to "just this message" (today's behavior).
+
+    When the URL has no msg id (bare `@username` / `t.me/<chan>`), the
+    "this message" and "from this message" options are hidden — only
+    the time-window choices apply.
+    """
+    text = f"💬 **Telegram link**: {url}\nHow much to analyze?"
+    rows: list[list[Any]] = []
+    if msg_id is not None:
+        rows.append(
+            [
+                Button.inline("📌 Just this msg", encode_callback("T_ONE", panel_msg_id)),
+                Button.inline("📜 From this msg", encode_callback("T_FRM", panel_msg_id)),
+            ]
+        )
+    rows.append(
+        [
+            Button.inline("📅 Last day", encode_callback("T_DAY", panel_msg_id)),
+            Button.inline("📅 Last week", encode_callback("T_WK", panel_msg_id)),
+            Button.inline("📅 Last month", encode_callback("T_MO", panel_msg_id)),
+        ]
+    )
+    return text, rows
 
 
 def build_batch_panel(

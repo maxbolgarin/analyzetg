@@ -177,13 +177,33 @@ def _pick_best_match(candidates: list[Path], *, hint: str, preset: str) -> Path 
     return candidates[0]
 
 
+# Reports under this many chars don't get a PDF attachment — they're
+# small enough that the TL;DR (or the whole body when there's no
+# TL;DR) is the report. A typical short-report shape is `## TL;DR`
+# + `## Sources` + `## Verification` boilerplate, which fits well
+# inside this budget; longer analyses with real section content stay
+# above it.
+_SMALL_REPORT_THRESHOLD_CHARS = 1500
+
+
+def _is_small_report(md_text: str) -> bool:
+    """True iff the report is tiny enough that a PDF attachment is overkill."""
+    return len(md_text) < _SMALL_REPORT_THRESHOLD_CHARS
+
+
 async def _upload_with_caption(
     event: events.NewMessage.Event,
     report: Path,
     *,
     started: float,
 ) -> None:
-    """Send the TL;DR inline + the full report as PDF (or .md fallback)."""
+    """Send the TL;DR inline + the full report as PDF (or .md fallback).
+
+    Tiny reports (under `_SMALL_REPORT_THRESHOLD_CHARS` of markdown)
+    skip the PDF entirely — there's nothing in the body the TL;DR
+    didn't already cover. The cost / elapsed caption rides along with
+    the inline message instead of the PDF caption.
+    """
     elapsed = max(0.0, time.time() - started)
     caption = await _build_caption(started, elapsed)
     try:
@@ -191,6 +211,10 @@ async def _upload_with_caption(
     except OSError:
         log.exception("bot.report_read_failed", report=str(report))
         await event.reply(f"⚠️ Analysis done but report unreadable. {caption}")
+        return
+
+    if _is_small_report(md_text):
+        await _send_inline_only(event, md_text, caption)
         return
 
     # Step 1: TL;DR inline. Phone clients render Telegram MarkdownV1
@@ -202,6 +226,35 @@ async def _upload_with_caption(
     # `[bot]` extras are present; raw `.md` otherwise so the operator
     # still gets something even on a minimal install.
     await _send_full_report(event, report=report, md_text=md_text, caption=caption)
+
+
+async def _send_inline_only(
+    event: events.NewMessage.Event,
+    md_text: str,
+    caption: str,
+) -> None:
+    """One text reply with TL;DR (or whole body) + cost caption appended.
+
+    Used for tiny reports where a PDF attachment would carry no extra
+    information. Falls back to plain text if markdown rendering
+    chokes on stray characters in the LLM output.
+    """
+    tldr = extract_tldr(md_text)
+    body = tldr if tldr else md_text.strip()
+    # Telegram caps text messages at 4096 chars. The threshold gating
+    # this path keeps us well under that, but cap defensively in case
+    # a future preset emits an oversized TL;DR.
+    if len(body) > 3500:
+        body = body[:3500].rsplit(" ", 1)[0] + " …"
+    text = f"**TL;DR**\n\n{body}\n\n_{caption}_" if tldr else f"{body}\n\n_{caption}_"
+    try:
+        await event.reply(text, parse_mode="md")
+    except Exception:
+        log.warning("bot.small_report.md_failed", exc_info=True)
+        try:
+            await event.reply(f"{body}\n\n{caption}")
+        except Exception:
+            log.exception("bot.small_report.send_failed")
 
 
 async def _send_tldr(event: events.NewMessage.Event, md_text: str) -> None:

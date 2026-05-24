@@ -23,6 +23,7 @@ import structlog
 from telethon import events
 
 from unread.bot.confirm import RunOptions
+from unread.bot.progress import edit_progress
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -54,33 +55,64 @@ async def execute(
     if progress_msg is None:
         progress_msg = await event.reply("⏳ Working…")
     else:
-        with contextlib.suppress(Exception):
-            await progress_msg.edit("⏳ Working…", buttons=None)
+        await edit_progress(progress_msg, "⏳ Working…")
     started = time.time()
     tmp_dir = _make_tmp_dir()
     try:
         local_path = await _materialize_input(event, payload, tmp_dir, app=app, s=s)
         if local_path is None:
             return  # _materialize_input has already replied with the reason.
-        preset = _effective_preset(s, app, event.chat_id)
-        await progress_msg.edit(f"⏳ Analyzing `{local_path.name}`…")
-        await _dispatch_analyze_file(local_path, preset=preset, s=s)
-        await progress_msg.edit("📄 Sending report…")
+
+        # When the bot received a forwarded photo + caption (or any
+        # media + caption), combine the image's vision extract with
+        # the caption text before analyzing. Otherwise the caption
+        # gets silently dropped — the file path only sees the raw
+        # media.
+        caption = (payload.get("caption") or "").strip()
+        combined_to_text = False
+        if caption and payload.get("source") == "media":
+            await edit_progress(progress_msg, f"⏳ Extracting `{local_path.name}` + caption…")
+            local_path = await _combine_media_with_caption(local_path, caption=caption, tmp_dir=tmp_dir)
+            # `_combine_media_with_caption` may have folded the image
+            # vision-extract into a `.txt`. Track that so the report
+            # lookup goes to reports/files/text/, not reports/files/<original kind>/.
+            combined_to_text = local_path.suffix.lower() == ".txt"
+
+        from unread.bot.runtime import effective_preset_for_kind
+
+        chat_state = app._chat_state.get(event.chat_id) or {}
+        # Smart default: a single file/voice/image is one document, not a
+        # discussion — fall through to `single_msg` instead of "summary"
+        # when no sticky / config preset is set.
+        preset = effective_preset_for_kind(chat_state, s, "file")
+        await edit_progress(progress_msg, f"⏳ Analyzing `{local_path.name}`…")
+        await _dispatch_analyze_file(local_path, preset=preset, s=s, chat_state=chat_state)
+        await edit_progress(progress_msg, "📄 Sending report…")
         from unread.bot import reply
+
+        # cmd_analyze_file writes the report under reports/files/<kind>/,
+        # where <kind> is detected from the actual file extension. When
+        # we combined media+caption into a .txt above, the report lives
+        # under reports/files/text/ regardless of the original media kind.
+        if combined_to_text:
+            report_kind = "text"
+        elif payload.get("source") == "media":
+            report_kind = payload.get("kind", "text")
+        else:
+            report_kind = "text"
 
         await reply.send_file_report(
             event,
             local_path=local_path,
             preset=preset,
             started=started,
-            kind=payload.get("kind", "text") if payload.get("source") == "media" else "text",
+            kind=report_kind,
         )
         with contextlib.suppress(Exception):
             await progress_msg.delete()
     except Exception as e:
         log.exception("bot.file_handler_failed")
-        with contextlib.suppress(Exception):
-            await progress_msg.edit(f"⚠️ {type(e).__name__}: {e}")
+        await edit_progress(progress_msg, f"⚠️ {type(e).__name__}: {e}")
         raise
     finally:
         with contextlib.suppress(Exception):
@@ -149,17 +181,77 @@ async def _materialize_input(
 
 
 # ----------------------------------------------------------------------
+# Caption-aware extraction (forwarded media + text)
+# ----------------------------------------------------------------------
+
+
+async def _combine_media_with_caption(local_path: Path, *, caption: str, tmp_dir: Path) -> Path:
+    """Extract text from `local_path`, prepend a caption section, write to .txt.
+
+    Used when a forwarded message arrived with media + caption. The
+    raw image / pdf / video alone would lose the caption text; passing
+    a combined `.txt` to `cmd_analyze_file` keeps both in the analysis.
+
+    Falls back to the original media path if extraction fails — better
+    to analyze the media alone than to error out.
+    """
+    from unread.files.extractors import (
+        detect_kind,
+        extract_audio,
+        extract_docx,
+        extract_image,
+        extract_pdf,
+        extract_text,
+        extract_video,
+    )
+
+    try:
+        kind = detect_kind(local_path)
+        if kind == "image":
+            extracted = (await extract_image(local_path)).text
+        elif kind == "audio":
+            extracted = (await extract_audio(local_path)).text
+        elif kind == "video":
+            extracted = (await extract_video(local_path)).text
+        elif kind == "pdf":
+            extracted = extract_pdf(local_path).text
+        elif kind == "docx":
+            extracted = extract_docx(local_path).text
+        elif kind == "text":
+            extracted = extract_text(local_path).text
+        else:
+            log.warning("bot.combine_caption.unknown_kind", path=str(local_path))
+            return local_path
+    except Exception:
+        log.exception("bot.combine_caption.extract_failed", path=str(local_path))
+        return local_path
+
+    combined_path = tmp_dir / f"{local_path.stem}_with_caption.txt"
+    combined_path.write_text(
+        f"# Caption\n\n{caption.strip()}\n\n# Media content\n\n{extracted.strip()}\n",
+        encoding="utf-8",
+    )
+    return combined_path
+
+
+# ----------------------------------------------------------------------
 # Pipeline call
 # ----------------------------------------------------------------------
 
 
-async def _dispatch_analyze_file(local_path: Path, *, preset: str, s) -> None:
+async def _dispatch_analyze_file(local_path: Path, *, preset: str, s, chat_state: dict | None = None) -> None:
     """Invoke `cmd_analyze_file` with bot-appropriate defaults."""
+    from unread.bot.runtime import (
+        effective_language,
+        effective_report_language,
+        effective_source_language,
+    )
     from unread.files.commands import cmd_analyze_file
 
-    language = s.locale.language or "en"
-    report_language = s.locale.report_language or language
-    source_language = s.locale.content_language or ""
+    cs = chat_state or {}
+    language = effective_language(cs, s)
+    report_language = effective_report_language(cs, s)
+    source_language = effective_source_language(cs, s)
 
     await cmd_analyze_file(
         ref=str(local_path),

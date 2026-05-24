@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from unread.bot.progress import edit_progress
 from unread.config import get_settings
 
 if TYPE_CHECKING:
@@ -50,18 +51,15 @@ async def run_combined(
     skipped: list[tuple[str, str]] = []  # (label, reason)
     started = time.time()
 
-    if panel_msg is not None:
-        with contextlib.suppress(Exception):
-            await panel_msg.edit("⏳ Fetching sources…", buttons=None)
+    await edit_progress(panel_msg, "⏳ Fetching sources…")
 
     sections: list[str] = []
     try:
         total = len(items)
         for idx, item in enumerate(items, start=1):
             label = _label_of(item)
-            if panel_msg is not None and total > 1:
-                with contextlib.suppress(Exception):
-                    await panel_msg.edit(f"⏳ Fetching {idx}/{total}: {label}", buttons=None)
+            if total > 1:
+                await edit_progress(panel_msg, f"⏳ Fetching {idx}/{total}: {label}")
             try:
                 text = await _extract_text(item, s=s, tmp_dir=tmp_dir, app=app)
             except _Unsupported as e:
@@ -79,9 +77,7 @@ async def run_combined(
             if skipped:
                 detail = "\n".join(f"  • {lbl}: {why}" for lbl, why in skipped)
                 msg += f"\n\nSkipped:\n{detail}"
-            if panel_msg is not None:
-                with contextlib.suppress(Exception):
-                    await panel_msg.edit(msg, buttons=None)
+            await edit_progress(panel_msg, msg)
             return
 
         combined_path = tmp_dir / "combined.txt"
@@ -93,18 +89,12 @@ async def run_combined(
             bytes=combined_path.stat().st_size,
         )
 
-        if panel_msg is not None:
-            note = ""
-            if skipped:
-                note = f" (skipped {len(skipped)})"
-            with contextlib.suppress(Exception):
-                await panel_msg.edit(f"⏳ Analyzing combined text…{note}", buttons=None)
+        note = f" (skipped {len(skipped)})" if skipped else ""
+        await edit_progress(panel_msg, f"⏳ Analyzing combined text from {len(sections)} sources…{note}")
 
         await _analyze_combined_file(combined_path, s=s, app=app, chat_id=original_event.chat_id)
 
-        if panel_msg is not None:
-            with contextlib.suppress(Exception):
-                await panel_msg.edit("📄 Sending report…", buttons=None)
+        await edit_progress(panel_msg, "📄 Sending report…")
 
         from unread.bot import reply
 
