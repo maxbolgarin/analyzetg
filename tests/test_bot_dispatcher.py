@@ -175,6 +175,110 @@ def test_classify_tme_link_with_link_preview_is_tg():
     assert kind == "tg"
 
 
+# ----------------------------------------------------------------------
+# Forwarded-from-channel metadata + caption preservation
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class _FakeFwd:
+    """Stand-in for `MessageFwdHeader`. Only the fields classify reads."""
+
+    from_id: Any = None
+    channel_post: int | None = None
+    from_name: str | None = None
+
+
+def test_classify_forwarded_photo_preserves_caption_and_channel_id():
+    """A forwarded photo with caption + PeerChannel.from_id → file payload
+    carries the caption AND the source channel/msg id."""
+    from telethon.tl.types import MessageMediaPhoto, PeerChannel
+
+    media = MessageMediaPhoto.__new__(MessageMediaPhoto)
+    peer = PeerChannel.__new__(PeerChannel)
+    peer.channel_id = 3853386994
+    fwd = _FakeFwd(from_id=peer, channel_post=81, from_name="BullTrading")
+    ev = _FakeEvent(_FakeMessage(message="caption body", media=media, fwd_from=fwd))
+    kind, payload = classify(ev)
+    assert kind == "file"
+    assert payload["source"] == "media"
+    assert payload["kind"] == "image"
+    assert payload["caption"] == "caption body"
+    assert payload["fwd_channel_id"] == 3853386994
+    assert payload["fwd_msg_id"] == 81
+    assert payload["fwd_title"] == "BullTrading"
+
+
+def test_classify_forwarded_text_from_channel_carries_fwd_info():
+    from telethon.tl.types import PeerChannel
+
+    peer = PeerChannel.__new__(PeerChannel)
+    peer.channel_id = 111
+    fwd = _FakeFwd(from_id=peer, channel_post=42, from_name="NewsChan")
+    ev = _FakeEvent(_FakeMessage(message="some forwarded text", fwd_from=fwd))
+    kind, payload = classify(ev)
+    assert kind == "file"
+    assert payload["source"] == "text"
+    assert payload["text"] == "some forwarded text"
+    assert payload["fwd_channel_id"] == 111
+    assert payload["fwd_msg_id"] == 42
+
+
+def test_classify_forwarded_from_user_has_no_fwd_info():
+    """User→user forwards (DM forward) don't carry a channel — no extra metadata."""
+    from telethon.tl.types import PeerUser
+
+    peer = PeerUser.__new__(PeerUser)
+    peer.user_id = 999
+    fwd = _FakeFwd(from_id=peer, from_name="Friend")
+    ev = _FakeEvent(_FakeMessage(message="hello", fwd_from=fwd))
+    kind, payload = classify(ev)
+    assert kind == "file"
+    assert payload["source"] == "text"
+    assert "fwd_channel_id" not in payload
+
+
+def test_classify_photo_without_caption_no_caption_key():
+    """No caption → no `caption` key in payload (avoids empty-string ambiguity)."""
+    from telethon.tl.types import MessageMediaPhoto
+
+    media = MessageMediaPhoto.__new__(MessageMediaPhoto)
+    ev = _FakeEvent(_FakeMessage(message="", media=media))
+    _kind, payload = classify(ev)
+    assert "caption" not in payload
+
+
+def test_classify_album_member_carries_grouped_id():
+    """Telegram albums: each photo arrives as a separate event with
+    shared `grouped_id`. Dispatcher must surface it so the burst can
+    merge album members into one logical item."""
+    from telethon.tl.types import MessageMediaPhoto
+
+    media = MessageMediaPhoto.__new__(MessageMediaPhoto)
+
+    @dataclass
+    class _GroupedMsg:
+        message: str = ""
+        media: Any = None
+        fwd_from: Any = None
+        grouped_id: int = 0
+
+    msg = _GroupedMsg(message="album caption", media=media, grouped_id=42)
+    ev = _FakeEvent(msg)
+    _kind, payload = classify(ev)
+    assert payload["grouped_id"] == 42
+    assert payload["caption"] == "album caption"
+
+
+def test_classify_non_album_msg_has_no_grouped_id_key():
+    from telethon.tl.types import MessageMediaPhoto
+
+    media = MessageMediaPhoto.__new__(MessageMediaPhoto)
+    ev = _FakeEvent(_FakeMessage(message="", media=media))
+    _kind, payload = classify(ev)
+    assert "grouped_id" not in payload
+
+
 @pytest.mark.parametrize(
     "name, mime, expected_kind",
     [
