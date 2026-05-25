@@ -7,26 +7,25 @@
 # Or, with the script downloaded locally:
 #   bash scripts/install-bot.sh
 #
-# Runs in two phases — run it twice end-to-end.
-#
-# Phase 1 (first run, no ~/.unread/install.toml yet):
+# What this does, in order:
 #   1. Installs uv (single static binary; manages its own Python 3.11+).
 #   2. Installs system deps (ffmpeg, libpango — the latter is needed by
 #      weasyprint for PDF report rendering, which is now a base feature).
 #   3. `uv tool install unread` — isolated tool venv, `unread` on PATH.
-#   4. Stops with a banner asking you to run `unread init` yourself.
-#      (That command is interactive — AI provider menu, Telegram creds
-#      prompt, Telethon phone-code login. Driving it through the install
-#      script's stdin reassignment is unreliable across CLI versions.)
-#
-# Phase 2 (re-run, ~/.unread/install.toml now exists):
+#   4. Runs `unread init` interactively — AI provider menu, Telegram
+#      credentials prompt, Telethon phone-code login. Stdin is
+#      reassigned to /dev/tty up front so this works under `curl | bash`.
+#      If `unread init` exits non-zero (older CLI versions had a bug
+#      where this step bailed out instead of prompting), the script
+#      prints a clear recovery hint and exits — re-running after
+#      `unread init` is done picks up from there.
 #   5. Prompts for the bot's `@BotFather` token, writes it to `~/.unread/.env`.
 #   6. Drops a `systemd --user` unit that auto-restarts on crash + survives
 #      logout (enables linger for the current user).
 #
 # Idempotent: re-running skips steps that already succeeded. Pass
 # `--reset` to wipe `~/.unread/` first (warning: deletes reports + session).
-# Pass `--skip-init` to bypass the Phase 1/2 split entirely when
+# Pass `--skip-init` to bypass the `unread init` step when
 # `~/.unread/.env` is pre-provisioned via Ansible / SCP.
 
 set -euo pipefail
@@ -262,47 +261,47 @@ export PATH="$HOME/.local/bin:$PATH"
 ok "unread installed: $(unread --version 2>/dev/null || echo 'installed')"
 
 # ---------------------------------------------------------------------------
-# 4. unread init  (manual — see comment below)
+# 4. unread init
 #
-# This step doesn't run `unread init` for the user. Instead, when the
-# install hasn't been initialized yet, we pause here and ask them to
-# run it themselves in a separate session. Reasons:
+# Interactive wizard — AI provider menu, Telegram credentials,
+# Telethon phone-code login. Stdin is already reassigned to /dev/tty
+# at the top of this script so `curl | bash` runs work too.
 #
-#   * `unread init` is interactive — it walks AI provider menus,
-#     Telegram credential prompts, and a Telethon phone-code login.
-#     Embedding that under the script's stdin reassignment can break
-#     in subtle ways (some PyPI versions of `unread init` bail with
-#     "Missing: TELEGRAM_API_ID / TELEGRAM_API_HASH" instead of
-#     prompting — depends on cli-version-specific guard ordering).
-#   * Running `unread init` directly in the user's terminal always
-#     works: regular TTY, regular env, no surprises.
-#
-# Once `~/.unread/install.toml` is on disk (which `unread init`
-# writes at the end of the folder-pick step), re-running this script
-# auto-detects that and skips straight to the bot-token / systemd
-# steps below. Idempotent + safe to re-run.
+# Older PyPI versions (≤0.1.0) had a bug where this exited non-zero
+# with "Missing: TELEGRAM_API_ID / TELEGRAM_API_HASH" instead of
+# prompting. We detect that, print a clear recovery hint, and exit
+# cleanly so the user can run `unread init` manually then re-run us.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_INIT" == "0" ]] && [[ ! -f "$HOME/.unread/install.toml" ]]; then
-  cat <<EOF
+  step "Running 'unread init' — set up AI provider + Telegram credentials + user session"
+  # Disable -e for this single call so we can recover from a non-zero
+  # exit instead of dropping the user back at the shell with no hint.
+  set +e
+  unread init
+  init_rc=$?
+  set -e
+  if [[ "$init_rc" -ne 0 ]] || [[ ! -f "$HOME/.unread/install.toml" ]]; then
+    cat <<EOF
 
 ${C_YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}
-${C_YELLOW}Next step: run \`unread init\` manually in this terminal.${C_RST}
+${C_YELLOW}\`unread init\` didn't complete (exit ${init_rc}, no install.toml written).${C_RST}
 
-That command walks the AI-provider + Telegram-credentials + user-session
-setup wizard. We don't embed it in this script because it's interactive
-and can't be reliably driven through the install pipeline.
+This usually means you're on an older PyPI release that bails out of
+the wizard early. Run it directly in this terminal — that always works:
 
   ${C_DIM}\$${C_RST} unread init
 
-When it finishes (you'll see ${C_GREEN}~/.unread/install.toml${C_RST} written), come back
-and re-run this script to finish the bot-token + systemd-service setup:
+When it finishes (you'll see ${C_GREEN}~/.unread/install.toml${C_RST} written), re-run
+this installer to finish the bot-token + systemd-service setup:
 
   ${C_DIM}\$${C_RST} ./scripts/install-bot.sh
 
 The re-run will skip everything that's already done.
 ${C_YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}
 EOF
-  exit 0
+    exit 0
+  fi
+  ok "unread init completed."
 else
   ok "Skipping init (~/.unread/install.toml exists or --skip-init)"
 fi
