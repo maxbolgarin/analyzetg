@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/maxbolgarin/unread/compare/v1.0.0...v1.0.1) (2026-05-25)
+
+### 📚 Documentation
+
+* **readme:** fix wordmark image paths and polish copy ([c9c4df9](https://github.com/maxbolgarin/unread/commit/c9c4df9dc32a41a05f5582c276686bde0d75ec2e))
+* **readme:** use absolute raw GitHub URLs for images so PyPI renders ([4b48d50](https://github.com/maxbolgarin/unread/commit/4b48d50dd8c5e7918be234031bc467604f2d7243))
+
 ## 1.0.0 (2026-05-25)
 
 ### 🚀 Features
