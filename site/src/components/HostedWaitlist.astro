@@ -1,0 +1,200 @@
+---
+import { HOSTED_WAITLIST_FORMSPREE_ID, AUTHOR_EMAIL } from '../consts';
+
+const hasFormspree = HOSTED_WAITLIST_FORMSPREE_ID.length > 0;
+const action = hasFormspree
+  ? `https://formspree.io/f/${HOSTED_WAITLIST_FORMSPREE_ID}`
+  : `mailto:${AUTHOR_EMAIL}?subject=${encodeURIComponent('unread hosted — interested')}&body=${encodeURIComponent("I'd like to know when a hosted unread is available.\n\nName (optional):\nUse case (optional):\n")}`;
+---
+<section id="hosted" class="hosted">
+  <div class="container hosted-inner">
+    <header>
+      <h2>Want a hosted version — no install, no API keys?</h2>
+      <p class="lead">
+        <code>unread</code> is open source and local-first. If you'd rather have a
+        managed version with the same pipeline — without installing anything,
+        wiring up Telegram, or bringing your own LLM key — leave your email.
+        We'll write only when it's ready, and only once.
+      </p>
+    </header>
+
+    <form
+      class="waitlist-form"
+      action={action}
+      method={hasFormspree ? 'POST' : 'GET'}
+      enctype={hasFormspree ? 'application/x-www-form-urlencoded' : undefined}
+      data-formspree={hasFormspree ? 'true' : 'false'}
+      novalidate
+    >
+      <label class="visually-hidden" for="waitlist-email">Email address</label>
+      <input
+        id="waitlist-email"
+        type="email"
+        name="email"
+        placeholder="you@example.com"
+        autocomplete="email"
+        required
+      />
+      <input
+        type="text"
+        name="_gotcha"
+        tabindex="-1"
+        autocomplete="off"
+        aria-hidden="true"
+      />
+      <input type="hidden" name="_subject" value="unread hosted — waitlist signup" />
+      <input type="hidden" name="source" value="landing-hosted-cta" />
+      <button type="submit" class="btn btn-primary">
+        Notify me
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+      </button>
+    </form>
+
+    <p class="status" role="status" aria-live="polite" data-status hidden></p>
+
+    <ul class="reassure">
+      <li>No spam, no marketing list — one email, when there's something to announce.</li>
+      <li>If you'd rather just stay local, <a href="#quickstart">install the CLI</a> — it's free and offline-friendly.</li>
+    </ul>
+  </div>
+</section>
+
+<script>
+  const form = document.querySelector('.waitlist-form');
+  if (form instanceof HTMLFormElement && form.dataset.formspree === 'true') {
+    const status = document.querySelector('[data-status]');
+    const submit = form.querySelector('button[type="submit"]');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!(status instanceof HTMLElement) || !(submit instanceof HTMLButtonElement)) return;
+      status.hidden = false;
+      status.textContent = 'Sending…';
+      status.dataset.state = 'pending';
+      submit.disabled = true;
+      try {
+        const response = await fetch(form.action, {
+          method: 'POST',
+          headers: { Accept: 'application/json' },
+          body: new FormData(form),
+        });
+        if (response.ok) {
+          status.textContent = 'Thanks — you\'re on the list. We\'ll be in touch.';
+          status.dataset.state = 'success';
+          form.reset();
+        } else {
+          const data = await response.json().catch(() => ({}));
+          const msg = data?.errors?.[0]?.message ?? 'Something went wrong. Try again or email mxbolgarin@gmail.com.';
+          status.textContent = msg;
+          status.dataset.state = 'error';
+        }
+      } catch {
+        status.textContent = 'Network error. Try again or email mxbolgarin@gmail.com.';
+        status.dataset.state = 'error';
+      } finally {
+        submit.disabled = false;
+      }
+    });
+  }
+</script>
+
+<style>
+  .hosted {
+    padding: 4rem 0;
+    border-top: 1px solid var(--border);
+  }
+  .hosted-inner {
+    max-width: 720px;
+    margin: 0 auto;
+    text-align: center;
+  }
+  header { margin-bottom: 1.6rem; }
+  h2 {
+    font-size: clamp(1.8rem, 3vw, 2.3rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.7rem;
+  }
+  .lead {
+    color: var(--fg-muted);
+    font-size: 1.05rem;
+    line-height: 1.65;
+    margin: 0 auto;
+    max-width: 60ch;
+  }
+  .lead code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+    font-size: 0.88em;
+    color: var(--fg);
+  }
+
+  .waitlist-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    justify-content: center;
+    margin: 1.6rem auto 0.9rem;
+    max-width: 480px;
+  }
+  .waitlist-form input[type="email"] {
+    flex: 1 1 240px;
+    min-width: 0;
+    padding: 0.7rem 0.95rem;
+    border-radius: 9px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elev);
+    color: var(--fg);
+    font-size: 0.98rem;
+    font-family: inherit;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .waitlist-form input[type="email"]::placeholder { color: var(--fg-dim); }
+  .waitlist-form input[type="email"]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .waitlist-form input[name="_gotcha"] {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+  .waitlist-form .btn { flex: 0 0 auto; }
+
+  .status {
+    margin: 0 auto 1rem;
+    font-size: 0.92rem;
+    color: var(--fg-muted);
+    min-height: 1.2em;
+  }
+  .status[data-state="success"] { color: var(--accent-strong); }
+  .status[data-state="error"] { color: #f87171; }
+
+  .reassure {
+    list-style: none;
+    margin: 0.5rem auto 0;
+    padding: 0;
+    color: var(--fg-dim);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    max-width: 56ch;
+  }
+  .reassure li + li { margin-top: 0.25rem; }
+  .reassure a { color: var(--fg-muted); border-bottom: 1px dotted var(--border-strong); }
+  .reassure a:hover { color: var(--accent); border-color: var(--accent); }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+  }
+</style>

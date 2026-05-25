@@ -18,6 +18,12 @@ export const PYPI_URL = 'https://pypi.org/project/unread/';
 export const LICENSE_URL = 'https://github.com/maxbolgarin/unread/blob/main/LICENSE';
 export const VERSION = '0.1.1';
 
+// Formspree form ID for the hosted-version waitlist.
+// Create a form at https://formspree.io/forms and paste the ID
+// (the suffix after /f/ in the action URL, e.g. "abcdwxyz").
+// Empty string disables the form and renders a mailto: fallback.
+export const HOSTED_WAITLIST_FORMSPREE_ID = 'mzdwalqv';
+
 export const NAV: { label: string; href: string }[] = [
   { label: 'Docs', href: `${BASE}/docs/` },
   { label: 'Install', href: `${BASE}/docs/install/` },
