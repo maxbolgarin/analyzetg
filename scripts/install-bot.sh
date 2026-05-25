@@ -318,8 +318,13 @@ if grep -qE '^UNREAD_BOT_TOKEN=.+' "$ENV_PATH"; then
   ok "UNREAD_BOT_TOKEN already set in ~/.unread/.env"
 else
   step "Bot token (from @BotFather)"
+  printf "%sIf Enter does nothing (you see ^M), press Ctrl-J to submit.%s\n" "$C_DIM" "$C_RST"
   printf "Paste your bot token: "
   read -r BOT_TOKEN
+  # Strip stray CR / surrounding whitespace a paste over SSH can leave behind.
+  BOT_TOKEN="${BOT_TOKEN//$'\r'/}"
+  BOT_TOKEN="${BOT_TOKEN#"${BOT_TOKEN%%[![:space:]]*}"}"
+  BOT_TOKEN="${BOT_TOKEN%"${BOT_TOKEN##*[![:space:]]}"}"
   if [[ -z "$BOT_TOKEN" ]]; then
     err "Empty token — aborting. Re-run when you have one from @BotFather."
     exit 1
