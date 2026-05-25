@@ -72,7 +72,8 @@ What it does:
 3. **`uv tool install unread`** — isolated tool venv; `unread` on PATH.
 4. **`unread init`** — interactive wizard for AI provider + Telegram
    credentials + user-session login (you'll get a phone code from
-   Telegram).
+   Telegram). Stdin is reassigned to `/dev/tty` at the top of the
+   script so this works under `curl | bash`.
 5. **Bot token prompt** — paste the token from
    [@BotFather](https://t.me/botfather); appended to `~/.unread/.env`
    with mode `0600`.
@@ -83,6 +84,11 @@ What it does:
 
 Re-run anytime — idempotent: skips uv/ffmpeg if present, keeps existing
 `~/.unread/` config, only re-prompts for the bot token when missing.
+
+**If `unread init` exits non-zero** (older PyPI releases had a wizard
+that bailed in some env states), the script prints a clear hint and
+exits. Run `unread init` directly in your terminal — that always works
+— then re-run the installer to pick up at the bot-token step.
 
 ### Flags
 
