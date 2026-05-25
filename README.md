@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark/wordmark-ondark.png">
-    <img alt="unread" src="docs/assets/wordmark/wordmark-onlight.png" width="320">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/maxbolgarin/unread/main/docs/assets/wordmark/wordmark-ondark.png">
+    <img alt="unread" src="https://raw.githubusercontent.com/maxbolgarin/unread/main/docs/assets/wordmark/wordmark-onlight.png" width="320">
   </picture>
 </p>
 <p align="center"><em>Read your Telegram unread. Without reading it.</em></p>
@@ -43,7 +43,7 @@ recorded meetings, podcasts, PDFs, and stdin. Or run it as a
 self-hosted Telegram bot and forward anything weird at it — see
 [Self-hosted Telegram bot](#self-hosted-telegram-bot) below.
 
-![unread analyzing a Telegram channel into a Markdown report](.github/examples/analyze-example.gif)
+![unread analyzing a Telegram channel into a Markdown report](https://raw.githubusercontent.com/maxbolgarin/unread/main/.github/examples/analyze-example.gif)
 
 ## What it does
 
@@ -228,7 +228,7 @@ you get a Markdown summary back as a document, with cost and timing
 in the caption.
 
 <p align="center">
-  <img src=".github/examples/bot.jpg" alt="Bot replying with a voice-message summary, attaching the PDF report" width="320">
+  <img src="https://raw.githubusercontent.com/maxbolgarin/unread/main/.github/examples/bot.jpg" alt="Bot replying with a voice-message summary, attaching the PDF report" width="320">
 </p>
 
 Single-user by design: the bot only answers ONE Telegram ID. The
