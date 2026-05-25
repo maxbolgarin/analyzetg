@@ -52,6 +52,7 @@ Three verbs. The same `<ref>` shape works on all of them.
 - `unread <ref>` — **analyze**. Map-reduce the source into a Markdown report. Every claim links back to its message / paragraph / timestamp.
 - `unread ask <ref> "Q"` — **ask**. One-shot Q&A with citations. Multi-turn follow-ups are one keystroke away.
 - `unread dump <ref>` — **dump**. Save the original — chat history, transcript, article — verbatim. No LLM call.
+- `unread tg` — **telegram**. Interactive picker for Telegram chats.
 
 `<ref>` is any of:
 
@@ -114,13 +115,32 @@ falls back to Whisper if the video has none. Every citation in the
 report becomes a `t=SECONDS` deep link, so clicking jumps you to that
 moment of the video.
 
-```bash
-unread https://www.youtube.com/watch?v=Pmd6knanPKw # analyze 30 mins of podcast
-unread https://www.youtube.com/watch?v=SBEtiXnLtpw --report-language de   # DE report from random old russian lecture
-unread ask https://youtube.com/watch\?v\=k1njvbBmfsw "from what timecode should i start watching if i want to know about RAG?"
-unread dump https://www.youtube.com/watch?v=BDqvzFY72mg --mode=transcript # save transcript only
+#### Analyze 30 mins of podcast:
 
+```bash
+unread https://www.youtube.com/watch?v=Pmd6knanPKw 
 ```
+
+#### Analyze a random old russian lecture with german report:
+
+```bash
+unread https://www.youtube.com/watch?v=SBEtiXnLtpw --report-language de
+```
+
+#### Ask a question about the video:
+
+> from what timecode should i start watching if i want to know about RAG?
+
+```bash
+unread ask https://youtube.com/watch\?v\=k1njvbBmfsw "from what timecode should i start watching if i want to know about RAG?"
+```
+
+#### Save the transcript only:
+
+```bash
+unread dump https://www.youtube.com/watch?v=BDqvzFY72mg --mode=transcript
+```
+
 
 Cached after the first run. Re-asking a question about the same video
 costs only the answer call — no yt-dlp, no Whisper, no re-spend.
@@ -186,6 +206,7 @@ unread "https://paulgraham.com/greatwork.html"          # any web page
 unread ./meeting.mp3                                    # any local file
 unread @somegroup --last-days 7                         # last week of a chat
 unread doctor                                           # confirm everything works
+unread help                                           # show help
 ```
 
 No virtualenv to activate, no `pip` conflicts, no global Python
