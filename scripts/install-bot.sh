@@ -103,6 +103,31 @@ fi
 
 step "Detected OS: ${OS:-macOS} (pkg manager: $PKG)"
 
+# On macOS we lean on Homebrew for ffmpeg + pango. Confirm it's
+# reachable from this shell — Apple Silicon puts brew at
+# /opt/homebrew/bin/brew which isn't always on PATH for non-login
+# shells, so probe known locations and prepend to PATH if found.
+# Bail early with the install URL if still missing — beats dying
+# mid-pipe with a confusing `brew: command not found`.
+if [[ "$PKG" == "brew" ]] && ! command -v brew >/dev/null 2>&1; then
+  for brew_candidate in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew; do
+    if [[ -x "$brew_candidate" ]]; then
+      eval "$("$brew_candidate" shellenv)"
+      break
+    fi
+  done
+fi
+if [[ "$PKG" == "brew" ]] && ! command -v brew >/dev/null 2>&1; then
+  err "Homebrew not installed (or not on PATH)."
+  err "Install it from https://brew.sh first:"
+  err '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+  err "Or, if brew IS installed but not on PATH, add it:"
+  err '  eval "$(/opt/homebrew/bin/brew shellenv)"   # Apple Silicon'
+  err '  eval "$(/usr/local/bin/brew shellenv)"      # Intel'
+  err "Then re-run this script."
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Sudo discovery — install steps that touch system packages may need it.
 # ---------------------------------------------------------------------------
@@ -191,10 +216,25 @@ fi
 # ---------------------------------------------------------------------------
 # 2. System deps (ffmpeg + libpango)
 # ---------------------------------------------------------------------------
-step "Installing system deps (ffmpeg + libpango)"
-# shellcheck disable=SC2086
-pkg_install $(runtime_packages)
-ok "System deps in place."
+step "Checking system deps (ffmpeg + libpango)"
+# `ffmpeg` we can probe via PATH. `libpango` is a shared lib so we
+# can't `command -v` it — assume present once it's been installed
+# (idempotent re-runs just no-op on already-installed packages anyway).
+NEEDS_INSTALL=0
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  NEEDS_INSTALL=1
+fi
+# On a fresh re-run, also assume libpango is missing if `ffmpeg` is
+# missing (they install together). When ffmpeg is present but libpango
+# isn't, weasyprint imports fail at runtime — the bot's PDF helper
+# catches that and falls back to .md, so it's a soft failure.
+if [[ "$NEEDS_INSTALL" == "1" ]]; then
+  # shellcheck disable=SC2086
+  pkg_install $(runtime_packages)
+  ok "System deps installed."
+else
+  ok "ffmpeg already present: $(ffmpeg -version 2>/dev/null | head -n1)"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. unread via uv tool
