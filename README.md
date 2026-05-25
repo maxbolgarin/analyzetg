@@ -1,10 +1,10 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark/wordmark-ondark.png">
-    <img alt="unread" src="assets/wordmark/wordmark-onlight.png" width="320">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark/wordmark-ondark.png">
+    <img alt="unread" src="docs/assets/wordmark/wordmark-onlight.png" width="320">
   </picture>
 </p>
-<p align="center"><em>Read your unread. Without reading it.</em></p>
+<p align="center"><em>Read your Telegram unread. Without reading it.</em></p>
 
 <p align="center">
   <a href="https://pypi.org/project/unread/"><img src="https://img.shields.io/pypi/v/unread.svg" alt="PyPI"></a>
@@ -21,7 +21,7 @@
 </p>
 
 > A local CLI that turns Telegram chats, YouTube videos, web pages,
-> and files into Markdown reports with citations — using whichever LLM
+> and files into reports with citations — using whichever LLM
 > you keep an API key for.
 
 ---
@@ -37,7 +37,7 @@ unread @somegroup --last-days 7
 ```
 
 It pulls the chat, runs it through whichever LLM you keep an API key
-for, and hands you a Markdown report with clickable citations back to
+for, and hands you a report with clickable citations back to
 every claim. Same shape for YouTube videos, web pages, voice messages,
 recorded meetings, podcasts, PDFs, and stdin. Or run it as a
 self-hosted Telegram bot and forward anything weird at it — see
@@ -52,7 +52,6 @@ Three verbs. The same `<ref>` shape works on all of them.
 - `unread <ref>` — **analyze**. Map-reduce the source into a Markdown report. Every claim links back to its message / paragraph / timestamp.
 - `unread ask <ref> "Q"` — **ask**. One-shot Q&A with citations. Multi-turn follow-ups are one keystroke away.
 - `unread dump <ref>` — **dump**. Save the original — chat history, transcript, article — verbatim. No LLM call.
-- `unread tg` — **telegram**. Interactive picker for Telegram chats.
 
 `<ref>` is any of:
 
@@ -67,6 +66,8 @@ cat notes.txt | unread                       # Stdin
 ## Telegram in any language
 
 This is the bit you actually want.
+
+Use `unread tg` to analyze any yours chats with interactive picker.
 
 Source language and report language are independent. The chat can be in
 Russian, the report in English. Or English source → Spanish report. Or
@@ -141,7 +142,6 @@ unread ask https://youtube.com/watch\?v\=k1njvbBmfsw "from what timecode should 
 unread dump https://www.youtube.com/watch?v=BDqvzFY72mg --mode=transcript
 ```
 
-
 Cached after the first run. Re-asking a question about the same video
 costs only the answer call — no yt-dlp, no Whisper, no re-spend.
 
@@ -169,9 +169,9 @@ video circles are transcribed, photos are described, the analysis
 treats them as text. Forward a voice across five chats — Whisper runs
 once, cached by Telegram's stable `document_id`.
 
-Whisper is roughly **$0.006 per minute of audio**. A 30-minute podcast
-costs less than two cents. Re-running on the same file is free (cache
-hit). The full kind matrix and cache rules are in
+Whisper is roughly $0.006 per minute of audio. A 30-minute podcast costs under twenty cents. Re-running on the same file is free when it hits the cache.
+
+The full kind matrix and cache rules are in
 [`docs/sources.md#media-enrichment`](docs/sources.md#media-enrichment).
 
 ## Bring your own model
@@ -286,6 +286,7 @@ provider-agnostic — and now I open Telegram a lot less.
 ## The boring but real bits
 
 - **Local-first.** SQLite under `~/.unread/`. Your messages, embeddings, analyses, and secrets stay on your disk. The only network calls are to Telegram, your chosen AI provider, and any URLs you point at.
+- **Security.** Your API keys, Telegram session, and other secrets can be encrypted at rest. You can use your OS keychain (default) or passphrase to unlock the CLI.
 - **Citations on every claim.** Reports link back to the source message / paragraph / timestamp. `--cite-context N` expands citations into `<details>` blocks with surrounding context, so the report is auditable without re-opening Telegram.
 - **Two-layer cache.** Local analysis cache (re-running an unchanged chat is free) + the AI provider's prompt cache (server-side discount on repeated prefixes). `unread cache stats` shows the hit rate.
 - **Cost guardrails.** `--max-cost 0.50` aborts or confirms before you spend more than that. `--dry-run` estimates without calling the model. `unread stats` shows lifetime spend by chat / preset / day.
